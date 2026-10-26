@@ -1,7 +1,7 @@
 #+title: orgasmic task TASK-C9V29.2
 #+orgasmic_version: 2
 
-* BACKLOG TASK-C9V29.2 infer-decisions: surface + confirm, then create decision nodes :bootstrap:
+* CANCELLED TASK-C9V29.2 infer-decisions: surface + confirm, then create decision nodes :bootstrap:
 :PROPERTIES:
 :UID:              1e5a7bd5-2f07-5244-a332-620442aa4ea1
 :ID:               TASK-C9V29.2

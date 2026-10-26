@@ -1,7 +1,7 @@
 #+title: orgasmic task TASK-C9V29.3
 #+orgasmic_version: 2
 
-* BACKLOG TASK-C9V29.3 migrate-instructions: relocate tacit knowledge into .orgasmic :bootstrap:
+* CANCELLED TASK-C9V29.3 migrate-instructions: relocate tacit knowledge into .orgasmic :bootstrap:
 :PROPERTIES:
 :UID:              8e2d9823-0540-50ce-af0a-1e7524cbfb6e
 :ID:               TASK-C9V29.3

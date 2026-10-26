@@ -1,0 +1,18 @@
+#+title: orgasmic journal TASK-C9V29
+#+orgasmic_version: 2
+
+* tx-20261026-theaspirationalzulip_mcp-a41be627-2d44-4ec3-a594-884ecf30aaae task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261026-theaspirationalzulip_mcp-a41be627-2d44-4ec3-a594-884ecf30aaae
+:TIME:    [2026-10-26 Mon 21:41:54]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-C9V29
+:TARGET: .orgasmic/tasks/TASK-C9V29/node.org
+:REASON: bootstrap scaffold not used
+:FROM_STATE: backlog
+:TO_STATE: cancelled
+:EVENT_ID: f53027a6-d872-4381-b88c-a55fdf93c055
+:END:

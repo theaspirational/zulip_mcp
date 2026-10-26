@@ -1,7 +1,7 @@
 #+title: orgasmic task TASK-C9V29
 #+orgasmic_version: 2
 
-* BACKLOG TASK-C9V29 Bootstrap orgasmic: populate .orgasmic/ from this repo :bootstrap:
+* CANCELLED TASK-C9V29 Bootstrap orgasmic: populate .orgasmic/ from this repo :bootstrap:
 :PROPERTIES:
 :UID:              2875c31f-4b24-5233-ba5d-0fc6933e6461
 :ID:               TASK-C9V29
