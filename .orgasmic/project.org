@@ -1,0 +1,14 @@
+#+title: theaspirational.zulip_mcp
+#+orgasmic_version: 2
+
+* PROJECT theaspirational.zulip_mcp
+:PROPERTIES:
+:PROJECT_UID:         9dcae6c7-6e79-433f-b07e-6e530eaf0dad
+:ID:                  theaspirational.zulip_mcp
+:END:
+
+** Mission
+[Describe the project's goal in 2–4 sentences.]
+
+** Operating Constraints
+[Project-specific constraints injected into every worker prompt.]
