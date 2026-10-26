@@ -1,0 +1,19 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-5MPHR
+#+orgasmic_version: 2
+
+* BACKLOG TASK-5MPHR edit_message ignores message_id
+:PROPERTIES:
+:UID: 4b554a99-2ec0-5701-b349-508373a2474e
+:ID: TASK-5MPHR
+:PRIORITY: P3
+:END:
+
+** Description
+zulip-mcp `edit_message` ignores `message_id`: returns success with `ignored_parameters_unsupported: message_id`, the edit never applies. Seen on two builds (reported 10-15 and 10-26) by a Lynx agent maintainer. Probably a parameter-name mismatch with the Zulip API; source not checked yet. Workaround in use: post a new message. Scheduled for the repo-updates phase (after the installer and the agents' move to the new installer shape).
+** Acceptance Criteria
+- [ ] locate the edit_message parameter mapping in this repo at the pinned commit
+- [ ] fix with a test that the edit applies (or a proper error when it cannot)
+- [ ] fix on the fork; upstream PR per fork rules (public push needs the owner's go)
+
+(Moved from the private coordinator task TASK-HSEEH. This ledger is PUBLIC: no private paths, approvals or secrets here.)

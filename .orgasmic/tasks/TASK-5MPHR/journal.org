@@ -1,0 +1,17 @@
+#+title: orgasmic journal TASK-5MPHR
+#+orgasmic_version: 2
+
+* tx-20261026-theaspirationalzulip_mcp-efda227f-81f3-494e-bb5f-5c958cb2ffa8 task.created
+:PROPERTIES:
+:TX_ID:   tx-20261026-theaspirationalzulip_mcp-efda227f-81f3-494e-bb5f-5c958cb2ffa8
+:TIME:    [2026-10-26 Mon 21:42:17]
+:TYPE:    task.created
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5MPHR
+:TARGET: .orgasmic/tasks/TASK-5MPHR/node.org
+:REASON: created task TASK-5MPHR
+:EVENT_ID: b47e046f-a79a-4a49-90f4-121dba4c10e5
+:REQUEST_REPLAY_V1: {"request_id":"tarn-zulip-edit-moved-1/tx","mutation":{"operation":"task.created","project_id":"theaspirational.zulip_mcp","payload_sha256":"bb608c2446adc7e1314fa1c68244ef64d543afb58f89e1e5cea184f88b568f2c"},"mutation_id":"TASK-5MPHR","written_paths":[{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-5MPHR/node.org"},{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-5MPHR/journal.org"}]}
+:END:
