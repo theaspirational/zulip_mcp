@@ -1,0 +1,26 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-HCP5S
+#+orgasmic_version: 2
+
+* BACKLOG TASK-HCP5S Incoming message text loses content between < and > (upstream #34)
+:PROPERTIES:
+:UID: 7d8c7666-f31d-530f-a74d-a908af261517
+:ID: TASK-HCP5S
+:PRIORITY: P3
+:END:
+
+** Description
+Upstream issue: https://github.com/antra-tess/zulip_mcp/issues/34
+
+Incoming message text loses everything between `<` and `>` (it is treated as markup and stripped), so content such as comparisons in specifications silently changes meaning when an agent reads it.
+
+Known workaround: fetch history with `format: "raw"`.
+
+Plan: track the upstream issue first; adopt the upstream fix in the repository-update phase (alongside TASK-5MPHR). Design our own fix only if upstream has no fix by then.
+
+This ledger is public: no private sources, names or message ids here.
+
+** Acceptance
+- Text containing `<`/`>` (e.g. `a < b and c > d`, `<tag>`) arrives unchanged in incoming message delivery and in history/thread output in the default format.
+- Regression test covering both paths.
+- Upstream issue state checked and linked when the fix lands.

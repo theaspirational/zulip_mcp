@@ -1,0 +1,33 @@
+#+title: orgasmic journal TASK-5SWYC
+#+orgasmic_version: 2
+
+* tx-20261027-theaspirationalzulip_mcp-ed93b00d-510c-4d2b-b423-b6ad18fcc10b task.created
+:PROPERTIES:
+:TX_ID:   tx-20261027-theaspirationalzulip_mcp-ed93b00d-510c-4d2b-b423-b6ad18fcc10b
+:TIME:    [2026-10-27 Tue 12:55:36]
+:TYPE:    task.created
+:ACTOR:   alnold
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5SWYC
+:TARGET: .orgasmic/tasks/TASK-5SWYC/node.org
+:REASON: created task TASK-5SWYC
+:EVENT_ID: f045a0da-7c88-401d-aac9-5058ea09bfe9
+:REQUEST_REPLAY_V1: {"request_id":"alnold-zulipmcp-34-tracking-1/tx","mutation":{"operation":"task.created","project_id":"theaspirational.zulip_mcp","payload_sha256":"4fedc728e2630b188a51ca3bfda9ed34924280c59fd19abdf9db2f1619014114"},"mutation_id":"TASK-5SWYC","written_paths":[{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-5SWYC/node.org"},{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-5SWYC/journal.org"}]}
+:END:
+
+* tx-20261027-theaspirationalzulip_mcp-5c33a4f4-bfca-4312-9f81-2e837bfb7099 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261027-theaspirationalzulip_mcp-5c33a4f4-bfca-4312-9f81-2e837bfb7099
+:TIME:    [2026-10-27 Tue 12:55:43]
+:TYPE:    task.state_transitioned
+:ACTOR:   alnold
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5SWYC
+:TARGET: .orgasmic/tasks/TASK-5SWYC/node.org
+:REASON: Duplicate of TASK-HCP5S, filed concurrently by Tarn; TASK-HCP5S is canonical. Cancelled by its author, Alnold.
+:FROM_STATE: backlog
+:TO_STATE: cancelled
+:EVENT_ID: e9240eb0-6ca7-4a3f-9ba0-b24eb6612a6d
+:END:

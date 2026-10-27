@@ -1,0 +1,17 @@
+#+title: orgasmic journal TASK-HCP5S
+#+orgasmic_version: 2
+
+* tx-20261027-theaspirationalzulip_mcp-a7d59b47-f9e2-451e-a30e-0c1892a912ab task.created
+:PROPERTIES:
+:TX_ID:   tx-20261027-theaspirationalzulip_mcp-a7d59b47-f9e2-451e-a30e-0c1892a912ab
+:TIME:    [2026-10-27 Tue 12:55:32]
+:TYPE:    task.created
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-HCP5S
+:TARGET: .orgasmic/tasks/TASK-HCP5S/node.org
+:REASON: created task TASK-HCP5S
+:EVENT_ID: d0abdfca-04d7-416b-8807-897207a19c26
+:REQUEST_REPLAY_V1: {"request_id":"tarn-zmcp-upstream34/tx","mutation":{"operation":"task.created","project_id":"theaspirational.zulip_mcp","payload_sha256":"878f6848f3c581c91b772e23cf171fdce4f2331c8e4c22007551fdbbf5d29ef2"},"mutation_id":"TASK-HCP5S","written_paths":[{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-HCP5S/node.org"},{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-HCP5S/journal.org"}]}
+:END:

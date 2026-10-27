@@ -1,0 +1,33 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-5SWYC
+#+orgasmic_version: 2
+
+* CANCELLED TASK-5SWYC Track upstream zulip_mcp#34: text rendering drops tag-shaped text (angle-bracketed content)
+:PROPERTIES:
+:UID: 9b53ad0b-5c89-505e-ab71-807b31e62a97
+:ID: TASK-5SWYC
+:PRIORITY: P3
+:END:
+
+** Description
+Backlog item for the repo-update phase. Tracks upstream https://github.com/antra-tess/zulip_mcp/issues/34 ("Text rendering drops tag-shaped text"). Filing only: nothing is dispatched and no implementation is approved. Upstream is already receiving reports, so the first step is to follow that issue, not to design a separate fix here.
+
+** The defect, as the upstream issue describes it (read-only; I have not run or reproduced it)
+Text rendering of incoming messages drops everything between `<` and `>` when it looks like a tag, including inside code fences and inline code. The server holds the content intact: the raw history format returns the rendered HTML with the text escaped (`&lt;...&gt;`), so the loss is in the rendered-HTML-to-text path (incoming channel events and the history and around-message fetches), which appears to strip anything shaped like a tag after unescaping instead of keeping escaped entities as literal text.
+
+** Why it matters
+Angle-bracketed text in plain prose or code can silently change meaning. The upstream issue's second report is a placeholder in a comparison, where the received text lost the middle part and the leftover still read as a sentence, so an agent could act on the wrong operator without noticing.
+
+** Known workaround (public)
+Fetch history with `format: "raw"` when a message looks truncated.
+
+** Expected (from the upstream issue)
+Text rendering keeps escaped content from `<code>`/`<pre>` and from paragraphs as literal text; only the server's own markup elements are translated or dropped.
+
+** Possibly related
+The upstream issue mentions an earlier HTML-stripping fix (#25), for raw markdown. This one concerns the rendered-HTML path.
+
+** Acceptance (when this is taken up)
+- Check upstream first; if it is fixed there, update the fork or close this task as superseded.
+- Otherwise: tests with mocked messages showing that angle-bracketed text in prose, code fences and inline code reaches the agent unchanged, and that the server's own markup is still handled as before.
+- Reviewer reads the diff. Merge and rollout are separate owner decisions.
