@@ -78,3 +78,35 @@
 :TO_STATE: in_progress
 :EVENT_ID: 361a8593-62ff-45e2-9d60-0443727b5358
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-49b86703-72f0-47c4-a557-203590398228 comment
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-49b86703-72f0-47c4-a557-203590398228
+:TIME:    [2026-10-28 Wed 16:01:50]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5MPHR
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: 08097d6d-615f-4216-b5db-8cc0c412e38b
+:END:
+
+Landed: fork main fafaeef8664c5765dbc7e6863b26f6911c1ac900 (ff from e5c4b4c). Upstream PR https://github.com/antra-tess/zulip_mcp/pull/36 from fix/edit-message-request. Round 3 (two review LOWs) manager-verified: npm test 275 pass / 0 fail / 1 skip.
+
+* tx-20261028-theaspirationalzulip_mcp-51dcb90a-a5d7-40f0-a7e8-a6e7ca2b7600 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-51dcb90a-a5d7-40f0-a7e8-a6e7ca2b7600
+:TIME:    [2026-10-28 Wed 16:01:57]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5MPHR
+:TARGET: .orgasmic/tasks/TASK-5MPHR/node.org
+:REASON: fork main fafaeef8664c5765dbc7e6863b26f6911c1ac900; PR antra-tess/zulip_mcp#36; reviews approve (opus[1m] x2); npm test 275/0/1
+:FROM_STATE: in_review
+:TO_STATE: done
+:EVENT_ID: ea931cf2-3cd6-4c98-a2cb-88f0a99308cf
+:END:
