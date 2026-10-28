@@ -47,3 +47,19 @@
 :TO_STATE: in_progress
 :EVENT_ID: 92ee55fc-0459-49c5-8417-0af7b34ffd1a
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-227a2968-a289-4344-9602-0f707658ea46 comment
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-227a2968-a289-4344-9602-0f707658ea46
+:TIME:    [2026-10-28 Wed 16:02:34]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-HCP5S
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: dab269b4-455d-4269-930f-35648709ec5f
+:END:
+
+Investigation run run-01M61KTPG36222VX8FT6P3ZPFC (blocked): the reported loss does not reproduce in this repository at e5c4b4c01c63c100f5671fef86f74b23c72bbdcb. cleanContent strips markup first, then decodes entities (src/content.ts:267-271); incoming events, fetch_history and fetch_around use raw Markdown (apply_markdown false), not the HTML path. 9 probe groups pass on base. src/content.ts is identical at 4276f8b3. Next: find where the text is lost downstream of the connector, or get a sanitized reproducer.

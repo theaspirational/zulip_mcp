@@ -803,3 +803,37 @@
 :ACKED_BY:     member:tarn2
 :EVENT_ID:     1f6171dc-1495-431a-9e54-a9b28a5a4a03
 :END:
+
+* TX 2026-10-28 Wed 16:02:34 manager.dispatch_aborted TASK-HCP5S
+:PROPERTIES:
+:TX_ID:        tx-20261028-theaspirationalzulip_mcp-f5423238-391b-406d-aa76-2f94155e600c
+:TIME:         [2026-10-28 Wed 16:02:34]
+:TYPE:         manager.dispatch_aborted
+:ACTOR:        orgasmic
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:TASK:         TASK-HCP5S
+:REASON:       Blocked: #34 does not reproduce in zulip_mcp at e5c4b4c (or 4276f8b3, same content.ts); strip-then-decode order is correct; incoming/fetch paths use raw markdown
+:CLOSED_TX:    tx-20261028-theaspirationalzulip_mcp-9eef1f58-290b-4f90-bd96-66d23f28026e
+:WORKTREE:     ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-hcp5s
+:CLEANUP_STATUS: ok
+:REPORT_PATH:  .orgasmic/tasks/TASK-HCP5S/dispatches/tx-20261028-theaspirationalzulip_mcp-9eef1f58-290b-4f90-bd96-66d23f28026e/report.md
+:LIFECYCLE_FROM: in_progress
+:LIFECYCLE_TO: todo
+:EVENT_ID:     9bdcf125-b821-42b0-adb2-a260384ce5e5
+:RELEASES_CLAIM_RUN: run-01M61KTPG36222VX8FT6P3ZPFC
+:END:
+
+* TX 2026-10-28 Wed 16:02:39 dispatch.outcomes_acked theaspirational.zulip_mcp
+:PROPERTIES:
+:TX_ID:        tx-20261028-theaspirationalzulip_mcp-0911bc0f-dc49-40fa-b9d6-f9edbe869353
+:TIME:         [2026-10-28 Wed 16:02:39]
+:TYPE:         dispatch.outcomes_acked
+:ACTOR:        tarn2
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:REASON:       acknowledged 1 outcome(s)
+:OUTCOME_IDS:  9bdcf125-b821-42b0-adb2-a260384ce5e5
+:ACKED_BY:     member:tarn2
+:EVENT_ID:     624c180d-4411-4456-affd-7006540b7b9b
+:END:
