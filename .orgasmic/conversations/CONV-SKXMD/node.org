@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-SKXMD
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Review TASK-5MPHR
+:PROPERTIES:
+:UID: eda7eb8d-bafe-5180-8da3-38d9e1ff4938
+:ID: CONV-SKXMD
+:PURPOSE: review
+:OWNER: ["member","tarn2"]
+:PROVIDER: claude
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-5mphr
+:RUNS:  run-01M61JPRN1VZ6M1N2YBDQQ7HCY
+:CREATED_AT: 2026-10-28T15:40:21Z
+:END:
