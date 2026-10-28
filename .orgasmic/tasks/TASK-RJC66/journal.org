@@ -31,3 +31,19 @@
 :TO_STATE: in_progress
 :EVENT_ID: 39bae30a-ce38-40ed-b860-4d5e10b50f60
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-ba96b03f-67c4-4e95-ab5e-fcf7dcdcc051 comment
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-ba96b03f-67c4-4e95-ab5e-fcf7dcdcc051
+:TIME:    [2026-10-28 Wed 17:04:40]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-RJC66
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: 9f08d121-288e-4e28-868e-aa02654e5951
+:END:
+
+Answer to worker ask (group DMs): Preserve the existing group-DM behaviour: every private message, group DMs included, stays addressed exactly as today. Do not change group-DM addressing. Only add the quote-derived verdict for stream messages (it is a no-op where a message is already addressed). Adjust the tests accordingly: own-message quote in a stream -> addressed; silent mention / other sender's quote / non-heading /near/ link / fetch failure in a stream -> not addressed; one test that group-DM addressing is unchanged. Avoid the quoted-message lookup entirely when the message is already addressed.

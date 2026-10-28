@@ -927,3 +927,18 @@
 :TIMEOUT_SECS: 1800
 :EVENT_ID:     e32b6729-f517-4b63-a462-fea3d53f9ebf
 :END:
+
+* TX 2026-10-28 Wed 17:04:39 run.answered TASK-RJC66
+:PROPERTIES:
+:TX_ID:        tx-20261028-theaspirationalzulip_mcp-ff43165a-3cd1-42af-8054-33dedd3343ad
+:TIME:         [2026-10-28 Wed 17:04:39]
+:TYPE:         run.answered
+:ACTOR:        tarn2
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:TASK:         TASK-RJC66
+:REASON:       Preserve the existing group-DM behaviour: every private message, group DMs included, stays addressed exactly as today. Do not change group-DM addressing. Only add the quote-derived verdict for stream messages (it is a no-op where a message is already addressed). Adjust the tests accordingly: own-message quote in a stream -> addressed; silent mention / other sender's quote / non-heading /near/ link / fetch failure in a stream -> not addressed; one test that group-DM addressing is unchanged. Avoid the quoted-message lookup entirely when the message is already addressed.
+:RUN_ID:       run-01M61Q8GY52QMA9595JN2C5FXD
+:ASK_ID:       ask-5d2a87c24b3c4b1dbfe559799409a129
+:EVENT_ID:     5268eebf-8aea-4334-a636-735f3de349b5
+:END:
