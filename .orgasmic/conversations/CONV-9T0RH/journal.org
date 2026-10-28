@@ -45,3 +45,18 @@
 :RUN_ID: run-01M61QPJZN94TR7M3HAHZ8QVD0
 :EVENT_ID: d877042f-abd7-4424-b8d8-999bcd0bece9
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-852a6de0-9e05-4f3f-be55-204c0d66a920 conversation.run_started
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-852a6de0-9e05-4f3f-be55-204c0d66a920
+:TIME:    [2026-10-28 Wed 17:17:30]
+:TYPE:    conversation.run_started
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TARGET: ~/.orgasmic/ledgers/theaspirational.zulip_mcp/.orgasmic/conversations/CONV-9T0RH/node.org
+:REASON: dispatch attempt started
+:NODE_ID: CONV-9T0RH
+:RUN_ID: run-01M61R8MAFDWRG8K3W5Q8J7AY5
+:EVENT_ID: 14d8d6df-c1cf-4d7f-aec2-690efe162f58
+:END:
