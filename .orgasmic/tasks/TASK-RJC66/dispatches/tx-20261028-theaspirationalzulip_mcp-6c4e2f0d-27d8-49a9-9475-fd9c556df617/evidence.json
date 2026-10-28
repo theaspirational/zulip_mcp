@@ -1,0 +1,25 @@
+{
+  "event_count": 130,
+  "tool_call_count": 6,
+  "unparsed_events": 0,
+  "bounded_events": 0,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-RJC66-implementer-20261028T172700-run-01M61RT295DCNJ8Q6HRWK7GBKE.jsonl",
+    "size_bytes": 125731
+  },
+  "native_transcript": {
+    "status": "found",
+    "path": "/home/orgasmic/.orgasmic/codex-home/sessions/2026/10/28/rollout-2026-10-28T16-59-58-01a18374-4749-7330-9a79-d8fc2d4341dd.jsonl",
+    "session_id": "01a18374-4749-7330-9a79-d8fc2d4341dd",
+    "confidence": "high",
+    "correlation": "recorded_native_runtime_session_path"
+  },
+  "narrative": [
+    {
+      "stream": "assistant",
+      "text": "I’ll clarify that the budget is per incoming message and can accumulate across a poll batch. I’ll change only the wording, commit it, and run `npm test` once.Committed as `369959c`. Only the changelog and docstring changed. The single `npm test` run passed: 296 passed, 0 failed, 1 skipped.\n\nThe report includes the final PR draft, explicitly stating that the first-two-target limit and three-second budget apply per incoming message, so delays can accumulate across a poll batch."
+    }
+  ],
+  "narrative_truncated": false
+}
