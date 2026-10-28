@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-5MPHR
 #+orgasmic_version: 2
 
-* IN_PROGRESS TASK-5MPHR edit_message ignores message_id
+* IN_REVIEW TASK-5MPHR edit_message ignores message_id
 :PROPERTIES:
 :UID: 4b554a99-2ec0-5701-b349-508373a2474e
 :ID: TASK-5MPHR
