@@ -1,0 +1,21 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-RJC66
+#+orgasmic_version: 2
+
+* IN_PROGRESS TASK-RJC66 Mark quote-replies to the agent's own message as addressed
+:PROPERTIES:
+:UID: cba5fe00-74f2-53d8-ab8b-61465a232dbc
+:ID: TASK-RJC66
+:PRIORITY: P2
+:END:
+
+** Description
+A Zulip quote-reply (the UI's "Quote message") inserts `@_**Name|id** [said](.../near/<id>):` followed by a ```quote block. Today the silent mention is only rendered into text and the message is not marked as addressed, so an agent in a closed stream channel never wakes for a quote-reply to its own message.
+
+Rule: mark the incoming message as addressed only when the quote's `/near/<id>` link (the link heading the quote block) points at a message this agent sent. A silent mention naming the agent is NOT enough: bots deliberately use silent mentions to avoid waking each other.
+
+** Acceptance
+- Quote-reply to the agent's own message: addressed (stream and group DM).
+- Silent mention of the agent without a quote, or a quote of someone else's message, or any other /near/ link in the text: not addressed.
+- Quoted message deleted or not fetchable: not addressed (fail closed).
+- Tests red on base, green after; upstream PR on the owner's go.

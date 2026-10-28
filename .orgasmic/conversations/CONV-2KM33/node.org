@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-2KM33
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Implement TASK-RJC66
+:PROPERTIES:
+:UID: eedfcd25-6029-5115-8f7d-5f9ea155de68
+:ID: CONV-2KM33
+:PURPOSE: implement
+:OWNER: ["member","tarn2"]
+:PROVIDER: codex
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-rjc66
+:RUNS:  run-01M61Q8GY52QMA9595JN2C5FXD
+:CREATED_AT: 2026-10-28T16:59:57Z
+:END:
