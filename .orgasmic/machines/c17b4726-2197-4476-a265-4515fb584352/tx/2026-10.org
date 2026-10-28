@@ -910,3 +910,20 @@
 :EFFORT_OVERRIDE: high
 :EVENT_ID:     3d4dfae0-c117-4872-9d5a-e181d55be1e0
 :END:
+
+
+* TX 2026-10-28 Wed 17:04:16 run.asked TASK-RJC66
+:PROPERTIES:
+:TX_ID:        tx-20261028-theaspirationalzulip_mcp-a510996d-c4e8-4d2d-9890-d81a4481d3b3
+:TIME:         [2026-10-28 Wed 17:04:16]
+:TYPE:         run.asked
+:ACTOR:        orgasmic
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:TASK:         TASK-RJC66
+:REASON:       The baseline treats every private message, including group DMs, as addressed (src/history.ts:382 passes isDM for all private messages; src/server.ts:896 addresses any isDM). Should this task preserve that existing group-DM behavior and only add the quote-derived mention verdict, or also change group-DM addressing so silent mentions and quotes of other senders are not addressed?
+:RUN_ID:       run-01M61Q8GY52QMA9595JN2C5FXD
+:ASK_ID:       ask-5d2a87c24b3c4b1dbfe559799409a129
+:TIMEOUT_SECS: 1800
+:EVENT_ID:     e32b6729-f517-4b63-a462-fea3d53f9ebf
+:END:
