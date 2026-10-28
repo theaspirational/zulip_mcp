@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-RJC66
 #+orgasmic_version: 2
 
-* IN_REVIEW TASK-RJC66 Mark quote-replies to the agent's own message as addressed
+* DONE TASK-RJC66 Mark quote-replies to the agent's own message as addressed
 :PROPERTIES:
 :UID: cba5fe00-74f2-53d8-ab8b-61465a232dbc
 :ID: TASK-RJC66
@@ -19,3 +19,5 @@ Rule: mark the incoming message as addressed only when the quote's `/near/<id>` 
 - Silent mention of the agent without a quote, or a quote of someone else's message, or any other /near/ link in the text: not addressed.
 - Quoted message deleted or not fetchable: not addressed (fail closed).
 - Tests red on base, green after; upstream PR on the owner's go.
+** Evidence
+- fork main 369959c58913d87b307a0b37342fa5bd810b583d; PR antra-tess/zulip_mcp#37 (7c9ae4e9); review 2 approve; gates 296/0/1 and 287/0/1

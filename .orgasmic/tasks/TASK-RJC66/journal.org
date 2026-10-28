@@ -63,3 +63,19 @@ Answer to worker ask (group DMs): Preserve the existing group-DM behaviour: ever
 :TO_STATE: in_progress
 :EVENT_ID: 5063d63c-de42-4f8e-b72d-54d65db82ab4
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-6d760233-4902-4fa4-b7c3-6f8c6e0610ee task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-6d760233-4902-4fa4-b7c3-6f8c6e0610ee
+:TIME:    [2026-10-28 Wed 17:29:07]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-RJC66
+:TARGET: .orgasmic/tasks/TASK-RJC66/node.org
+:REASON: fork main 369959c58913d87b307a0b37342fa5bd810b583d; PR antra-tess/zulip_mcp#37 (7c9ae4e9); review 2 approve; gates 296/0/1 and 287/0/1
+:FROM_STATE: in_review
+:TO_STATE: done
+:EVENT_ID: b38bdc4f-41ed-4964-bf96-d6571c7003b5
+:END:
