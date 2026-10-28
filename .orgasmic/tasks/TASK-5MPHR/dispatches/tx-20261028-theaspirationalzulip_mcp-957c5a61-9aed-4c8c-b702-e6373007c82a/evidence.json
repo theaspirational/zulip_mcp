@@ -1,0 +1,25 @@
+{
+  "event_count": 198,
+  "tool_call_count": 10,
+  "unparsed_events": 0,
+  "bounded_events": 0,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-5MPHR-implementer-20261028T155754-run-01M61KPXFV9ZFW0Y5ZNPD4D2YR.jsonl",
+    "size_bytes": 219147
+  },
+  "native_transcript": {
+    "status": "found",
+    "path": "/home/orgasmic/.orgasmic/codex-home/sessions/2026/10/28/rollout-2026-10-28T15-31-06-01a18322-edcf-71a2-aff4-022b670a1090.jsonl",
+    "session_id": "01a18322-edcf-71a2-aff4-022b670a1090",
+    "confidence": "high",
+    "correlation": "recorded_native_runtime_session_path"
+  },
+  "narrative": [
+    {
+      "stream": "assistant",
+      "text": "I’ll add regressions for markup-interleaved credentials and invalid message IDs, show them failing on `46a6dac`, then make only those fixes and run the required gates.Both new regressions failed on `46a6dac` and now pass. The fix validates message IDs before any request, then normalizes error text before redaction and truncation. It’s committed locally as `fafaeef`; final gates are running.Final gates passed: `npm ci`, build/typecheck, and 275 tests with one existing skip (base: 273 passed, one skip). Commit `fafaeef` is local only, and the working tree is clean. The report includes both red/green demonstrations and the final draft PR title and description."
+    }
+  ],
+  "narrative_truncated": false
+}
