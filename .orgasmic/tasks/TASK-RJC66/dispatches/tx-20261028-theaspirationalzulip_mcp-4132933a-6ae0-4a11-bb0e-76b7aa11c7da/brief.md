@@ -1,0 +1,13 @@
+PUBLIC repository and ledger: public technical facts only. No agent, host, person, company, realm or private-system names in code, tests, commits, changelog or report.
+
+TASK-RJC66: mark incoming Zulip quote-replies to this agent's own message as addressed. Base: fork main fafaeef8664c5765dbc7e6863b26f6911c1ac900 (= upstream main e5c4b4c plus one open upstream PR that touches only edit_message). The result becomes ONE upstream PR to antra-tess/zulip_mcp, so keep it independent of the edit_message change, minimal and in upstream style (changelog.d).
+
+Background: a Zulip quote-reply inserts `@_**Name|id** [said](<realm>/#narrow/.../near/<id>):` then a ```quote fenced block (raw Markdown; the connector registers events with apply_markdown false). Today silent mentions `@_**…**` are only rendered into text (src/content.ts around 230-234) and not tagged as mention/addressed.
+
+Rule (agreed spec):
+1. Addressed ONLY when the link heading a quote block (`[said](…/near/<id>):` immediately followed by a ```quote block) has a `/near/<id>` whose message was sent by this agent (sender id == the connector's own user id).
+2. A silent mention naming the agent is NOT enough; a quote of another user's message is not; any other `/near/` link elsewhere in the text is not.
+3. Same rule in streams and group DMs (1:1 DMs are already addressed).
+4. Decide by the quoted message's sender id. Prefer a local source if the connector already knows its own sent message ids; otherwise one authenticated GET of that message id. Deleted / not fetchable / error: not addressed (fail closed), never throw out of the event path, no retry storm; bound the cost (only when the quote-header pattern is present).
+5. Mark it the same way an @-mention is marked as addressed today (find that path and cite file:line). Do not add new tags unless the existing addressed/mention mechanism cannot express it; if you think a distinct reply tag is warranted, propose it in the report instead of adding it.
+Tests: own-message quote in stream -> addressed; same in group DM; silent mention without quote -> not; quote of another user's message -> not; `/near/` link not heading a quote block -> not; fetch failure -> not; message from self ignored as before. Show red on base, green after. Gates: npm ci, npm run build, npm test, base vs final counts. Commits on your branch, no push. Give a public-safe draft PR title/description.
