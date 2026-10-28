@@ -15,3 +15,50 @@
 :EVENT_ID: b47e046f-a79a-4a49-90f4-121dba4c10e5
 :REQUEST_REPLAY_V1: {"request_id":"tarn-zulip-edit-moved-1/tx","mutation":{"operation":"task.created","project_id":"theaspirational.zulip_mcp","payload_sha256":"bb608c2446adc7e1314fa1c68244ef64d543afb58f89e1e5cea184f88b568f2c"},"mutation_id":"TASK-5MPHR","written_paths":[{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-5MPHR/node.org"},{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-5MPHR/journal.org"}]}
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-a8a1b350-986d-483c-8525-94c9c86fca3e task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-a8a1b350-986d-483c-8525-94c9c86fca3e
+:TIME:    [2026-10-28 Wed 15:31:05]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5MPHR
+:TARGET: .orgasmic/tasks/TASK-5MPHR/node.org
+:REASON: transition TASK-5MPHR to todo
+:FROM_STATE: backlog
+:TO_STATE: todo
+:EVENT_ID: a3314980-0541-4423-a7a0-479fd85736f5
+:END:
+
+* tx-20261028-theaspirationalzulip_mcp-0b4f5009-09d7-446f-8ad0-313d18168c57 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-0b4f5009-09d7-446f-8ad0-313d18168c57
+:TIME:    [2026-10-28 Wed 15:31:06]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5MPHR
+:TARGET: .orgasmic/tasks/TASK-5MPHR/node.org
+:REASON: transition TASK-5MPHR to in_progress
+:FROM_STATE: todo
+:TO_STATE: in_progress
+:EVENT_ID: 79f3fa69-12fc-4807-b1df-7997a160443f
+:END:
+
+* tx-20261028-theaspirationalzulip_mcp-6dac2ce7-a756-4d6e-86a3-a337191b702f task.edited
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-6dac2ce7-a756-4d6e-86a3-a337191b702f
+:TIME:    [2026-10-28 Wed 15:31:14]
+:TYPE:    task.edited
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-5MPHR
+:TARGET: ~/.orgasmic/ledgers/theaspirational.zulip_mcp/.orgasmic/tasks/TASK-5MPHR/node.org
+:REASON: public ledger: remove private reporter reference
+:NODE_ID: TASK-5MPHR
+:EVENT_ID: 1f692b50-13c8-4782-801a-2e84b92ad203
+:END:
