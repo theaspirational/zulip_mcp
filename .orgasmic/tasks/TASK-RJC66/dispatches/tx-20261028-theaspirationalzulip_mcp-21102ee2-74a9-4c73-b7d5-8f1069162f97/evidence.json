@@ -1,0 +1,17 @@
+{
+  "event_count": 259,
+  "tool_call_count": 0,
+  "unparsed_events": 0,
+  "bounded_events": 2,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-RJC66-reviewer-20261028T170738-run-01M61QPJZN94TR7M3HAHZ8QVD0.jsonl",
+    "size_bytes": 376488
+  },
+  "native_transcript": {
+    "status": "not_found",
+    "reason": "claude transcript not found at /home/orgasmic/.claude/projects/-home-orgasmic--orgasmic-worktrees-theaspirational-zulip_mcp-task-rjc66/1134a68d-e57c-49e9-b239-ac7433cfdc2e.jsonl"
+  },
+  "narrative": [],
+  "narrative_truncated": false
+}
