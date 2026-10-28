@@ -1,0 +1,25 @@
+{
+  "event_count": 159,
+  "tool_call_count": 11,
+  "unparsed_events": 0,
+  "bounded_events": 0,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-RJC66-implementer-20261028T171330-run-01M61R1B9ARPCTQHNASW6GMAPA.jsonl",
+    "size_bytes": 210916
+  },
+  "native_transcript": {
+    "status": "found",
+    "path": "/home/orgasmic/.orgasmic/codex-home/sessions/2026/10/28/rollout-2026-10-28T16-59-58-01a18374-4749-7330-9a79-d8fc2d4341dd.jsonl",
+    "session_id": "01a18374-4749-7330-9a79-d8fc2d4341dd",
+    "confidence": "high",
+    "correlation": "recorded_native_runtime_session_path"
+  },
+  "narrative": [
+    {
+      "stream": "assistant",
+      "text": "I’ll add a follow-up commit that limits processing to the first two distinct quote targets and gives the whole lookup path a three-second budget. I’ll retain ordered delivery, add the regression tests, and support translated link text and tilde quote fences.The follow-up commit is `be08fd5`. All four new tests fail on `c741dc9` and pass after the fix. The hung-lookup test delivers the unrelated message after about 3.0 seconds. Fresh install, build, and full-suite gates pass: 296 passed, 0 failed, 1 unchanged skip."
+    }
+  ],
+  "narrative_truncated": false
+}
