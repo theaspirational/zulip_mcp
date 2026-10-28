@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-9T0RH
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Review TASK-RJC66
+:PROPERTIES:
+:UID: c59d8cc5-6f02-5aa5-9a4e-ee765236b01b
+:ID: CONV-9T0RH
+:PURPOSE: review
+:OWNER: ["member","tarn2"]
+:PROVIDER: claude
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-rjc66
+:RUNS:  run-01M61QPJZN94TR7M3HAHZ8QVD0
+:CREATED_AT: 2026-10-28T17:07:38Z
+:END:
