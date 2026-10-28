@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-HCP5S
 #+orgasmic_version: 2
 
-* BACKLOG TASK-HCP5S Incoming message text loses content between < and > (upstream #34)
+* IN_PROGRESS TASK-HCP5S Incoming message text loses content between < and > (upstream #34)
 :PROPERTIES:
 :UID: 7d8c7666-f31d-530f-a74d-a908af261517
 :ID: TASK-HCP5S

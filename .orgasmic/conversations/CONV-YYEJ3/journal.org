@@ -90,3 +90,18 @@
 :RUN_ID: run-01M61KPXFV9ZFW0Y5ZNPD4D2YR
 :EVENT_ID: 77ffc883-4283-4391-b1ff-b36baf506240
 :END:
+
+* tx-20261028-theaspirationalzulip_mcp-27b1aa90-5785-4a31-b2cb-c7c64e15745f conversation.run_released
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-27b1aa90-5785-4a31-b2cb-c7c64e15745f
+:TIME:    [2026-10-28 Wed 16:00:18]
+:TYPE:    conversation.run_released
+:ACTOR:   orgasmic
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TARGET: ~/.orgasmic/ledgers/theaspirational.zulip_mcp/.orgasmic/conversations/CONV-YYEJ3/node.org
+:REASON: worker finalize for TASK-5MPHR
+:NODE_ID: CONV-YYEJ3
+:RUN_ID: run-01M61KPXFV9ZFW0Y5ZNPD4D2YR
+:EVENT_ID: feee3038-18b5-4c3a-aba7-4b3f32d53b20
+:END:

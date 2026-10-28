@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-G7D18
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Implement TASK-HCP5S
+:PROPERTIES:
+:UID: a1f05ccf-d8b7-51aa-8468-22f8446e1074
+:ID: CONV-G7D18
+:PURPOSE: implement
+:OWNER: ["member","tarn2"]
+:PROVIDER: codex
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-hcp5s
+:RUNS:  run-01M61KTPG36222VX8FT6P3ZPFC
+:CREATED_AT: 2026-10-28T15:59:58Z
+:END:
