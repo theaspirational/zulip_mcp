@@ -47,3 +47,19 @@
 :END:
 
 Answer to worker ask (group DMs): Preserve the existing group-DM behaviour: every private message, group DMs included, stays addressed exactly as today. Do not change group-DM addressing. Only add the quote-derived verdict for stream messages (it is a no-op where a message is already addressed). Adjust the tests accordingly: own-message quote in a stream -> addressed; silent mention / other sender's quote / non-heading /near/ link / fetch failure in a stream -> not addressed; one test that group-DM addressing is unchanged. Avoid the quoted-message lookup entirely when the message is already addressed.
+
+* tx-20261028-theaspirationalzulip_mcp-ae6de249-3a25-4b23-adec-41b272472653 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261028-theaspirationalzulip_mcp-ae6de249-3a25-4b23-adec-41b272472653
+:TIME:    [2026-10-28 Wed 17:26:59]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-RJC66
+:TARGET: .orgasmic/tasks/TASK-RJC66/node.org
+:REASON: transition TASK-RJC66 to in_progress
+:FROM_STATE: done
+:TO_STATE: in_progress
+:EVENT_ID: 5063d63c-de42-4f8e-b72d-54d65db82ab4
+:END:

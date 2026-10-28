@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-RJC66
 #+orgasmic_version: 2
 
-* IN_REVIEW TASK-RJC66 Mark quote-replies to the agent's own message as addressed
+* IN_PROGRESS TASK-RJC66 Mark quote-replies to the agent's own message as addressed
 :PROPERTIES:
 :UID: cba5fe00-74f2-53d8-ab8b-61465a232dbc
 :ID: TASK-RJC66
