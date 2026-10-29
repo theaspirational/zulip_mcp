@@ -127,3 +127,19 @@ Owner button pxrsm:pr:lows (TG 1238): fix the 4 LOWs from re-review 3 without an
 :END:
 
 Ask ask-ad514a0f4ee04babafc050f1b9f29e7d answered (Tarn's call): Manager answer (Tarn's call): you're right, case B can't be told apart by shape. Implement the per-participant predicate, test refusal when the fallback resolves to a real-address participant (42), and document the collision in README next to the synthetic-email note: a genuine address shaped user<own id>@ is treated as synthetic, and id-based `to` is the only exact cross-check. Don't add a domain or realm-host rule. Mention this in the report.
+
+* tx-20261029-theaspirationalzulip_mcp-402660f8-d7a2-499c-b750-db1ccc319374 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-402660f8-d7a2-499c-b750-db1ccc319374
+:TIME:    [2026-10-29 Thu 13:50:24]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-PXRSM
+:TARGET: .orgasmic/tasks/TASK-PXRSM/node.org
+:REASON: awaiting PR button
+:FROM_STATE: in_review
+:TO_STATE: in_progress
+:EVENT_ID: ba4e9691-2760-44a8-9167-5549915802ec
+:END:
