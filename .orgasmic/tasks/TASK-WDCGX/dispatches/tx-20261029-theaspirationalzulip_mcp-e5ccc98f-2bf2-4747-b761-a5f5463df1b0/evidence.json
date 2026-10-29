@@ -1,0 +1,25 @@
+{
+  "event_count": 162,
+  "tool_call_count": 9,
+  "unparsed_events": 0,
+  "bounded_events": 1,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-WDCGX-implementer-20261029T073227-run-01M639640RXYVB07B82W4T3Z3N.jsonl",
+    "size_bytes": 191190
+  },
+  "native_transcript": {
+    "status": "found",
+    "path": "/home/orgasmic/.orgasmic/codex-home/sessions/2026/10/29/rollout-2026-10-29T07-22-55-01a1868a-56f3-7d53-b41a-038337eea2b7.jsonl",
+    "session_id": "01a1868a-56f3-7d53-b41a-038337eea2b7",
+    "confidence": "high",
+    "correlation": "recorded_native_runtime_session_path"
+  },
+  "narrative": [
+    {
+      "stream": "assistant",
+      "text": "I read the review. The worktree is back at the original base, so I’ll switch to the existing implementation branch, add rejection tests first, and amend the same commit. Then I’ll rerun the required gates and cherry-pick probe.The amended commit is `0c31d9d9cde7ef6de128f7992987dafdee4ac35e`; it remains one commit above the original base. All required gates pass, with 316 tests passed and 1 skipped. The cherry-pick onto upstream + #36 is still clean."
+    }
+  ],
+  "narrative_truncated": false
+}
