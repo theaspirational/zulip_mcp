@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-WDCGX
 #+orgasmic_version: 2
 
-* IN_PROGRESS TASK-WDCGX edit_message: optional topic / propagate_mode / stream_id (move/rename topics)
+* IN_REVIEW TASK-WDCGX edit_message: optional topic / propagate_mode / stream_id (move/rename topics)
 :PROPERTIES:
 :UID: ff3374a7-4757-5dba-933c-4742977636be
 :ID: TASK-WDCGX

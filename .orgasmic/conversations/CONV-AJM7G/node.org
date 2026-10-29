@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-AJM7G
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Review TASK-WDCGX
+:PROPERTIES:
+:UID: 3b6057f5-9db0-5c65-8b94-fb205ba12698
+:ID: CONV-AJM7G
+:PURPOSE: review
+:OWNER: ["member","tarn2"]
+:PROVIDER: claude
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-wdcgx
+:RUNS:  run-01M638X72BK6QK25GAY1R3YA2N
+:CREATED_AT: 2026-10-29T07:27:35Z
+:END:
