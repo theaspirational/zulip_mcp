@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-PXRSM
 #+orgasmic_version: 2
 
-* IN_PROGRESS TASK-PXRSM send_message reply_to: derive destination from a message id
+* IN_REVIEW TASK-PXRSM send_message reply_to: derive destination from a message id
 :PROPERTIES:
 :UID: bfd1e350-9335-5f92-b244-7311582dc7e7
 :ID: TASK-PXRSM
