@@ -159,3 +159,19 @@ Ask ask-ad514a0f4ee04babafc050f1b9f29e7d answered (Tarn's call): Manager answer 
 :END:
 
 pxrsm:pub:pr (TG 1240): pushed fork branch send-message-reply-to = 0c36b6ff8e29dada02474f1ddebdbdea56078163; opened https://github.com/antra-tess/zulip_mcp/pull/39 (upstream main e5c4b4c unchanged). Deploy to Alder is a separate button.
+
+* tx-20261029-theaspirationalzulip_mcp-0950d3f8-27c1-4ed7-988f-c7e6cbb03096 comment
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-0950d3f8-27c1-4ed7-988f-c7e6cbb03096
+:TIME:    [2026-10-29 Thu 13:58:26]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-PXRSM
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: cf05ad04-0cbf-45bc-8f12-34b3f9bf125f
+:END:
+
+zm:main:merge (TG 1243): fork main 0c31d9d9 -> 0c6af7ed1c69747c514e2fcca2bda231131a6aa7 (--no-ff merge of 0c36b6ff, Vasyl author); gates on the merged tree 356/0/1.
