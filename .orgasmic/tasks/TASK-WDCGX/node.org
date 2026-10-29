@@ -1,0 +1,16 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-WDCGX
+#+orgasmic_version: 2
+
+* IN_PROGRESS TASK-WDCGX edit_message: optional topic / propagate_mode / stream_id (move/rename topics)
+:PROPERTIES:
+:UID: ff3374a7-4757-5dba-933c-4742977636be
+:ID: TASK-WDCGX
+:PRIORITY: P3
+:END:
+
+** Description
+Marlow's ask (Zulip 17347061, relayed by Alder on Vasyl's `ZA-20261029-01:send+tarn`): servo-skull can't rename/move topics because `edit_message` lacks `topic`, `propagate_mode` (change_one|change_later|change_all) and `stream_id`. Zulip `PATCH /api/v1/messages/{id}` supports them. Add optional parameters (server-side permissions untouched; the realm decides). Upstream PR #3 in the series, then fork main + pin bump.
+** Acceptance
+- Optional `topic`, `propagate_mode`, `stream_id` on edit_message; content optional when topic/stream given; backward compatible.
+- Tests; upstream PR on the owner's button.
