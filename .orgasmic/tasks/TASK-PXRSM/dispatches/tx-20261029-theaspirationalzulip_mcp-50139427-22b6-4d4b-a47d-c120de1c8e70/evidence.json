@@ -1,0 +1,17 @@
+{
+  "event_count": 243,
+  "tool_call_count": 0,
+  "unparsed_events": 0,
+  "bounded_events": 5,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-PXRSM-reviewer-20261029T132905-run-01M63XK42Q9G83MYJ49A34B6KD.jsonl",
+    "size_bytes": 412605
+  },
+  "native_transcript": {
+    "status": "not_found",
+    "reason": "claude transcript not found at /home/orgasmic/.claude/projects/-home-orgasmic--orgasmic-worktrees-theaspirational-zulip_mcp-task-pxrsm/3f658f1d-8f61-424a-957e-2a986ac09f8e.jsonl"
+  },
+  "narrative": [],
+  "narrative_truncated": false
+}
