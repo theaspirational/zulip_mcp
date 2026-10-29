@@ -2345,3 +2345,21 @@
 :ACKED_BY:     member:tarn2
 :EVENT_ID:     bc880018-f0c2-4d2c-b2bd-de5d74ff7e57
 :END:
+
+
+* TX 2026-10-29 Thu 13:24:51 run.message TASK-PXRSM
+:PROPERTIES:
+:TX_ID:        tx-20261029-theaspirationalzulip_mcp-90e93e9b-5c0e-43e5-ac41-b88cb156bcf8
+:TIME:         [2026-10-29 Thu 13:24:51]
+:TYPE:         run.message
+:ACTOR:        tarn2
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:TASK:         TASK-PXRSM
+:REASON:       Scope change from the project owner (pxrsm:lows:fold): in this same fix round, also fix the three LOW findings from review 1. 3) When `type` is absent and `reply_to` is given, take the type from the referenced message; give the disagreement error only for a real mismatch. 4) Build the DM reply channelId from dmCounterparts (bot excluded), keep `to: ids` as it is, and assert channelId in the DM reply tests. 5) Qualify the implicit-sender rule in README.md:320 and src/tools.ts:176, and add a test with selfUserId null on the DM path. Put the fixes in separate commits if that's easy, then run the full gates again. Please quote this message back in your report.
+:RUN_ID:       run-01M63X9WC86J8JV9NHYA50JTZB
+:MESSAGE_ID:   msg-b1cf9a19f7ed40cb9540fcdf7f39c08b
+:FROM:         member:tarn2
+:DELIVERY:     delivered
+:EVENT_ID:     c6fd8ac6-902a-40bf-9f3f-ad5c92c3453d
+:END:
