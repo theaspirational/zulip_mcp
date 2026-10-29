@@ -1,0 +1,17 @@
+{
+  "event_count": 194,
+  "tool_call_count": 0,
+  "unparsed_events": 0,
+  "bounded_events": 2,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-WDCGX-reviewer-20261029T072736-run-01M638X72BK6QK25GAY1R3YA2N.jsonl",
+    "size_bytes": 304077
+  },
+  "native_transcript": {
+    "status": "not_found",
+    "reason": "claude transcript not found at /home/orgasmic/.claude/projects/-home-orgasmic--orgasmic-worktrees-theaspirational-zulip_mcp-task-wdcgx/57bcb994-daef-4613-b545-94fd311ddaf4.jsonl"
+  },
+  "narrative": [],
+  "narrative_truncated": false
+}
