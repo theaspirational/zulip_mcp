@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-NH8X3
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Review TASK-PXRSM
+:PROPERTIES:
+:UID: 5c9c6d9e-3712-533d-bf31-2604dab2caf0
+:ID: CONV-NH8X3
+:PURPOSE: review
+:OWNER: ["member","tarn2"]
+:PROVIDER: claude
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-pxrsm
+:RUNS:  run-01M63WZCHXBFMFD7ZGVW92JMAR
+:CREATED_AT: 2026-10-29T13:18:18Z
+:END:
