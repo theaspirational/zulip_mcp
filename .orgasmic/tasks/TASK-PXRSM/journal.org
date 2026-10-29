@@ -111,3 +111,19 @@ Owner button pxrsm:lows:fold (TG 1233): fold review-1 LOWs 3-5 into fix round 1;
 :END:
 
 Owner button pxrsm:pr:lows (TG 1238): fix the 4 LOWs from re-review 3 without another review (manager gates only), squash to one commit, show PR text before publishing.
+
+* tx-20261029-theaspirationalzulip_mcp-4389f96c-ba77-42b4-af1c-1809afd1b11a comment
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-4389f96c-ba77-42b4-af1c-1809afd1b11a
+:TIME:    [2026-10-29 Thu 13:47:16]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-PXRSM
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: a0866a10-b73d-456d-95ba-dedf5ee18dbf
+:END:
+
+Ask ask-ad514a0f4ee04babafc050f1b9f29e7d answered (Tarn's call): Manager answer (Tarn's call): you're right, case B can't be told apart by shape. Implement the per-participant predicate, test refusal when the fallback resolves to a real-address participant (42), and document the collision in README next to the synthetic-email note: a genuine address shaped user<own id>@ is treated as synthetic, and id-based `to` is the only exact cross-check. Don't add a domain or realm-host rule. Mention this in the report.

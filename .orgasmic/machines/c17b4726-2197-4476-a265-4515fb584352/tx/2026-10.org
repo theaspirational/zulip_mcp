@@ -2921,3 +2921,35 @@
 :EFFORT_OVERRIDE: high
 :EVENT_ID:     26adff32-04db-4a85-90a0-d0b98132768a
 :END:
+
+
+* TX 2026-10-29 Thu 13:47:07 run.asked TASK-PXRSM
+:PROPERTIES:
+:TX_ID:        tx-20261029-theaspirationalzulip_mcp-cae7c3d5-16e3-4749-8a55-3f1c70272eb8
+:TIME:         [2026-10-29 Thu 13:47:07]
+:TYPE:         run.asked
+:ACTOR:        orgasmic
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:TASK:         TASK-PXRSM
+:REASON:       LOW-1 is inconsistent: review case B resolves alice@example.com to participant 7, whose user7@corp.example.com address passes isSynthetic, so the explicitly requested per-participant predicate still accepts B. Should I implement that predicate and test refusal when the fallback resolves to a real-address participant (42), leaving the genuine synthetic-shaped-address collision documented, or should B be refused using an additional rule you specify?
+:RUN_ID:       run-01M63YK8RB1532PQJ8W2FXFJ1Y
+:ASK_ID:       ask-ad514a0f4ee04babafc050f1b9f29e7d
+:TIMEOUT_SECS: 1800
+:EVENT_ID:     807f9d53-c707-409a-ac2f-fbf50a08bbd6
+:END:
+
+* TX 2026-10-29 Thu 13:47:16 run.answered TASK-PXRSM
+:PROPERTIES:
+:TX_ID:        tx-20261029-theaspirationalzulip_mcp-d58c4282-5275-469a-a81f-9b39c6162004
+:TIME:         [2026-10-29 Thu 13:47:16]
+:TYPE:         run.answered
+:ACTOR:        tarn2
+:MACHINE:      c17b4726-2197-4476-a265-4515fb584352
+:PROJECT:      theaspirational.zulip_mcp
+:TASK:         TASK-PXRSM
+:REASON:       Manager answer (Tarn's call): you're right, case B can't be told apart by shape. Implement the per-participant predicate, test refusal when the fallback resolves to a real-address participant (42), and document the collision in README next to the synthetic-email note: a genuine address shaped user<own id>@ is treated as synthetic, and id-based `to` is the only exact cross-check. Don't add a domain or realm-host rule. Mention this in the report.
+:RUN_ID:       run-01M63YK8RB1532PQJ8W2FXFJ1Y
+:ASK_ID:       ask-ad514a0f4ee04babafc050f1b9f29e7d
+:EVENT_ID:     dded1c4e-f4eb-439f-8d26-cb54382c6471
+:END:
