@@ -31,3 +31,19 @@
 :TO_STATE: in_progress
 :EVENT_ID: cc626fa0-c408-419a-b3bd-8fc1ec47a19c
 :END:
+
+* tx-20261029-theaspirationalzulip_mcp-5c6df066-64a7-44f7-861f-26aa1a2306b6 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-5c6df066-64a7-44f7-861f-26aa1a2306b6
+:TIME:    [2026-10-29 Thu 07:32:26]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-WDCGX
+:TARGET: .orgasmic/tasks/TASK-WDCGX/node.org
+:REASON: docs fix round before PR
+:FROM_STATE: done
+:TO_STATE: in_progress
+:EVENT_ID: 18681f3a-745b-4347-bca2-8c13091ef979
+:END:
