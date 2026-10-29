@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-YZ4HY
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Implement TASK-PXRSM
+:PROPERTIES:
+:UID: f1e447bd-406c-5f4e-82b2-e5dfa07b36a5
+:ID: CONV-YZ4HY
+:PURPOSE: implement
+:OWNER: ["member","tarn2"]
+:PROVIDER: codex
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-pxrsm
+:RUNS:  run-01M63WHQ29S1H5YWTMRBYWYZHA
+:CREATED_AT: 2026-10-29T13:10:50Z
+:END:

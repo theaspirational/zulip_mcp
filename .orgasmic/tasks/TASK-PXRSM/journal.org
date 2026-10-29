@@ -1,0 +1,33 @@
+#+title: orgasmic journal TASK-PXRSM
+#+orgasmic_version: 2
+
+* tx-20261029-theaspirationalzulip_mcp-70e9feed-5625-44ad-a4c8-c9854fedc07b task.created
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-70e9feed-5625-44ad-a4c8-c9854fedc07b
+:TIME:    [2026-10-29 Thu 13:10:49]
+:TYPE:    task.created
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-PXRSM
+:TARGET: .orgasmic/tasks/TASK-PXRSM/node.org
+:REASON: created task TASK-PXRSM
+:EVENT_ID: 749069fb-602f-4de2-b782-82bfe167c5fb
+:REQUEST_REPLAY_V1: {"request_id":"tarn-zr2m-create/tx","mutation":{"operation":"task.created","project_id":"theaspirational.zulip_mcp","payload_sha256":"86653ec19b94bd1d13c37bccdd5c2f5dbc122820ffa2c2bd841d7204b8dd2276"},"mutation_id":"TASK-PXRSM","written_paths":[{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-PXRSM/node.org"},{"project":"theaspirational.zulip_mcp","relative":".orgasmic/tasks/TASK-PXRSM/journal.org"}]}
+:END:
+
+* tx-20261029-theaspirationalzulip_mcp-33c261f1-4927-46ba-8464-ac26d01ef764 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-33c261f1-4927-46ba-8464-ac26d01ef764
+:TIME:    [2026-10-29 Thu 13:10:50]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-PXRSM
+:TARGET: .orgasmic/tasks/TASK-PXRSM/node.org
+:REASON: transition TASK-PXRSM to in_progress
+:FROM_STATE: backlog
+:TO_STATE: in_progress
+:EVENT_ID: e826d455-a20a-46f7-9573-127755b647ee
+:END:

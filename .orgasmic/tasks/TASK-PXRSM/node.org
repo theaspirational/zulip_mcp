@@ -1,0 +1,17 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-PXRSM
+#+orgasmic_version: 2
+
+* IN_PROGRESS TASK-PXRSM send_message reply_to: derive destination from a message id
+:PROPERTIES:
+:UID: bfd1e350-9335-5f92-b244-7311582dc7e7
+:ID: TASK-PXRSM
+:PRIORITY: P2
+:END:
+
+** Description
+Owner pick via Alder (Vasyl button zr2m:tarn; Zulip request 17349084 in #ai_dev_internal > zulip-mcp, filed for Roman P.). Add optional `reply_to: <message_id>` to send_message (stream and DM). When set, the destination (stream + topic, or DM recipients) is taken from that message via GET /api/v1/messages/{id}; `to`/`topic` become optional; if both are given and disagree, refuse. Motivation: a wake carrying a batch from several topics led to the right text in the wrong topic.
+** Acceptance
+- Upstream-first: branch on upstream antra-tess/zulip_mcp main, independent of open PRs #36/#37/#38.
+- Tests: stream reply, DM reply (group and 1:1), disagreement refusal, unknown/inaccessible id, reply_to absent unchanged.
+- Local only until owner button for push/PR.
