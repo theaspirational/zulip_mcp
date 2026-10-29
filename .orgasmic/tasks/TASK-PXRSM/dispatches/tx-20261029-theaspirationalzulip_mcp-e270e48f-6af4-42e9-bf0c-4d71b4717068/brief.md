@@ -1,0 +1,15 @@
+Your worktree is this work chain's shared tree, checked out detached at 8f3a8248a95b2352acd90850d045347d38ec826a — the commit you review. Leave it exactly as you found it: no commits, no edits, no new files (ignored build output is fine). The next round of the chain runs here, and the daemon records anything you leave behind when your dispatch is closed.
+
+Reviewed implementer evidence ($ORGASMIC_REVIEWED_EVIDENCE_DIR): /home/orgasmic/.orgasmic/runs/run-01M63WHQ29S1H5YWTMRBYWYZHA/evidence
+
+Review TASK-PXRSM commit 8f3a8248a95b2352acd90850d045347d38ec826a (one commit on upstream e5c4b4c01c63c100f5671fef86f74b23c72bbdcb): optional reply_to on send_message. Read the task body and the implementer report. Check correctness of destination derivation (stream id/name, topic normalization, 1:1 and group DM participant sets including the bot itself), conflict refusal before any upload/send, error propagation, byte-identical behaviour without reply_to, schema/README accuracy, and test quality (mutation-style: would the tests catch a wrong topic or a send after a failed lookup?). Rerun the gates yourself (npm ci, tsc, build, npm test) rather than reusing receipts. Findings as HIGH/MEDIUM/LOW with file:line. No push or messaging.
+
+## Gates already passed at this commit
+
+orgasmic recorded these gate runs in the implementer's worktree, each on a clean tree it left clean, at 8f3a8248a95b2352acd90850d045347d38ec826a — the commit your worktree is cut at — or at an ancestor of it whose gate inputs are identical to this commit's: the two trees differ only in paths this project marks as not gate inputs. Read the log instead of running the gate again. Run scoped probes and required gates that lack a reusable receipt. The manager names required gates; project policy also applies. Missing receipts do not assign a full suite.
+
+- `build` — exit 0 — `npm run build` (cwd `.`) — at `8f3a8248a95b2352acd90850d045347d38ec826a` — log `/home/orgasmic/.orgasmic/runs/run-01M63WHQ29S1H5YWTMRBYWYZHA/evidence/gate-build-01M63WVZ1A6FH2TWXH6V72SR0X.log`
+- `changelog` — exit 0 — `sh -c git diff --name-only --diff-filter=A e5c4b4c01c63c100f5671fef86f74b23c72bbdcb HEAD | grep -E "^changelog\.d/[^/]+\.(breaking|added|changed|fixed)\.md$"` (cwd `.`) — at `8f3a8248a95b2352acd90850d045347d38ec826a` — log `/home/orgasmic/.orgasmic/runs/run-01M63WHQ29S1H5YWTMRBYWYZHA/evidence/gate-changelog-01M63WX3MV5V179PF0W18V6S6Z.log`
+- `diff-check` — exit 0 — `git diff --check e5c4b4c01c63c100f5671fef86f74b23c72bbdcb HEAD` (cwd `.`) — at `8f3a8248a95b2352acd90850d045347d38ec826a` — log `/home/orgasmic/.orgasmic/runs/run-01M63WHQ29S1H5YWTMRBYWYZHA/evidence/gate-diff-check-01M63WX3G3RBNYYTKHP93A8XS4.log`
+- `test` — exit 0 — `npm test` (cwd `.`) — at `8f3a8248a95b2352acd90850d045347d38ec826a` — log `/home/orgasmic/.orgasmic/runs/run-01M63WHQ29S1H5YWTMRBYWYZHA/evidence/gate-test-01M63WVZZ5N1KYFRY92C1JJADD.log`
+- `typecheck` — exit 0 — `npx tsc --noEmit` (cwd `.`) — at `8f3a8248a95b2352acd90850d045347d38ec826a` — log `/home/orgasmic/.orgasmic/runs/run-01M63WHQ29S1H5YWTMRBYWYZHA/evidence/gate-typecheck-01M63WVY3B1110MQDZ0PVPSR9G.log`
