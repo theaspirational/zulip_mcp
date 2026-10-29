@@ -1,0 +1,25 @@
+{
+  "event_count": 255,
+  "tool_call_count": 16,
+  "unparsed_events": 0,
+  "bounded_events": 2,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-PXRSM-implementer-20261029T133429-run-01M63XX104BT8JTAR8YS0W9F7M.jsonl",
+    "size_bytes": 450902
+  },
+  "native_transcript": {
+    "status": "found",
+    "path": "/home/orgasmic/.orgasmic/codex-home/sessions/2026/10/29/rollout-2026-10-29T13-10-51-01a187c8-e004-71b0-a05c-7a07d1884a57.jsonl",
+    "session_id": "01a187c8-e004-71b0-a05c-7a07d1884a57",
+    "confidence": "high",
+    "correlation": "recorded_native_runtime_session_path"
+  },
+  "narrative": [
+    {
+      "stream": "assistant",
+      "text": "I’ve read the re-review in full. I’ll restore the type guard, limit directory fallback to synthetic-email metadata, add ambiguity and lookup-count tests, and document the matching limits. I’ll keep the fixes in small commits and rerun all requested gates, including `npm ci`.All round-2 fixes are committed locally in three commits. At final commit `3ff25b3`, `npm ci`, typecheck, build, and the full suite passed: 303 tests passed, none failed, and one platform-specific test was skipped. I’m saving the report and finalizing; nothing was pushed or posted."
+    }
+  ],
+  "narrative_truncated": false
+}
