@@ -47,3 +47,35 @@
 :TO_STATE: in_progress
 :EVENT_ID: 18681f3a-745b-4347-bca2-8c13091ef979
 :END:
+
+* tx-20261029-theaspirationalzulip_mcp-b898c77f-3885-4822-9103-fc57e25facf7 comment
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-b898c77f-3885-4822-9103-fc57e25facf7
+:TIME:    [2026-10-29 Thu 07:56:32]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-WDCGX
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: 699129a7-aa71-4f09-8238-67c35ae3fb4d
+:END:
+
+On Vasyl's `wdcgx:main+pr` (TG 1163): fork main 369959c5 -> 0c31d9d9cde7ef6de128f7992987dafdee4ac35e (FF). Upstream PR https://github.com/antra-tess/zulip_mcp/pull/38 from feat/edit-message-topic-moves = 6ae71e690c6b3f29102bec61e4408eabd9ec2e80 (cherry-pick onto #36 head fafaeef8, re-authored Vasyl, trailer GPT-6-Astra; gates 296/295/0/1 on 22.23.3). Body written by Tarn.
+
+* tx-20261029-theaspirationalzulip_mcp-cdc93e07-ff87-4ec0-a68e-0a4a76f033f1 task.state_transitioned
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-cdc93e07-ff87-4ec0-a68e-0a4a76f033f1
+:TIME:    [2026-10-29 Thu 07:56:33]
+:TYPE:    task.state_transitioned
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-WDCGX
+:TARGET: .orgasmic/tasks/TASK-WDCGX/node.org
+:REASON: fork main + PR #38 published
+:FROM_STATE: in_review
+:TO_STATE: done
+:EVENT_ID: bd97cc78-6034-411c-9376-02e172bb944f
+:END:
