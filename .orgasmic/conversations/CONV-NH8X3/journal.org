@@ -60,3 +60,18 @@
 :RUN_ID: run-01M63XK42Q9G83MYJ49A34B6KD
 :EVENT_ID: 7e642ca8-26f0-4aba-a10f-ed5dd6b043a7
 :END:
+
+* tx-20261029-theaspirationalzulip_mcp-7e4c87d3-5c01-42d5-b3bd-efa59fc6d14b conversation.run_released
+:PROPERTIES:
+:TX_ID:   tx-20261029-theaspirationalzulip_mcp-7e4c87d3-5c01-42d5-b3bd-efa59fc6d14b
+:TIME:    [2026-10-29 Thu 13:34:10]
+:TYPE:    conversation.run_released
+:ACTOR:   orgasmic
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TARGET: ~/.orgasmic/ledgers/theaspirational.zulip_mcp/.orgasmic/conversations/CONV-NH8X3/node.org
+:REASON: worker finalize for TASK-PXRSM
+:NODE_ID: CONV-NH8X3
+:RUN_ID: run-01M63XK42Q9G83MYJ49A34B6KD
+:EVENT_ID: c1acb843-dc23-4cfd-a2f1-ffcb0b43c6e4
+:END:
