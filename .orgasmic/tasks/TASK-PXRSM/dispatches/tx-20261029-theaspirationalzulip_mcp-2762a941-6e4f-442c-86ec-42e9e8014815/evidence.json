@@ -1,0 +1,25 @@
+{
+  "event_count": 273,
+  "tool_call_count": 13,
+  "unparsed_events": 1,
+  "bounded_events": 5,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-PXRSM-implementer-20261029T132402-run-01M63X9WC86J8JV9NHYA50JTZB.jsonl",
+    "size_bytes": 473724
+  },
+  "native_transcript": {
+    "status": "found",
+    "path": "/home/orgasmic/.orgasmic/codex-home/sessions/2026/10/29/rollout-2026-10-29T13-10-51-01a187c8-e004-71b0-a05c-7a07d1884a57.jsonl",
+    "session_id": "01a187c8-e004-71b0-a05c-7a07d1884a57",
+    "confidence": "high",
+    "correlation": "recorded_native_runtime_session_path"
+  },
+  "narrative": [
+    {
+      "stream": "assistant",
+      "text": "I’ve read the review in full and confirmed both MEDIUM findings. I’ll add regression tests, fix numeric-string and DM email matching, and add the missing-destination guard. The LOW findings will remain untouched.I’ll include the three LOW fixes as requested and quote the scope-change message in the report. I’ll keep them in a separate commit from the MEDIUM fixes, then rerun the full gates.All five findings are fixed in two local commits: `3533690` for the MEDIUM fixes and `e8a1fe8` for the LOW fixes. At the final commit, typecheck, build, and the full suite passed: 297 tests passed, none failed, and one platform-specific test was skipped. I’m saving the report with the scope-change quote and finalizing."
+    }
+  ],
+  "narrative_truncated": false
+}
