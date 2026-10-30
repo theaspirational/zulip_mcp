@@ -1,0 +1,17 @@
+{
+  "event_count": 323,
+  "tool_call_count": 0,
+  "unparsed_events": 0,
+  "bounded_events": 2,
+  "session": {
+    "status": "found",
+    "filename": "dispatch-TASK-Z15Q2-reviewer-20261030T140630-run-01M66J4B419B7X5NCG020HJS9N.jsonl",
+    "size_bytes": 551496
+  },
+  "native_transcript": {
+    "status": "not_found",
+    "reason": "claude transcript not found at /home/orgasmic/.claude/projects/-home-orgasmic--orgasmic-worktrees-theaspirational-zulip_mcp-task-z15q2/5e3edc24-e74a-4c5e-9423-b7ddfe595325.jsonl"
+  },
+  "narrative": [],
+  "narrative_truncated": false
+}
