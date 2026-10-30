@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-V4VMQ
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Implement TASK-Z15Q2
+:PROPERTIES:
+:UID: f77f659c-d405-556b-b3f0-d18890a74685
+:ID: CONV-V4VMQ
+:PURPOSE: implement
+:OWNER: ["member","tarn2"]
+:PROVIDER: codex
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-z15q2
+:RUNS:  run-01M66HEMB8CCCKYAM5Q76BCG9S
+:CREATED_AT: 2026-10-30T13:54:38Z
+:END:

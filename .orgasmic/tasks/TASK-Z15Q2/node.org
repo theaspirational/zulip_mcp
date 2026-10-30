@@ -1,0 +1,16 @@
+#+plugin: tasks schema=1
+#+title: orgasmic task TASK-Z15Q2
+#+orgasmic_version: 2
+
+* IN_PROGRESS TASK-Z15Q2 Tag the bot's own messages chat:from-self
+:PROPERTIES:
+:UID: db0c637e-2c89-549f-b2f0-db9b299a2cc1
+:ID: TASK-Z15Q2
+:PRIORITY: P2
+:END:
+
+** Description
+Marlow (from Servo-skull gate data): channel-mode debounced rules wake the agent on echoes of its own posts (114/156 wakes, ~209k ctx each). Add a `chat:from-self` tag to message events whose sender is the bot's own account. Upstream PR to antra-tess/zulip_mcp. Owner go: zself:1:go (TG 1404). Follow-up (separate, later): host/AF debounced default tagsNone chat:from-self.
+** Acceptance
+- tag on own messages (stream and DM), never on others; declared in the feature set
+- tests; gates; Opus review; push/PR on owner button
