@@ -1,0 +1,23 @@
+#+title: orgasmic Conversation CONV-JKHNS
+#+orgasmic_version: 2
+
+#+todo: OPEN | ARCHIVED
+
+* OPEN Review TASK-Z15Q2
+:PROPERTIES:
+:UID: 5503afa8-6628-5b39-a420-8a5c0a695195
+:ID: CONV-JKHNS
+:PURPOSE: review
+:OWNER: ["member","tarn2"]
+:PROVIDER: claude
+:MODEL: 
+:EFFORT: 
+:ACCESS: 
+:SERVICE_TIER: 
+:HARNESS_ARGS: 
+:MODE: chat
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:WORKTREE: ~/.orgasmic/worktrees/theaspirational.zulip_mcp/task-z15q2
+:RUNS:  run-01M66J4B419B7X5NCG020HJS9N
+:CREATED_AT: 2026-10-30T14:06:29Z
+:END:

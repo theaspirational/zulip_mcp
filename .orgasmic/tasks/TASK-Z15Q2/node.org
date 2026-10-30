@@ -2,7 +2,7 @@
 #+title: orgasmic task TASK-Z15Q2
 #+orgasmic_version: 2
 
-* IN_PROGRESS TASK-Z15Q2 Tag the bot's own messages chat:from-self
+* IN_REVIEW TASK-Z15Q2 Tag the bot's own messages chat:from-self
 :PROPERTIES:
 :UID: db0c637e-2c89-549f-b2f0-db9b299a2cc1
 :ID: TASK-Z15Q2
