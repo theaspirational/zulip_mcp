@@ -31,3 +31,19 @@
 :TO_STATE: in_progress
 :EVENT_ID: 3a8c7ccc-a9a5-4b2c-8148-2676b665c46c
 :END:
+
+* tx-20261030-theaspirationalzulip_mcp-3a4a1d5a-6545-4688-b2ea-3c367c50e105 comment
+:PROPERTIES:
+:TX_ID:   tx-20261030-theaspirationalzulip_mcp-3a4a1d5a-6545-4688-b2ea-3c367c50e105
+:TIME:    [2026-10-30 Fri 13:56:20]
+:TYPE:    comment
+:ACTOR:   tarn2
+:MACHINE: c17b4726-2197-4476-a265-4515fb584352
+:PROJECT: theaspirational.zulip_mcp
+:TASK: TASK-Z15Q2
+:REASON: comment
+:ACTOR_UID: 1cdb5b4db7474c23dfca8e7b4d00d0b3
+:EVENT_ID: ae5554f1-3300-4498-affa-3cd155a64380
+:END:
+
+Worker found upstream already suppresses own live/history messages when the profile id is known. Tarn answer ask-007f07b4c21148c48a055dd404295ad4: review is manager-owned; map every path where own messages still reach the host (table), report suppression bugs with a repro, keep the PR body honest.
