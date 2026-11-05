@@ -20,6 +20,7 @@ import {
 } from "./content.js";
 import type { SelfMove } from "./platforms/adapter.js";
 import type { ZulipSession } from "./zulip-client.js";
+import { resolveMessageLinks } from "./message-links.js";
 import { assertApiSuccess, dmChannelIdFor, dmCounterparts, fetchAround, fetchHistory, parseDmChannelId, renderReactions, type ReactionSummary, type ZulipMessage, type ZulipRecipient, editedTrailer } from './history.js';
 import { chunkMessage } from "./content.js";
 import { messageLineHead } from "./message-line.js";
@@ -293,14 +294,17 @@ export class ZulipToolRuntime {
     const id = numberOrUndefined(args.reply_to);
     if (!Number.isSafeInteger(id)) throw new Error("reply_to must be an integer message id");
     if (args.to !== undefined || args.topic !== undefined) throw new Error("reply_to sets the destination; omit to/topic");
-    const result = await this.zulipClient.messages.getById({ message_id: id });
-    if (result?.result === "error") {
-      // Keep the API code as well as its wording: missing/deleted/inaccessible
-      // messages must never fall back to a caller-supplied destination.
-      throw new Error(`Zulip refused reply_to ${id}${result.code ? ` (${result.code})` : ""}: ${result.msg ?? "unknown error"}`);
+    const unreadable = () => new Error(`Cannot resolve reply_to ${id}: message not found or not accessible`);
+    let result;
+    try {
+      result = await this.zulipClient.messages.getById({ message_id: id });
+    } catch {
+      // Client exceptions may include response bytes, URLs or credentials.
+      // Use the same fixed error for every lookup failure, without a cause.
+      throw unreadable();
     }
-    const message = result?.message;
-    const unreadable = () => new Error(`reply_to ${id} has no readable destination`);
+    if (result?.result !== "success") throw unreadable();
+    const message = result.message;
     if (!message || !["stream", "private"].includes(message.type)) throw unreadable();
     const type = args.type === "direct" ? "private" : args.type === "channel" ? "stream" : args.type;
     if (type !== undefined && type !== message.type) {
@@ -693,10 +697,11 @@ export class ZulipToolRuntime {
         const hasText = typeof args.content === "string" && args.content.trim() !== "";
         const hasFiles = Array.isArray(args.attachments) && args.attachments.length > 0;
         if (!hasText && !hasFiles) throw new Error("content is required (or at least one attachment)");
+        const resolvedContent = hasText ? await resolveMessageLinks(args.content, this.session) : "";
         const reply = args.reply_to !== undefined ? await this.replyDestination(args) : undefined;
         if (reply) args = { ...args, type: reply.type, to: reply.to, topic: reply.topic };
         const uploaded = await this.uploadFor(args);
-        const content = withAttachmentLinks(hasText ? args.content : "", uploaded);
+        const content = withAttachmentLinks(resolvedContent, uploaded);
         const ids: number[] = [];
         let last: any = null;
         const channelId = reply?.channelId ?? (args.type === "private" && Array.isArray(args.to) && args.to.every((t: unknown) => typeof t === "number")
@@ -802,7 +807,8 @@ export class ZulipToolRuntime {
         const apiUrl = zulipClient.config?.apiURL ?? `${this.session.realm}/api/v1`;
         const editFields = new URLSearchParams();
         for (const field of moving ? ["topic", "propagate_mode", "stream_id"] : ["content"]) {
-          if (args[field] !== undefined) editFields.set(field, String(args[field]));
+          if (args[field] !== undefined) editFields.set(field, field === "content"
+            ? await resolveMessageLinks(args.content, this.session) : String(args[field]));
         }
         const response = await fetch(`${apiUrl}/messages/${encodeURIComponent(args.message_id)}`, {
           method: "PATCH",
