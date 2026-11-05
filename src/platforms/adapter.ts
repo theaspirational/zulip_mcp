@@ -93,6 +93,32 @@ export interface ReactionEvent {
 
 export type OnReaction = (event: ReactionEvent) => void;
 
+/** Exact own-echo shape, used only for one-shot anchor suppression. */
+export interface MoveEcho {
+  messageId: string;
+  channelId: string;
+  previousTopic: string | null;
+  topic: string | null;
+  newStreamId: number | null;
+  propagateMode: string | null;
+  destinationChannelId: string | null;
+}
+
+/** Tool success and anchor placement, independent of its event echo. */
+export interface SelfMove {
+  /** Conversation epochs captured before the first placement read. */
+  moveEpochs?: ReadonlyMap<string, number>;
+  messageId: number;
+  source: { channelId: string; topic: string } | null;
+  propagateMode: 'change_one' | 'change_later' | 'change_all';
+  newStreamId: number | null;
+  destinationChannelId: string | null;
+  /** Requested destination, a hint only if the stored topic is unknown. */
+  likelyTopic?: string;
+  /** Null if the stored topic could not be confirmed. */
+  topic: string | null;
+}
+
 /**
  * A message the agent may have seen was edited, moved to another topic or
  * stream, or deleted — resolved to the channel the message lived in.
@@ -120,6 +146,19 @@ export interface MessageChangeEvent {
   previousTopic: string | null;
   /** The channel the message moved to, when it left this one. */
   movedToChannelId: string | null;
+  /** Retained even when the destination name cannot be resolved. */
+  newStreamId?: number | null;
+  /** Raw own echo shape: used once for anchor suppression, never confirmation. */
+  selfEcho?: MoveEcho;
+  moveEpochs?: ReadonlyMap<string, number>;
+  /** Tool success can cover uncached conversation sources by original topic. */
+  moveScope?: { topic: string | null; propagateMode: SelfMove['propagateMode'] };
+  /** Destination hint, never the previous topic. */
+  likelyTopic?: string;
+  /** No cached messages remain in this deletion's stream and topic. */
+  topicEmpty?: boolean;
+  /** Placement is unconfirmed; refuse automatic reply routing. */
+  routingUncertain?: boolean;
   /** The content after an edit, cleaned like a delivered message; null for a
    *  move or a delete. */
   content: string | null;
@@ -181,6 +220,9 @@ export interface ChannelHistoryPage {
 export interface PlatformAdapter {
   /** Channel ID prefix and ChannelDescriptor.type, e.g. 'zulip'. */
   readonly type: string;
+  readonly selfUserId?: number | null;
+  /** High-water id of all observed messages, including filtered/own traffic. */
+  readonly highestMessageId?: number;
 
   /** Discover all channels visible to this connection. */
   discoverChannels(): Promise<ChannelDescriptor[]>;
@@ -248,6 +290,13 @@ export interface PlatformAdapter {
   noteSelfDeleted?(messageId: number): void;
   /** That deletion failed: the message still exists. */
   forgetSelfDeleted?(messageId: number): void;
+
+  /** The bot's own changes reconcile local routing without delivering a
+   *  marker to the host or waking the agent. */
+  onSelfChanged?: OnMessageChange;
+  /** Reconcile a successful tool move before returning its result. */
+  noteSelfMoved?(move: SelfMove): void;
+
 
   /**
    * Start delivering real-time messages. Adapters filter the bot's own

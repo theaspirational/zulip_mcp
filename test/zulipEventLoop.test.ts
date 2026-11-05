@@ -430,9 +430,9 @@ test('edits, topic moves and deletions reach onChange; re-renders and unchanged 
   await loop.start(zulipClient, (_s, m) => { messages.push(m); }, undefined, undefined, (c) => { changes.push(c); });
   assert.deepEqual(messages, [], 'changes never reach onMessage');
   assert.deepEqual(changes, [
-    { kind: 'edit', messageId: 77, messageIds: [77], actorId: 9, editedAt: 1_710_000_100, content: 'new @**bot**', origContent: 'old', topic: null, origTopic: null, streamId: 7, newStreamId: null, flags: ['mentioned'] },
-    { kind: 'edit', messageId: 79, messageIds: [79, 80, 81], actorId: 12, editedAt: 1_710_000_102, content: null, origContent: null, topic: 'new topic', origTopic: 'old topic', streamId: 7, newStreamId: null, flags: [] },
-    { kind: 'edit', messageId: 82, messageIds: [82], actorId: 12, editedAt: 1_710_000_103, content: null, origContent: null, topic: null, origTopic: 'same', streamId: 7, newStreamId: 8, flags: [] },
+    { kind: 'edit', propagateMode: null, messageId: 77, messageIds: [77], actorId: 9, editedAt: 1_710_000_100, content: 'new @**bot**', origContent: 'old', topic: null, origTopic: null, streamId: 7, newStreamId: null, flags: ['mentioned'] },
+    { kind: 'edit', propagateMode: 'change_all', messageId: 79, messageIds: [79, 80, 81], actorId: 12, editedAt: 1_710_000_102, content: null, origContent: null, topic: 'new topic', origTopic: 'old topic', streamId: 7, newStreamId: null, flags: [] },
+    { kind: 'edit', propagateMode: null, messageId: 82, messageIds: [82], actorId: 12, editedAt: 1_710_000_103, content: null, origContent: null, topic: null, origTopic: 'same', streamId: 7, newStreamId: 8, flags: [] },
     { kind: 'delete', messageIds: [84, 85], messageType: 'stream', streamId: 7, topic: 'deploys' },
     { kind: 'delete', messageIds: [86], messageType: 'private', streamId: null, topic: null },
   ]);
@@ -548,4 +548,20 @@ test('stopping in an awaited message handler drops all subsequent events in its 
     loop.stop();
   }, undefined, () => { seen.push('reaction'); }, () => { seen.push('change'); });
   assert.deepEqual(seen, ['message']);
+});
+
+test('R2-7 stopped registration cannot clear the replacement loop state', async () => {
+  const loop = new ZulipEventLoop();
+  let release!: (value: any) => void;
+  let registered = 0, polls = 0;
+  const registration = new Promise(resolve => { release = resolve; });
+  const started = loop.start({ queues: { register: () => registration },
+    events: { retrieve: async () => { polls++; loop.stop(); return { events: [] }; } } },
+    () => {}, undefined, undefined, undefined, () => registered++);
+  await Promise.resolve();
+  loop.stop();
+  release({ queue_id: 'stale', last_event_id: -1 });
+  await started;
+  assert.equal(registered, 0);
+  assert.equal(polls, 0);
 });

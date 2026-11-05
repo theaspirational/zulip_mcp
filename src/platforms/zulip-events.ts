@@ -125,6 +125,7 @@ export type ZulipMessageChange =
       topic: string | null;
       /** The topic before any move (topic or stream); null for a content edit. */
       origTopic: string | null;
+      propagateMode: string | null;
       streamId: number | null;
       /** Set when the message moved to another stream. */
       newStreamId: number | null;
@@ -245,10 +246,11 @@ export class ZulipEventLoop {
     onSystemEvent?: OnSystemEvent,
     onReaction?: OnZulipReaction,
     onChange?: OnZulipMessageChange,
+    onQueueRegistered?: () => void,
   ): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.pollLoop(zulipClient, onMessage, onSystemEvent, onReaction, onChange);
+        await this.pollLoop(zulipClient, onMessage, onSystemEvent, onReaction, onChange, onQueueRegistered);
       } catch (error) {
         if (this.stopped) return;
         console.error('Zulip event loop error, restarting in 5s:', error);
@@ -270,6 +272,7 @@ export class ZulipEventLoop {
     onSystemEvent?: OnSystemEvent,
     onReaction?: OnZulipReaction,
     onChange?: OnZulipMessageChange,
+    onQueueRegistered?: () => void,
   ): Promise<void> {
     // Register event queue.
     // Two zulip-js quirks to work around:
@@ -292,6 +295,7 @@ export class ZulipEventLoop {
       apply_markdown: 'false',
       client_capabilities: JSON.stringify({ notification_settings_null: false, bulk_message_deletion: true }),
     });
+    if (this.stopped) return;
 
     // A refused registration comes back as a value, not a throw. Without
     // this check the loop went on polling queue "undefined" and logged only
@@ -306,6 +310,7 @@ export class ZulipEventLoop {
     }
 
     this.queueId = registration.queue_id;
+    onQueueRegistered?.();
     let lastEventId = registration.last_event_id;
 
     console.error(`Zulip event queue registered: ${this.queueId}`);
@@ -410,6 +415,7 @@ export class ZulipEventLoop {
                 try {
                   onChange({
                     kind: 'edit',
+                    propagateMode: typeof event.propagate_mode === 'string' ? event.propagate_mode : null,
                     messageId: event.message_id,
                     messageIds: Array.isArray(event.message_ids) && event.message_ids.length > 0
                       ? event.message_ids.filter((id): id is number => typeof id === 'number')

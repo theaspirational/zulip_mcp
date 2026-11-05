@@ -32,6 +32,7 @@ import type {
   PlatformAdapter,
   PublishResult,
   RoutingHints,
+  SelfMove,
 } from './adapter.js';
 import { ZulipEventLoop, type ZulipMessageChange } from './zulip-events.js';
 import { chunkMessage, cleanMarkdown } from '../content.js';
@@ -122,6 +123,9 @@ type QuoteVerdict = 'reply' | 'not-reply' | 'ineligible' | 'unverified' | 'budge
 /** A recently seen message, as the cache places reactions and changes. */
 interface SeenMessage {
   channelId: string;
+  /** Historical placement, not yet confirmed after a move. Reactions/edits
+   *  must GET again rather than route by this old channel/topic. */
+  placementUnknown?: boolean;
   authorId: number;
   authorName: string;
   authorEmail: string;
@@ -136,7 +140,7 @@ interface SeenMessage {
 
 /** How long a GET placing a change may take before the change is dropped
  *  rather than wedging every change behind it. */
-const LOCATE_TIMEOUT_MS = 15_000;
+export const LOCATE_TIMEOUT_MS = 15_000;
 /** Wait budget for one incoming stream message's quote targets. */
 const QUOTE_TIMEOUT_MS = 3_000;
 /** Maximum uncached quote-target GETs shared by a history page. */
@@ -160,7 +164,7 @@ class LookupTimeoutError extends Error {}
 
 /** Bound the wait only: zulip-js does not pass an AbortSignal to fetch, so
  *  the underlying request can outlive this timer. */
-function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new LookupTimeoutError(`${what} timed out after ${ms}ms`)), ms);
@@ -200,6 +204,8 @@ const DEFAULT_DM_DISCOVERY_LIMIT = 300;
 
 export class ZulipAdapter implements PlatformAdapter {
   readonly type = 'zulip';
+  highestMessageId = 0;
+  onSelfChanged?: OnMessageChange;
 
   private eventLoop: ZulipEventLoop | null = null;
   private readonly identity: ZulipIdentity;
@@ -366,6 +372,7 @@ export class ZulipAdapter implements PlatformAdapter {
       assertApiSuccess(result, 'recent direct messages');
       for (const raw of (result?.messages ?? []) as ZulipRawMessage[]) {
         const m = normalizeMessage(raw);
+        this.highestMessageId = Math.max(this.highestMessageId, m.id);
         if (!m.isDm) continue;
         if (!this.filters.dmAllowed({ id: m.authorId, email: m.authorEmail }) && m.authorId !== this.identity.selfUserId) continue;
         this.describeDm(m);
@@ -378,6 +385,7 @@ export class ZulipAdapter implements PlatformAdapter {
 
   private remember(channelId: string, m: ZulipMessage): void {
     this.failedQuoteLookups.delete(m.id);
+    this.highestMessageId = Math.max(this.highestMessageId, m.id);
     if (this.seen.size >= ZulipAdapter.SEEN_CAP) {
       const oldest = this.seen.keys().next().value;
       if (oldest !== undefined) this.seen.delete(oldest);
@@ -414,7 +422,7 @@ export class ZulipAdapter implements PlatformAdapter {
   /** Where a message lives — from the recent-messages cache, else one GET. */
   private async locate(messageId: number, purpose = 'a reaction', timeoutMs = LOCATE_TIMEOUT_MS, quoteLookup = false): Promise<SeenMessage | null> {
     const cached = this.seen.get(messageId);
-    if (cached) return cached;
+    if (cached && !cached.placementUnknown) return cached;
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await withTimeout<any>(
@@ -434,6 +442,7 @@ export class ZulipAdapter implements PlatformAdapter {
       const m = normalizeMessage(raw);
       const channelId = channelIdOf(m, this.identity.selfUserId);
       this.remember(channelId, m);
+      this.movedAway.delete(messageId);
       return this.seen.get(messageId) ?? null;
     } catch (err) {
       console.error(`[zulip-mcp] could not resolve message ${messageId} for ${purpose}:`, (err as Error).message);
@@ -490,6 +499,78 @@ export class ZulipAdapter implements PlatformAdapter {
         targets.size === previous.quoteTargets.size && [...targets].every((id) => previous.quoteTargets.has(id)));
   }
 
+  /** Self-move events only invalidate; they never confirm placement or start GETs. */
+  private reportSelfMove(change: Extract<ZulipMessageChange, { kind: 'edit' }>, channelId: string,
+    ids = [...new Set([change.messageId, ...change.messageIds])]): void {
+    if (change.newStreamId !== null && !this.streamNamesById.has(change.newStreamId)) {
+      const now = Date.now();
+      for (const [id, at] of this.movedAway) if (now - at > MOVED_AWAY_TTL_MS) this.movedAway.delete(id);
+      for (const id of ids) this.movedAway.set(id, now);
+    }
+    for (const id of ids) {
+      const at = this.seen.get(id);
+      if (at) this.seen.set(id, { ...at, placementUnknown: true });
+    }
+    this.emitSelfMove(change.messageId, ids, channelId, change.origTopic, null, null, true,
+      { newStreamId: change.newStreamId, selfEcho: {
+        messageId: String(change.messageId), channelId, previousTopic: change.origTopic,
+        topic: change.topic ?? change.origTopic, newStreamId: change.newStreamId,
+        propagateMode: change.propagateMode,
+        destinationChannelId: change.newStreamId === null ? channelId
+          : this.streamNamesById.has(change.newStreamId)
+            ? zulipChannelId(this.streamNamesById.get(change.newStreamId)!) : null,
+      } });
+  }
+
+  private emitSelfMove(messageId: number, ids: number[], channelId: string, previousTopic: string | null,
+    destination: string | null, topic: string | null, uncertain = false,
+    extra: Partial<MessageChangeEvent> = {}): void {
+    const at = this.seen.get(messageId);
+    this.onSelfChanged?.({
+      kind: 'move', channelId, messageId: String(messageId), messageIds: ids.map(String),
+      authorId: at ? String(at.authorId) : null, authorName: at?.authorName ?? null,
+      authorEmail: at?.authorEmail ?? null,
+      actorId: this.identity.selfUserId === null ? null : String(this.identity.selfUserId),
+      topic: topic ?? '', previousTopic,
+      movedToChannelId: destination === channelId ? null : destination,
+      routingUncertain: uncertain, content: null, previousContent: null,
+      mentioned: at?.mentioned ?? false, previouslyMentioned: at?.mentioned ?? null,
+      vanished: false, isDM: false, onOwnMessage: at?.authorId === this.identity.selfUserId,
+      timestamp: new Date(), ...extra,
+    });
+  }
+
+  /** Only the tool's result confirms its anchor. Range scope is grounds for
+   * uncertainty, never for re-seating another message or conversation. */
+  noteSelfMoved(move: SelfMove): void {
+    this.highestMessageId = Math.max(this.highestMessageId, move.messageId);
+    const cached = this.seen.get(move.messageId);
+    let source = move.source ?? (cached && !cached.isDm && !cached.placementUnknown
+      ? { channelId: cached.channelId, topic: cached.topic } : null);
+    // A topic-only PATCH cannot cross streams: this cache entry is stale.
+    if (move.source === null && move.newStreamId === null && move.destinationChannelId !== null &&
+        source?.channelId !== move.destinationChannelId) source = null;
+    const sourceChannel = source?.channelId ??
+      (move.newStreamId === null ? move.destinationChannelId : null);
+    if (move.newStreamId !== null && move.destinationChannelId !== null) {
+      this.streamNamesById.set(move.newStreamId, streamNameOf(move.destinationChannelId));
+    }
+    for (const [id, at] of this.seen) {
+      const inScope = !at.isDm && (sourceChannel === null || at.channelId === sourceChannel) &&
+        (!source || at.topic.toLowerCase() === source.topic.toLowerCase());
+      const exact = id === move.messageId;
+      if (!exact && !(inScope && (move.propagateMode === 'change_all' ||
+          (move.propagateMode === 'change_later' && id >= move.messageId)))) continue;
+      const confirmed = exact && move.destinationChannelId !== null && move.topic !== null;
+      this.seen.set(id, { ...at, placementUnknown: !confirmed,
+        ...(confirmed ? { channelId: move.destinationChannelId!, topic: move.topic! } : {}) });
+    }
+    this.emitSelfMove(move.messageId, [move.messageId], sourceChannel ?? 'zulip:unknown',
+      source?.topic ?? null, move.destinationChannelId, move.topic, move.topic === null,
+      { likelyTopic: move.topic ?? move.likelyTopic, moveEpochs: move.moveEpochs, newStreamId: move.newStreamId, moveScope: { topic: source?.topic ?? null,
+        propagateMode: move.propagateMode } });
+  }
+
   /**
    * The allowlists as the live event path applies them to a placed message.
    * A DM is judged by its sender; the bot's own DM message has no sender to
@@ -515,18 +596,23 @@ export class ZulipAdapter implements PlatformAdapter {
    * names — a deleted DM the cache never saw cannot be placed and is dropped.
    */
   private async onZulipChange(change: ZulipMessageChange, emit: OnMessageChange): Promise<void> {
+    this.highestMessageId = Math.max(this.highestMessageId, ...change.messageIds);
     const self = this.identity.selfUserId;
     if (change.kind === 'edit') {
-      if (self !== null && change.actorId === self) return;
       const cached = this.seen.get(change.messageId) ?? null;
-      // A cache miss GETs the message as it reads NOW. For a content edit
-      // that is the right place; for a cross-stream move it is the stream
-      // the message went to, and the agent only ever saw it in the one it
-      // came from — which the event names.
-      const where = cached ?? await this.locate(change.messageId, 'an edit');
+      const selfMove = self !== null && change.actorId === self &&
+        (change.topic !== null || change.newStreamId !== null);
+      if (selfMove) {
+        const fromName = change.streamId === null ? undefined : this.streamNamesById.get(change.streamId);
+        this.reportSelfMove(change, fromName ? zulipChannelId(fromName) : cached?.channelId ?? 'zulip:unknown');
+        return;
+      }
+      const where = cached && !cached.placementUnknown ? cached : await this.locate(change.messageId, 'an edit');
       if (!where) return;
       const crossStream = change.newStreamId !== null && !where.isDm;
-      const fromStream = crossStream && change.streamId !== null ? await this.streamNameById(change.streamId) : null;
+      const fromStream = (crossStream || change.origTopic !== null) && change.streamId !== null
+        ? await this.streamNameById(change.streamId)
+        : null;
       // A cross-stream move of an uncached message whose origin cannot be
       // named has nowhere honest to go: the GET only knows the destination.
       if (crossStream && !cached && fromStream === null) {
@@ -535,11 +621,12 @@ export class ZulipAdapter implements PlatformAdapter {
       }
       const fromChannelId = fromStream !== null ? zulipChannelId(fromStream) : where.channelId;
       const placed: SeenMessage = { ...where, channelId: fromChannelId };
-      if (!this.changeAllowed(placed)) return;
       const content = change.content !== null ? cleanMarkdown(change.content) : null;
       const previousContent = change.origContent !== null ? cleanMarkdown(change.origContent) : null;
       const topic = change.topic ?? where.topic;
-      const movedToStream = crossStream ? await this.streamNameById(Number(change.newStreamId)) : null;
+      const movedToStream = crossStream
+        ? await this.streamNameById(Number(change.newStreamId))
+        : null;
       const movedToChannelId = movedToStream !== null ? zulipChannelId(movedToStream) : null;
       // Zulip's verdict on the new content replaces the cached one only when
       // the content changed; a move keeps the mention it had (the event's
@@ -556,6 +643,7 @@ export class ZulipAdapter implements PlatformAdapter {
       this.seen.set(change.messageId, {
         ...where,
         topic,
+        placementUnknown: crossStream && movedToChannelId === null,
         mentioned,
         replyToSelf,
         quoteTargets,
@@ -566,15 +654,24 @@ export class ZulipAdapter implements PlatformAdapter {
         for (const id of change.messageIds) {
           if (id === change.messageId) continue;
           const co = this.seen.get(id);
-          if (co) this.seen.set(id, { ...co, topic, ...(movedToChannelId !== null ? { channelId: movedToChannelId } : {}) });
+          if (co) this.seen.set(id, {
+            ...co, topic,
+            ...(movedToChannelId !== null ? { channelId: movedToChannelId, placementUnknown: false } : {}),
+          });
         }
       }
       if (crossStream && movedToStream === null) {
         const now = Date.now();
         for (const [id, at] of this.movedAway) if (now - at > MOVED_AWAY_TTL_MS) this.movedAway.delete(id);
-        for (const id of change.messageIds) this.movedAway.set(id, now);
+        for (const id of change.messageIds) {
+          this.movedAway.set(id, now);
+          const historical = this.seen.get(id);
+          if (historical) this.seen.set(id, { ...historical, placementUnknown: true });
+        }
+      } else if (movedToChannelId !== null) {
+        for (const id of change.messageIds) this.movedAway.delete(id);
       }
-      emit({
+      const event: MessageChangeEvent = {
         kind: content !== null ? 'edit' : 'move',
         channelId: fromChannelId,
         messageId: String(change.messageId),
@@ -586,6 +683,7 @@ export class ZulipAdapter implements PlatformAdapter {
         topic,
         previousTopic: change.topic !== null ? change.origTopic : null,
         movedToChannelId,
+        newStreamId: change.newStreamId,
         content,
         previousContent,
         mentioned,
@@ -598,7 +696,12 @@ export class ZulipAdapter implements PlatformAdapter {
         isDM: where.isDm,
         onOwnMessage: self !== null && where.authorId === self,
         timestamp: new Date(change.editedAt * 1000),
-      });
+      };
+      if (self !== null && change.actorId === self) {
+        this.onSelfChanged?.(event);
+        return;
+      }
+      if (this.changeAllowed(placed)) emit(event);
       return;
     }
 
@@ -609,12 +712,16 @@ export class ZulipAdapter implements PlatformAdapter {
     // A bulk deletion is reported under an id the cache can vouch for, so the
     // line never shows one message's id with another's author and quote.
     const placedId = ids.find((id) => this.seen.has(id)) ?? ids[0];
-    const cached = this.seen.get(placedId) ?? null;
+    let cached = this.seen.get(placedId) ?? null;
     const now = Date.now();
     const vanished = ids.some((id) => {
       const at = this.movedAway.get(id);
       return at !== undefined && now - at <= MOVED_AWAY_TTL_MS;
     });
+    if (cached?.placementUnknown && !vanished) {
+      const name = change.streamId === null ? undefined : this.streamNamesById.get(change.streamId);
+      cached = { ...cached, channelId: name ? zulipChannelId(name) : cached.channelId, topic: change.topic ?? '' };
+    }
     for (const id of ids) { this.seen.delete(id); this.movedAway.delete(id); }
     let event: MessageChangeEvent | null = null;
     if (cached) {
@@ -668,7 +775,12 @@ export class ZulipAdapter implements PlatformAdapter {
         timestamp: new Date(),
       };
     }
-    if (event) emit(event);
+    if (event) {
+      const { channelId, topic } = event;
+      event.topicEmpty = ![...this.seen.values()].some(at => !at.isDm &&
+        at.channelId === channelId && at.topic.toLowerCase() === topic.toLowerCase());
+      emit(event);
+    }
   }
 
   /** The descriptor for a DM's conversation, remembered once described. */
@@ -725,6 +837,7 @@ export class ZulipAdapter implements PlatformAdapter {
     for (const chunk of chunkMessage(textContent, this.maxMessageLength)) {
       const result = await this.zulipClient.messages.send({ ...target, content: chunk });
       assertApiSuccess(result, what);
+      this.highestMessageId = Math.max(this.highestMessageId, Number(result.id));
       messageIds.push(String(result.id));
     }
     return { delivered: true, messageId: messageIds[messageIds.length - 1], messageIds };
@@ -872,6 +985,7 @@ export class ZulipAdapter implements PlatformAdapter {
     const page = await fetchHistory(this.zulipClient, dmIds
       ? { dmUserIds: dmIds, limit: historySize }
       : { streamName: streamNameOf(channelId), limit: historySize });
+    for (const m of page.messages) this.remember(channelId, m);
     const messages = page.messages.filter((m) => this.allowed(m));
     if (messages.length === 0) return null;
 
@@ -996,16 +1110,18 @@ export class ZulipAdapter implements PlatformAdapter {
     const loop = this.eventLoop = new ZulipEventLoop();
     // Changes are placed asynchronously (a cache miss costs one GET) but must
     // reach the server in queue order: an edit followed by a deletion of the
-    // same message reads backwards otherwise. Every await in the chain is
-    // bounded (LOCATE_TIMEOUT_MS), so one hung GET delays, never wedges.
+    // same message reads backwards otherwise. Reactions await the earlier
+    // change-chain tail so they see completed moves, but do not extend it:
+    // reaction lookups stay parallel and cannot delay later changes.
+    // Every placement lookup is bounded by LOCATE_TIMEOUT_MS.
     let changeChain: Promise<void> = Promise.resolve();
-    const changeHandler = onMessageChange
+    const changeHandler = onMessageChange || this.onSelfChanged
       ? (change: ZulipMessageChange) => {
           changeChain = changeChain
             .then(() => {
               if (this.eventLoop !== loop) return;
               return this.onZulipChange(change, (event) => {
-                if (this.eventLoop === loop) onMessageChange(event);
+                if (this.eventLoop === loop) onMessageChange?.(event);
               });
             })
             .catch((err) => {
@@ -1017,7 +1133,9 @@ export class ZulipAdapter implements PlatformAdapter {
       ? (ev: import('./zulip-events.js').ZulipReactionEvent) => {
           // The bot's own reactions are its own doing; only others' are news.
           if (this.identity.selfUserId !== null && ev.user_id === this.identity.selfUserId) return;
-          void this.locate(ev.message_id).then((where) => {
+          const tail = changeChain;
+          void tail.then(async () => {
+            const where = await this.locate(ev.message_id);
             if (!where || this.eventLoop !== loop) return;
             if (!isDmChannelIdLocal(where.channelId) && !this.filters.streamAllowed(streamNameOf(where.channelId))) return;
             onReaction({
@@ -1033,6 +1151,8 @@ export class ZulipAdapter implements PlatformAdapter {
               messageSnippet: where.snippet,
               timestamp: new Date(),
             });
+          }).catch((err) => {
+            console.error('[zulip-mcp] reaction handling failed:', (err as Error).message);
           });
         }
       : undefined;
