@@ -59,8 +59,8 @@ node --import tsx scripts/zulip-oracle/performance.mts
 
 On Linux with a user systemd instance, each check can be bounded with
 `systemd-run --user --scope -p MemoryMax=4G -p MemorySwapMax=0`.
-Expected results: 8 positive and 16 negative selftests; 16,697 differential cases,
-2,191 changed and zero mismatches.
+Expected results: 8 positive and 16 negative selftests; 19,166 differential cases,
+4,075 changed and zero mismatches.
 
 `proofs.py` proves the complaint: no preceding blank gives a literal paragraph
 with `<br>`; no following blank lets prose become table rows; both blanks give a
@@ -168,9 +168,26 @@ invalid fence openers, and over 2,000 deterministic context/grammar combinations
 Coverage includes LF/CRLF, adjacent/single-column tables, escaped pipes,
 malformed grammar, setext markers, hard breaks, lazy lists, multiline inline
 constructs, container and quote/spoiler/math fences, and agent reports.
-`performance.mts` checks six 1 MiB inputs, including 131072 adjacent candidate
+`performance.mts` checks seven 1 MiB inputs, including 131072 adjacent candidate
 tables, without a size cutoff. The differential reports each corpus separately.
 
 Residual limits: one Zulip version, finite corpus, no live server/database or
 custom realm settings. The published TypeScript deliberately refuses complex
 contexts; agents must still provide blanks in those messages.
+
+### Inline-paragraph widening
+
+The original 16,697 inputs remain in order. An additional 2,304 generated
+agent-like messages combine code, links, resolved message URLs, multiline and
+unmatched spans, adjacent tables, blank/fence isolation, and LF/CRLF; 165 targeted
+inline fixtures are appended too. Total: 19,166 cases, 4,075 normalized, zero
+mismatches. Against the original normalizer, 12 previously refused original
+inputs and 1,872 added inputs now normalize (1,884 total); no prior normalization
+is lost. `proofs.py` adds 24 exact-HTML checks that even unmatched code/link
+openers cannot cross ASCII blank lines or complete fences in Zulip 12.3.
+
+To reproduce coverage, save the original `src/markdown-tables.ts` outside the
+repository as `baseline.mts`, generate the corpus with
+`NORMALIZER_MODULE=file:///absolute/path/to/baseline.mts`, then compare that JSONL
+with the current JSONL using `node scripts/zulip-oracle/coverage.mjs BEFORE AFTER`.
+The baseline is commit `afcc0b34dbc2517500912c0274f12da8a7646c98`.

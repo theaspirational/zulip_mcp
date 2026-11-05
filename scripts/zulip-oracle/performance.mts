@@ -4,6 +4,7 @@ const MiB = 1024 * 1024;
 // Include the adjacent-table adversarial shape, not only a long plain string.
 const cases: [string, string][] = [
   ['many-tables', 'a|b\n-|-\n'.repeat(MiB / 8)],
+  ['isolated-inline-paragraphs', ('`code` [link](https://example.invalid)\n\n').repeat(27000).slice(0, MiB - 21) + '\n\nIntro\na|b\n-|-\nAfter'],
   ['long-line', 'x'.repeat(MiB)],
   ['many-pipes', '|'.repeat(MiB)],
   ['large-table', 'a|b\n-|-\n' + 'c|d\n'.repeat((MiB - 8) / 4)],

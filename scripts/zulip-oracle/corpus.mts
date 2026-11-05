@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { normalizeMarkdownTables } from '../../src/markdown-tables.ts';
+import { inlineTableCases } from '../../test/markdownTableInlineCases.ts';
 import { reviewTableCases } from '../../test/markdownTableCases.ts';
 const module = process.env.NORMALIZER_MODULE;
 const normalize = module ? (await import(module)).normalizeMarkdownTables : normalizeMarkdownTables;
@@ -71,3 +72,36 @@ for (const {name, input} of JSON.parse(readFileSync(new URL('./corpus-b.json', i
 
 // Independent 11,520 source inputs; recompute outputs locally.
 for (const {name, input} of JSON.parse(gunzipSync(readFileSync(new URL('./corpus-c.json.gz', import.meta.url))).toString('utf8'))) emit(name, input);
+
+// Agent-like inline contexts: vary paragraph/fence isolation independently on
+// either side. Single-newline variants exercise refusal at insertion boundaries.
+const inlineContexts = [
+  'Ran `npm test` successfully.', 'Use ``literal ` tick`` here.',
+  '[Docs](https://example.invalid/docs)',
+  '[message](https://example.invalid/#narrow/channel/1/topic/report/near/123)',
+  'Read [multi\nline label](https://example.invalid).',
+  'Read [label](https://example.invalid/\npath).',
+  'Run `multi\nline command` next.', 'Run ``multi\n`line`` next.',
+  'An unmatched `code opener', 'An unmatched [link opener',
+  'Escaped \\`tick and \\[bracket', '[label][ref]\n\n[ref]: https://example.invalid',
+  'Image ![alt](https://example.invalid/image.png)',
+  'Nested [a [b] c](https://example.invalid)',
+  '`code with [brackets]`', '[`code label`](https://example.invalid)',
+  '[label](https://example.invalid/a_(b))', '[label](https://example.invalid "title")',
+  '[open\nlabel', '[label](\nhttps://example.invalid)',
+  'Adjacent `one` and ``two``.', '[one](https://example.invalid) [two](https://example.invalid)',
+  'Status: [resolved message](https://example.invalid/#narrow/near/456)',
+  'Unicode `café` and [résumé](https://example.invalid)',
+];
+for (const context of inlineContexts) for (const gap of ['\n', '\n\n', '\n \t\n', '\n~~~text\nopaque\n~~~\n'])
+  for (const layout of [0, 1, 2, 3]) for (const ending of ['\n', '\r\n'])
+    for (const table of ['a|b\n-|-\nc|d', '|a|\n|:|\n|b|', 'a|b\n-|-']) {
+      const report = `Results:\n${table}\nDone.`;
+      const input = layout === 0 ? context + gap + report :
+        layout === 1 ? report + gap + context :
+        layout === 2 ? context + gap + report + gap + context :
+        '`open\n' + context + gap + report + gap + 'close`';
+      emit('generated inline agent ' + JSON.stringify([context, gap, layout, ending, table]), input.replaceAll('\n', ending));
+    }
+
+for (const {0: name, 1: input} of inlineTableCases) emit('inline unit: ' + name, input);

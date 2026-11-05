@@ -28,3 +28,23 @@ for name, source in cases.items():
     if name == 'setext disabled':
         assert '<h1>' not in html and '<br>' in html
 print('Zulip 12.3 markdown_convert proofs: PASS')
+
+# Inline spans are scoped to Zulip blocks, not balanced across the message.
+# Assert exact surrounding HTML, including unmatched delimiters and line breaks.
+span_proofs = 0
+for left, right in [('`open', 'close`'), ('``open', 'close``'),
+                    ('[open', 'close](https://example.invalid)'),
+                    ('[open](', 'https://example.invalid)')]:
+    for gap in ['\n\n', '\n \t\n', '\n~~~text\nopaque\n~~~\n']:
+        for ending in ['\n', '\r\n']:
+            source = (left + gap + T + gap + right).replace('\n', ending)
+            expected = render(left) + '\n'
+            if '~~~' in gap:
+                expected += render('~~~text\nopaque\n~~~') + '\n'
+            expected += render(T) + '\n'
+            if '~~~' in gap:
+                expected += render('~~~text\nopaque\n~~~') + '\n'
+            expected += render(right)
+            assert render(source) == expected, (left, gap, ending, render(source))
+            span_proofs += 1
+print(f'Inline paragraph/fence isolation: {span_proofs} exact-HTML proofs PASS')
