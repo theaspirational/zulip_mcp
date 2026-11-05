@@ -1,0 +1,550 @@
+[
+  {
+    "name": "review-a-1",
+    "input": "Intro\na|b\n---\nAfter"
+  },
+  {
+    "name": "review-a-2",
+    "input": "Intro\na\\|b\n---\nAfter"
+  },
+  {
+    "name": "review-a-3",
+    "input": "Intro\n`a|b`\n---\nAfter"
+  },
+  {
+    "name": "review-a-4",
+    "input": "Intro\na|b\n:|:\nAfter"
+  },
+  {
+    "name": "review-a-5",
+    "input": "- item\n# Heading\n| a | b |\n|-|-|\n| c | d |\nAfter"
+  },
+  {
+    "name": "review-a-6",
+    "input": "# Heading\n| a | b |\n|-|-|\n| c | d |\nAfter"
+  },
+  {
+    "name": "review-a-7",
+    "input": "> quote\n| a | b |\n|-|-|\n| c | d |\nAfter"
+  },
+  {
+    "name": "review-a-8",
+    "input": "````\n```\n| a | b |\n|-|-|\n| c | d |\nAfter\n````"
+  },
+  {
+    "name": "review-a-9",
+    "input": "Intro\r\n| a | b |\n|-|-|\n| c | d |\r\nAfter"
+  },
+  {
+    "name": "review-a-10",
+    "input": "prefix `\na|b\n-|-\nend`"
+  },
+  {
+    "name": "review-a-11",
+    "input": "````\n`````\nIntro\na|b\n-|-\nAfter\n````"
+  },
+  {
+    "name": "review-a-12",
+    "input": "<pre>\na|b\n-|-\n</pre>"
+  },
+  {
+    "name": "review-a-13",
+    "input": "$$\na|b\n-|-\n$$"
+  },
+  {
+    "name": "review-a-14",
+    "input": "---\na|b\n---\n---"
+  },
+  {
+    "name": "review-a-15",
+    "input": "[label\na|b\n-|-\nend](https://example.invalid)"
+  },
+  {
+    "name": "review-a-16",
+    "input": "Intro\nhttp://x/a|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-17",
+    "input": "Intro\na|b\\|\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-18",
+    "input": "Intro\na|`b|c\n-|-|-\nAfter"
+  },
+  {
+    "name": "review-a-19",
+    "input": "> Intro\n> a|b\n> -|-\n> After"
+  },
+  {
+    "name": "review-a-20",
+    "input": "- Intro\n  a|b\n  -|-\n  After"
+  },
+  {
+    "name": "review-a-21",
+    "input": "💬\na|bé\n-|-\n🎉"
+  },
+  {
+    "name": "review-a-22",
+    "input": "*prefix\na|b\n-|-\nend*"
+  },
+  {
+    "name": "review-a-23",
+    "input": "**prefix\na|b\n-|-\nend**"
+  },
+  {
+    "name": "review-a-24",
+    "input": "_prefix\na|b\n-|-\nend_"
+  },
+  {
+    "name": "review-a-25",
+    "input": "__prefix\na|b\n-|-\nend__"
+  },
+  {
+    "name": "review-a-26",
+    "input": "***prefix\na|b\n-|-\nend***"
+  },
+  {
+    "name": "review-a-27",
+    "input": "&lt;tag&gt;\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-28",
+    "input": "&#124;\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-29",
+    "input": "https://example.invalid/a|b\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-30",
+    "input": "@**name**\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-31",
+    "input": "@_**silent**\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-32",
+    "input": "#**stream>topic**\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-33",
+    "input": "💬 café\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-34",
+    "input": "***\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-35",
+    "input": "Heading\n---\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-36",
+    "input": "Heading\n===\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-37",
+    "input": "\tindented\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-38",
+    "input": "    indented\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-39",
+    "input": "```spoiler\na|b\n-|-\nAfter\n```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-40",
+    "input": " ```spoiler\na|b\n-|-\nAfter\n ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-41",
+    "input": "  ```spoiler\na|b\n-|-\nAfter\n  ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-42",
+    "input": "   ```spoiler\na|b\n-|-\nAfter\n   ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-43",
+    "input": "    ```spoiler\na|b\n-|-\nAfter\n    ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-44",
+    "input": "```quote\na|b\n-|-\nAfter\n```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-45",
+    "input": " ```quote\na|b\n-|-\nAfter\n ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-46",
+    "input": "  ```quote\na|b\n-|-\nAfter\n  ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-47",
+    "input": "   ```quote\na|b\n-|-\nAfter\n   ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-48",
+    "input": "    ```quote\na|b\n-|-\nAfter\n    ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-49",
+    "input": "```math\na|b\n-|-\nAfter\n```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-50",
+    "input": " ```math\na|b\n-|-\nAfter\n ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-51",
+    "input": "  ```math\na|b\n-|-\nAfter\n  ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-52",
+    "input": "   ```math\na|b\n-|-\nAfter\n   ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-53",
+    "input": "    ```math\na|b\n-|-\nAfter\n    ```\n\nIntro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-54",
+    "input": "a|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-55",
+    "input": "a|b\r\n-|-\r\nAfter"
+  },
+  {
+    "name": "review-a-56",
+    "input": "Intro\na|b\n-|-"
+  },
+  {
+    "name": "review-a-57",
+    "input": "Intro\r\na|b\r\n-|-"
+  },
+  {
+    "name": "review-a-58",
+    "input": "a|b\n-|-"
+  },
+  {
+    "name": "review-a-59",
+    "input": "a|b\r\n-|-"
+  },
+  {
+    "name": "review-a-60",
+    "input": "Intro\na|b\n-|-\nAfter"
+  },
+  {
+    "name": "review-a-61",
+    "input": "Intro\r\na|b\r\n-|-\r\nAfter"
+  },
+  {
+    "name": "review-a-62",
+    "input": "````\n- ````\n\nIntro\na|b\n-|-\nAfter\n````"
+  },
+  {
+    "name": "review-a-63",
+    "input": "a|b\n-|-\nc|d\n==="
+  },
+  {
+    "name": "review-a-64",
+    "input": "a|b\n-|-\nc|d\n---"
+  },
+  {
+    "name": "review-a-65",
+    "input": "a|b\n-|-\nc|d\n-"
+  },
+  {
+    "name": "review-a-66",
+    "input": "a|b\n-|-\nc|d\n="
+  },
+  {
+    "name": "review-a-67",
+    "input": "a|b\n-|-\nc|d\nHeading\n==="
+  },
+  {
+    "name": "review-a-68",
+    "input": "a|b\n-|-\nc|d\nHeading\n---"
+  },
+  {
+    "name": "review-a-69",
+    "input": "a|b\n-|-\nc|d\n1. item"
+  },
+  {
+    "name": "review-a-70",
+    "input": "a|b\n-|-\nc|d\n+ item"
+  },
+  {
+    "name": "review-a-71",
+    "input": "a|b\n-|-\nc|d\n:emoji:"
+  },
+  {
+    "name": "review-a-72",
+    "input": "a|b\n-|-\nc|d\n/me waves"
+  },
+  {
+    "name": "review-a-73",
+    "input": "a|b\n-|-\nc|d\n{foo}"
+  },
+  {
+    "name": "review-a-74",
+    "input": "a|b\n-|-\nc|d\nDone.  \nMore"
+  },
+  {
+    "name": "review-a-75",
+    "input": "Intro\na|b\n-|-\nc|d\n==="
+  },
+  {
+    "name": "review-a-76",
+    "input": "Intro\na|b\n-|-\nc|d\n---"
+  },
+  {
+    "name": "review-a-77",
+    "input": "Intro\na|b\n-|-\nc|d\n-"
+  },
+  {
+    "name": "review-a-78",
+    "input": "Intro\na|b\n-|-\nc|d\n="
+  },
+  {
+    "name": "review-a-79",
+    "input": "Intro\na|b\n-|-\nc|d\nHeading\n==="
+  },
+  {
+    "name": "review-a-80",
+    "input": "Intro\na|b\n-|-\nc|d\nHeading\n---"
+  },
+  {
+    "name": "review-a-81",
+    "input": "Intro\na|b\n-|-\nc|d\n1. item"
+  },
+  {
+    "name": "review-a-82",
+    "input": "Intro\na|b\n-|-\nc|d\n+ item"
+  },
+  {
+    "name": "review-a-83",
+    "input": "Intro\na|b\n-|-\nc|d\n:emoji:"
+  },
+  {
+    "name": "review-a-84",
+    "input": "Intro\na|b\n-|-\nc|d\n/me waves"
+  },
+  {
+    "name": "review-a-85",
+    "input": "Intro\na|b\n-|-\nc|d\n{foo}"
+  },
+  {
+    "name": "review-a-86",
+    "input": "Intro\na|b\n-|-\nc|d\nDone.  \nMore"
+  },
+  {
+    "name": "review-a-87",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n==="
+  },
+  {
+    "name": "review-a-88",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n---"
+  },
+  {
+    "name": "review-a-89",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n-"
+  },
+  {
+    "name": "review-a-90",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n="
+  },
+  {
+    "name": "review-a-91",
+    "input": "Heading\n===\na|b\n-|-\nc|d\nHeading\n==="
+  },
+  {
+    "name": "review-a-92",
+    "input": "Heading\n===\na|b\n-|-\nc|d\nHeading\n---"
+  },
+  {
+    "name": "review-a-93",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n1. item"
+  },
+  {
+    "name": "review-a-94",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n+ item"
+  },
+  {
+    "name": "review-a-95",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n:emoji:"
+  },
+  {
+    "name": "review-a-96",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n/me waves"
+  },
+  {
+    "name": "review-a-97",
+    "input": "Heading\n===\na|b\n-|-\nc|d\n{foo}"
+  },
+  {
+    "name": "review-a-98",
+    "input": "Heading\n===\na|b\n-|-\nc|d\nDone.  \nMore"
+  },
+  {
+    "name": "review-a-99",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n==="
+  },
+  {
+    "name": "review-a-100",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n---"
+  },
+  {
+    "name": "review-a-101",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n-"
+  },
+  {
+    "name": "review-a-102",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n="
+  },
+  {
+    "name": "review-a-103",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\nHeading\n==="
+  },
+  {
+    "name": "review-a-104",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\nHeading\n---"
+  },
+  {
+    "name": "review-a-105",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n1. item"
+  },
+  {
+    "name": "review-a-106",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n+ item"
+  },
+  {
+    "name": "review-a-107",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n:emoji:"
+  },
+  {
+    "name": "review-a-108",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n/me waves"
+  },
+  {
+    "name": "review-a-109",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\n{foo}"
+  },
+  {
+    "name": "review-a-110",
+    "input": "1. item\ntext\na|b\n-|-\nc|d\nDone.  \nMore"
+  },
+  {
+    "name": "review-a-111",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n==="
+  },
+  {
+    "name": "review-a-112",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n---"
+  },
+  {
+    "name": "review-a-113",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n-"
+  },
+  {
+    "name": "review-a-114",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n="
+  },
+  {
+    "name": "review-a-115",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\nHeading\n==="
+  },
+  {
+    "name": "review-a-116",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\nHeading\n---"
+  },
+  {
+    "name": "review-a-117",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n1. item"
+  },
+  {
+    "name": "review-a-118",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n+ item"
+  },
+  {
+    "name": "review-a-119",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n:emoji:"
+  },
+  {
+    "name": "review-a-120",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n/me waves"
+  },
+  {
+    "name": "review-a-121",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\n{foo}"
+  },
+  {
+    "name": "review-a-122",
+    "input": "+ item\ntext\na|b\n-|-\nc|d\nDone.  \nMore"
+  },
+  {
+    "name": "review-a-123",
+    "input": "Intro\n**a** b**|c**\n-|-\nx|y\nAfter"
+  },
+  {
+    "name": "review-a-124",
+    "input": "Intro\n*a* b*|c*\n-|-\nx|y\nAfter"
+  },
+  {
+    "name": "review-a-125",
+    "input": "Intro\na|**x** y** z**\n-|-\nx|y\nAfter"
+  },
+  {
+    "name": "review-a-126",
+    "input": "Intro\na|foo  \n-|-\nx|y\nAfter"
+  },
+  {
+    "name": "review-a-127",
+    "input": "Intro\na|:emoji:\n-|-\nx|y\nAfter"
+  },
+  {
+    "name": "review-a-128",
+    "input": "Intro\na|b\n-|-\nc|d\nHeading\n==="
+  },
+  {
+    "name": "review-a-129",
+    "input": "Intro\r\na|b\r\n-|-\r\nc|d\r\nHeading\r\n==="
+  },
+  {
+    "name": "review-a-130",
+    "input": "Intro\na|b\n-|-\nc|d\nHeading\n---"
+  },
+  {
+    "name": "review-a-131",
+    "input": "Intro\r\na|b\r\n-|-\r\nc|d\r\nHeading\r\n---"
+  },
+  {
+    "name": "review-a-132",
+    "input": "1. item\ncontinuation\na|b\n-|-\nc|d\nAfter"
+  },
+  {
+    "name": "review-a-133",
+    "input": "1. item\r\ncontinuation\r\na|b\r\n-|-\r\nc|d\r\nAfter"
+  },
+  {
+    "name": "review-a-134",
+    "input": "+ item\ncontinuation\na|b\n-|-\nc|d\nAfter"
+  },
+  {
+    "name": "review-a-135",
+    "input": "+ item\r\ncontinuation\r\na|b\r\n-|-\r\nc|d\r\nAfter"
+  },
+  {
+    "name": "review-a-136",
+    "input": "Intro  \na|b\n-|-\nc|d\nAfter"
+  },
+  {
+    "name": "review-a-137",
+    "input": "Intro  \r\na|b\r\n-|-\r\nc|d\r\nAfter"
+  }
+]
