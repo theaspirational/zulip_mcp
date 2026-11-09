@@ -81,9 +81,10 @@ Discord and Slack adapters that once lived here moved to those servers.
   unreadable targets fail closed except for the unchanged-target cached
   verdict described above. An unaccepted live-verified
   reply keeps its verdict through sweep deduplication and retries only when
-  history is inconclusive and its quote targets are unchanged (an evicted
-  cache entry also qualifies). Changed targets, removed quotes and explicit
-  mentions clear the pending reply verdict. Only API errors with
+  history is inconclusive and its quote targets match the targets captured
+  with the live verdict in the server, even after adapter-cache eviction or
+  intervening history/context reads. Changed targets, removed quotes and
+  explicit mentions cannot reuse the pending reply verdict. Only API errors with
   `result: "error"` and `code: "BAD_REQUEST"` (missing or inaccessible targets)
   are cached for three minutes. On pre-5.0 servers without a code, the legacy
   `msg: "Invalid message(s)"` is used instead. Other API errors, missing message objects, mismatched message ids,

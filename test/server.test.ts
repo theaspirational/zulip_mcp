@@ -668,8 +668,9 @@ function streamMsg(id: number, over: Partial<IncomingChannelMessage> & { mention
     timestamp: new Date(1_700_000_000_000 + id * 1000).toISOString(),
     content: [{ type: 'text', text }],
     tags: [mentioned ? 'chat:mention' : 'chat:ambient', 'chat:from-human'],
-    metadata: { topic: 'deploys', mentioned, isDM: false },
     ...rest,
+    // Fake-adapter fixtures use target 200; real-adapter tests parse raw quotes.
+    metadata: { quoteTargets: [200], ...(rest.metadata ?? { topic: 'deploys', mentioned, isDM: false }) },
   };
 }
 
@@ -2852,7 +2853,7 @@ test('a reply missing from replay history releases both its hold and pending ver
     h.adapter.emit!(streamMsg(6));
     await until(() => h.server.delivery.watermark('zulip:general') === 6, 'missing reply released');
     assert.deepEqual(h.server.delivery.heldIds('zulip:general'), []);
-    const pending = (h.server as unknown as { pendingReplies: Map<string, Set<number>> }).pendingReplies;
+    const pending = (h.server as unknown as { pendingReplies: Map<string, Map<number, readonly number[]>> }).pendingReplies;
     assert.equal(pending.get('zulip:general')?.has(5) ?? false, false);
   } finally { await h.close(); }
 });
@@ -3065,7 +3066,7 @@ test('R2-7: closed-channel catch-up forgets a held reply missing from history', 
       metadata: { mentioned: false, replyToSelf: true, isDM: false }, tags: ['chat:reply'],
     }));
     await until(() => h.server.delivery.heldIds('zulip:general').includes(5), 'reply held');
-    const pending = (h.server as unknown as { pendingReplies: Map<string, Set<number>> }).pendingReplies;
+    const pending = (h.server as unknown as { pendingReplies: Map<string, Map<number, readonly number[]>> }).pendingReplies;
     assert.equal(pending.get('zulip:general')?.has(5), true);
     h.adapter.history = [streamMsg(6)];
     h.adapter.systemEvent!({ kind: 'gap', text: 'Gap.', metadata: {} });
@@ -3457,7 +3458,7 @@ for (const outcome of ['refusal', 'RPC error'] as const) {
         assert.deepEqual(h.server.delivery.heldIds('zulip:general'), acceptTail ? [5] : [5, 105]);
         assert.deepEqual(h.server.delivery.heldIds('zulip:general', { replayable: true }), []);
         assert.ok(h.server.delivery.watermark('zulip:general')! < 5, 'accepting the tail must not erase the refused prefix floor');
-        const pending = (h.server as unknown as { pendingReplies: Map<string, Set<number>> }).pendingReplies;
+        const pending = (h.server as unknown as { pendingReplies: Map<string, Map<number, readonly number[]>> }).pendingReplies;
         assert.equal(pending.get('zulip:general')?.has(5), true, 'unaccepted prefix verdict remains owned');
         assert.equal(pending.get('zulip:general')?.has(105) ?? false, !acceptTail);
       } finally { await h.close(); }
@@ -3591,9 +3592,11 @@ for (const kind of ['edit', 'move', 'delete'] as const) {
   });
 }
 
-for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted'] as const) {
-  for (const editReceived of scenario === 'changed target' || scenario === 'explicit mention' ? [false, true] : [false]) {
-    test(`R6-1: refused real-adapter reply after ${scenario}, edit ${editReceived ? 'received' : 'lost'}`, async (t) => {
+for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted', 'evicted edit', 'prior history'] as const) {
+  const edits = scenario === 'changed target' || scenario === 'explicit mention' ? [false, true] : [false];
+  const capacities = ['evicted edit', 'prior history'].includes(scenario) ? [false, true] : [false];
+  for (const { editReceived, fullCache } of edits.flatMap((editReceived) => capacities.map((fullCache) => ({ editReceived, fullCache })))) {
+    test(`R6-1: refused real-adapter reply after ${scenario}, edit ${editReceived ? 'received' : 'lost'}, full cache ${fullCache}`, async (t) => {
       const quoted = (id: number) => `[said](/#narrow/near/${id}):\n\n\`\`\`quote\noriginal\n\`\`\`\nreply`;
       const raw = (id: number, content: string, extra: Partial<ZulipRawMessage> = {}): ZulipRawMessage => ({
         id, content, sender_id: 101, sender_full_name: 'User', sender_email: 'user@example.invalid',
@@ -3613,6 +3616,7 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
           }),
           getById: async ({ message_id }: { message_id: number }) => message_id === 200
             ? { message: raw(200, 'original', { sender_id: 100 }) }
+            : message_id === 5 ? { message: row }
             : { result: 'error', code: 'BAD_REQUEST', msg: 'Invalid message(s)' },
         },
         queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
@@ -3630,7 +3634,7 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
         resolve(response);
       };
       const message = (m: ZulipRawMessage) => send({ events: [{ id: ++eventId, type: 'message', message: m, flags: m.flags }] });
-      const pending = () => (h.server as unknown as { pendingReplies: Map<string, Set<number>> }).pendingReplies.get('zulip:general')?.has(5) ?? false;
+      const pending = () => (h.server as unknown as { pendingReplies: Map<string, Map<number, readonly number[]>> }).pendingReplies.get('zulip:general')?.has(5) ?? false;
       try {
         await initialize(h, true);
         await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: FULL_GRANT });
@@ -3649,12 +3653,35 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
         assert.equal(internal.seen.get(5)?.replyToSelf, true);
         const original = row.content;
         row = scenario === 'quote removed' ? raw(5, 'quote removed')
-          : scenario === 'changed target' ? raw(5, quoted(201))
+          : ['changed target', 'evicted edit', 'prior history'].includes(scenario) ? raw(5, quoted(201))
           : scenario === 'explicit mention' ? raw(5, quoted(200), { flags: ['mentioned'] }) : row;
         if (scenario === 'unchanged evicted') {
           internal.seen.delete(5); // Bounded cache eviction must not defeat the server's retained verdict.
           internal.seen.delete(200);
           (ZulipAdapter as unknown as { quoteBudget: { tokens: number; updatedAt: number } }).quoteBudget = { tokens: 0, updatedAt: performance.now() };
+        }
+        if (fullCache) {
+          const cap = (ZulipAdapter as unknown as { SEEN_CAP: number }).SEEN_CAP;
+          await send({ events: Array.from({ length: cap }, (_, i) => ({
+            id: ++eventId, type: 'message', message: raw(10_000 + i, 'cache filler', { sender_id: 100 }), flags: [],
+          })) });
+          await until(() => internal.seen.has(10_000 + cap - 1), 'cache filled through real events');
+          assert.equal(internal.seen.size, cap);
+          assert.equal(internal.seen.has(5), false, 'capacity evicted the verified reply');
+        }
+        if (scenario === 'evicted edit') {
+          internal.seen.delete(5);
+          await send({ events: [{ id: ++eventId, type: 'update_message', message_id: 5, user_id: 101,
+            orig_content: original, content: row.content, flags: row.flags }] });
+          await until(() => changes.length === 1, 'uncached edit resolved via locate');
+          assert.equal(changes[0].replyToSelfVerified, false, 'locate remembered only post-edit targets');
+          assert.equal(pending(), true, 'no adapter withdrawal; server must compare the original targets');
+        }
+        if (scenario === 'prior history') {
+          historyVisible = true;
+          await adapter.fetchHistory('zulip:general', { limit: 10 });
+          assert.equal(internal.seen.get(5)?.replyToSelf, false, 'read cached changed targets without a verdict');
+          assert.equal(pending(), true, 'reads do not notify the server of withdrawal');
         }
         if (editReceived) {
           await send({ events: [{ id: ++eventId, type: 'update_message', message_id: 5, user_id: 101,

@@ -1082,7 +1082,7 @@ export class ZulipAdapter implements PlatformAdapter {
     const messages = page.messages
       .filter((m) => this.identity.selfUserId === null || m.authorId !== this.identity.selfUserId)
       .filter((m) => this.allowed(m))
-      .map((m) => toIncoming(channelId, m, this.identity, { backscroll: true }));
+      .map((m) => toIncoming(channelId, m, this.identity, { backscroll: true, quoteTargets: [...quotedMessageIds(m.rawContent)] }));
     return {
       messages,
       scannedThrough: page.messages.length > 0 ? page.messages[page.messages.length - 1].id : null,
@@ -1190,7 +1190,7 @@ export class ZulipAdapter implements PlatformAdapter {
           return;
         }
         const { descriptor, isNew } = this.describeDm(m);
-        onMessage(toIncoming(descriptor.id, m, this.identity), isNew ? descriptor : undefined);
+        onMessage(toIncoming(descriptor.id, m, this.identity, { quoteTargets: [...quotedMessageIds(m.rawContent)] }), isNew ? descriptor : undefined);
         return;
       }
       if (m.streamName !== null && !this.filters.streamAllowed(m.streamName)) return;
@@ -1210,7 +1210,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // Remembered so a later reaction or edit on this stream can be placed.
       if (m.streamName !== null && streamId !== undefined) this.streamNamesById.set(streamId, m.streamName);
       const descriptor = m.streamName !== null ? this.streamDescriptor(m.streamName, streamId) : undefined;
-      onMessage(toIncoming(channelId, m, this.identity), descriptor);
+      onMessage(toIncoming(channelId, m, this.identity, { quoteTargets: [...quotedMessageIds(m.rawContent)] }), descriptor);
     }, onSystemEvent, reactionHandler, changeHandler).catch(error => {
       console.error('Zulip event loop failed:', error);
     });
