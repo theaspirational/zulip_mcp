@@ -107,6 +107,22 @@ test('closing a channel starts a tally anchored at the watermark; reopening clea
   assert.equal(state.wasOpen('zulip:dev'), true);
 });
 
+test('a server scan floor survives range releases and later acceptances until explicitly resolved', () => {
+  const state = new DeliveryState(null, 'mem');
+  state.advance('zulip:general', 1);
+  state.setScanFloor('zulip:general', 5);
+  state.hold('zulip:general', 5, 'rejected');
+  state.advanceThrough('zulip:general', 20);
+  assert.equal(state.watermark('zulip:general'), 4);
+  state.hold('zulip:general', 30);
+  state.release('zulip:general', 30);
+  state.advance('zulip:general', 30);
+  assert.equal(state.watermark('zulip:general'), 4);
+  state.setScanFloor('zulip:general', undefined);
+  state.advance('zulip:general', 20);
+  assert.equal(state.watermark('zulip:general'), 30);
+});
+
 test('backfill folds fetched ambient into the tally and moves the cursor', () => {
   const state = new DeliveryState(null, 'mem');
   state.markOpen('zulip:dev');

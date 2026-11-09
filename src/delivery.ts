@@ -78,6 +78,14 @@ export class DeliveryState {
   /** The highest id acceptance has reached per channel; the watermark is
    *  this, capped by the floor. Recomputed when a hold is released. */
   private reached = new Map<string, number>();
+  /** Volatile server-owned scan barrier, independent of bounded delivery holds. */
+  private scanFloors = new Map<string, number>();
+
+  /** Update without settling: the caller is still reconciling the scanned range. */
+  setScanFloor(channelId: string, id: number | undefined): void {
+    if (id === undefined) this.scanFloors.delete(channelId);
+    else this.scanFloors.set(channelId, id);
+  }
 
   constructor(
     private readonly stateDir: string | null,
@@ -221,11 +229,12 @@ export class DeliveryState {
     return this.settle(channelId);
   }
 
-  /** The lowest id offered but not accepted, if any. */
+  /** The lowest delivery hold or server-owned unresolved scan barrier, if any. */
   floor(channelId: string): number | undefined {
     const held = this.held.get(channelId);
-    if (!held || held.size === 0) return undefined;
-    return Math.min(...held.keys());
+    const scanFloor = this.scanFloors.get(channelId);
+    if (!held || held.size === 0) return scanFloor;
+    return Math.min(scanFloor ?? Infinity, ...held.keys());
   }
 
   heldChannels(): string[] {

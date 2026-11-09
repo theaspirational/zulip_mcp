@@ -1,4 +1,4 @@
-- Preserve unaccepted live reply verdicts through reconnect sweeps and deferred
+- Preserve unaccepted live and history reply verdicts across reconnects and deferred
   verification. Inconclusive history reads and content edits retain a cached
   verified reply only for unchanged quote targets on eligible messages.
 - Recompute reply addressing on content edits; moves and deletions retain the
@@ -7,3 +7,5 @@
   and cache missing or inaccessible targets independently of error language.
 - Heal refused closed-channel deliveries once per attempt, including failed or
   empty history reads, while retaining eligibility after local policy aborts.
+- Retain pending replies at capacity; protect overflow with a bounded conservative
+  scan floor instead of silently evicting unaccepted verdicts.

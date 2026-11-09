@@ -79,12 +79,18 @@ Discord and Slack adapters that once lived here moved to those servers.
   retained verified verdict fail closed, allowing the backlog to proceed
   without another gap or reconnect. An unknown bot identity fails closed;
   unreadable targets fail closed except for the unchanged-target cached
-  verdict described above. An unaccepted live-verified
+  verdict described above. An unaccepted live- or history-verified
   reply keeps its pending verdict until acceptance when history confirms it
   or is inconclusive, provided its quote targets still match those captured
-  with the live verdict in the server, even after adapter-cache eviction or
+  with the verified verdict in the server, even across reconnects, adapter-cache eviction or
   intervening history/context reads. Changed targets, removed quotes, explicit mentions
-  and confident negative verdicts withdraw it. Only API errors with
+  and confident negative verdicts withdraw it. Pending target snapshots are capped
+  at 5,000 per channel: overflow retains existing entries, logs once per channel,
+  and holds a conservative watermark floor over the untracked range. Re-scanning
+  must verify, deliver, or genuinely withdraw its replies before passing them;
+  inaccessible overflow targets can therefore delay progress rather than lose replies.
+  This state is in memory only, not persisted across process restarts.
+  Only API errors with
   `result: "error"` and `code: "BAD_REQUEST"` (missing or inaccessible targets)
   are cached for three minutes. On pre-5.0 servers without a code, the legacy
   `msg: "Invalid message(s)"` is used instead. Other API errors, missing message objects, mismatched message ids,
@@ -103,8 +109,10 @@ Discord and Slack adapters that once lived here moved to those servers.
   accepted catch-up progress while refused replies retain their holds and
   pending replies without a delivery hold cap the committed scan below their
   ids; held replies preserve the scanned target while flooring the watermark. It
-  never advances past a message the host was offered but did not
-  accept — a refusal, a batch lost to a transport failure — which is
+  never advances past an addressed message that has not been accepted or
+  genuinely withdrawn (changed targets, removed quote, explicit mention taking
+  over reply addressing, or a confident negative). A message the host was
+  offered but did not accept — a refusal, a batch lost to a transport failure — is
   replayed from history once the host answers again. On the next connection
   one or more `<missed>` blocks per channel deliver what arrived meanwhile (full
   backscroll for channels the host had open, addressed message ± 7 for the
