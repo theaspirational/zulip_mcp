@@ -756,10 +756,12 @@ for (const outcome of ['budget-skipped', 'unverified'] as const) {
     const query = { limit: 100, ...(outcome === 'budget-skipped' ? { quoteLookupBudget: { remainingMs: 0 } } : {}) };
     const unchanged = await adapter.fetchHistory('zulip:general', query);
     assert.equal(unchanged.messages[0].metadata?.replyToSelf, true, 'unchanged targets retain the confident verdict');
+    assert.deepEqual(unchanged.inconclusiveReplyMessageIds, ['300']);
     content = quote(201); // A different, unresolved target is not a verified reply.
     const page = await adapter.fetchHistory('zulip:general', query);
     assert.equal(internal.seen.get(300)?.replyToSelf, false, 'changed targets invalidate the cached verdict');
     assert.equal(page.messages[0].metadata?.replyToSelf, false);
+    assert.deepEqual(page.inconclusiveReplyMessageIds ?? [], [], 'changed targets cannot receive the server overlay');
   });
 }
 
@@ -778,6 +780,7 @@ for (const kind of ['explicit mention', 'DM', 'self author', 'bot author'] as co
       : { sender_email: 'other-bot@example.invalid' };
     row = raw(300, quote(), overrides);
     const page = await adapter.fetchHistory(kind === 'DM' ? 'zulip:dm:101' : 'zulip:general', { limit: 100 });
+    assert.deepEqual(page.inconclusiveReplyMessageIds ?? [], [], 'ineligible rows cannot receive the server overlay');
     assert.equal((adapter as unknown as { seen: Map<number, { replyToSelf: boolean }> }).seen.get(300)?.replyToSelf, false);
     if (kind === 'self author') assert.equal(page.messages.length, 0);
     else {
@@ -830,3 +833,75 @@ for (const outcome of ['budget-skipped', 'unverified'] as const) {
     } finally { adapter.stopEvents(); }
   });
 }
+
+
+test('R6-2: shrinking two quote targets to one unresolved target clears the reply', async () => {
+  let content = `${quote(201)}\n${quote()}`;
+  const adapter = new ZulipAdapter({ messages: {
+    retrieve: async () => ({ messages: [raw(300, content)], found_newest: true }),
+    getById: async ({ message_id }: { message_id: number }) => message_id === QUOTED
+      ? { message: raw(QUOTED, 'original', { sender_id: SELF }) }
+      : { result: 'error', code: 'BAD_REQUEST', msg: 'Invalid message(s)' },
+  } }, SELF, 'session');
+  assert.equal((await adapter.fetchHistory('zulip:general', { limit: 100 })).messages[0].metadata?.replyToSelf, true);
+  content = quote(201);
+  const page = await adapter.fetchHistory('zulip:general', { limit: 100 });
+  assert.equal(page.messages[0].metadata?.replyToSelf, false, 'a subset is not an unchanged target set');
+});
+
+test('R6-2: editing to a new bot target retains that new verdict on an inconclusive read', { timeout: 2000 }, async () => {
+  let served = false;
+  let finish!: () => void;
+  const edited = new Promise<void>((resolve) => { finish = resolve; });
+  const adapter = new ZulipAdapter({
+    messages: {
+      retrieve: async () => ({ messages: [raw(300, quote(201))], found_newest: true }),
+      getById: async ({ message_id }: { message_id: number }) => ({ message: raw(message_id, 'original', { sender_id: SELF }) }),
+    },
+    queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
+    events: { retrieve: async () => {
+      if (served) return new Promise(() => {});
+      served = true;
+      return { events: [
+        { id: 1, type: 'message', message: raw(300, quote()), flags: [] },
+        { id: 2, type: 'update_message', message_id: 300, user_id: 101, orig_content: quote(), content: quote(201), flags: [] },
+      ] };
+    } },
+  }, SELF, 'session');
+  adapter.startEvents((m) => { assert.equal(m.metadata?.replyToSelf, true); }, undefined, undefined, (change) => {
+    assert.equal(change.replyToSelf, true, 'the new target is bot-authored too');
+    finish();
+  });
+  try {
+    await edited;
+    (adapter as unknown as { seen: Map<number, unknown> }).seen.delete(201);
+    const page = await adapter.fetchHistory('zulip:general', { limit: 100, quoteLookupBudget: { remainingMs: 0 } });
+    assert.equal(page.messages[0].metadata?.replyToSelf, true, 'the new target set, not the old one, was remembered');
+  } finally { adapter.stopEvents(); }
+});
+
+
+test('R6-1: an ineligible edit is resolved even without a cached true verdict', { timeout: 2000 }, async () => {
+  let served = false;
+  let finish!: (change: MessageChangeEvent) => void;
+  const edited = new Promise<MessageChangeEvent>((resolve) => { finish = resolve; });
+  const adapter = new ZulipAdapter({
+    queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
+    events: { retrieve: async () => {
+      if (served) return new Promise(() => {});
+      served = true;
+      return { events: [
+        { id: 1, type: 'message', message: raw(300, 'ordinary message'), flags: [] },
+        { id: 2, type: 'update_message', message_id: 300, user_id: 101,
+          orig_content: 'ordinary message', content: quote(), flags: ['mentioned'] },
+      ] };
+    } },
+  }, SELF, 'session');
+  adapter.startEvents(() => {}, undefined, undefined, finish);
+  try {
+    const change = await edited;
+    assert.equal(change.previouslyReplyToSelf, false);
+    assert.equal(change.replyToSelf, false);
+    assert.equal(change.replyToSelfVerified, true);
+  } finally { adapter.stopEvents(); }
+});

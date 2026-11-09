@@ -1246,18 +1246,24 @@ export class ZulipMcplServer {
         complete = true;
         break;
       }
-      for (const id of page.unverifiedMessageIds ?? []) {
-        const numeric = Number(id);
-        if (Number.isFinite(numeric) && !this.pendingReplies.get(channelId)?.has(numeric)) unverified.add(numeric);
-      }
+      const inconclusiveReplies = new Set(page.inconclusiveReplyMessageIds ?? []);
       out.push(...page.messages.map((message) => {
-        if (!this.pendingReplies.get(channelId)?.has(Number(message.messageId))) return message;
+        const id = Number(message.messageId);
+        if (!this.pendingReplies.get(channelId)?.has(id)) return message;
+        if (!inconclusiveReplies.has(message.messageId)) {
+          this.forgetPendingReply(channelId, id);
+          return message;
+        }
         return {
           ...message,
           tags: [...new Set([...(message.tags ?? []).filter((tag) => tag !== CHAT_TAGS.ambient), CHAT_TAGS.reply])],
           metadata: { ...(message.metadata as Record<string, unknown>), replyToSelf: true, isMention: true, isReplyToBot: true },
         };
       }));
+      for (const id of page.unverifiedMessageIds ?? []) {
+        const numeric = Number(id);
+        if (Number.isFinite(numeric) && !this.pendingReplies.get(channelId)?.has(numeric)) unverified.add(numeric);
+      }
       if (page.scannedThrough <= cursor) break;
       cursor = page.scannedThrough;
       if (page.reachedNewest || (throughId !== undefined && cursor >= throughId)) {

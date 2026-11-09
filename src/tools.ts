@@ -472,8 +472,8 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: "channel_missed",
     description:
-      "Report how much ambient (non-mention) traffic you have missed in a stream since the host CLOSED " +
-      "its channel — returns missed message and character counts. Mentions always reach you and are " +
+      "Report how much ambient (non-addressed) traffic you have missed in a stream since the host CLOSED " +
+      "its channel — returns missed message and character counts. Addressed messages always reach you and are " +
       "not counted. Counts are durable across restarts and backfill downtime on reconnect. Useful for " +
       "deciding whether to reopen the channel.",
     inputSchema: {
@@ -516,7 +516,7 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: "mute_channel",
     description:
-      "Mute a stream entirely: no ambient messages, no wake on mentions, nothing tallied. Use this to stay out of a " +
+      "Mute a stream entirely: no ambient messages, no wake on addressed messages, nothing tallied. Use this to stay out of a " +
       "stream that keeps pulling you in. Persisted across restarts. Reverse with unmute_channel.",
     inputSchema: {
       type: "object",
@@ -527,7 +527,7 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     name: "unmute_channel",
     description:
-      "Un-mute a stream: mentions reach you again, and ambient traffic once the host opens the channel. Persisted.",
+      "Un-mute a stream: addressed messages reach you again, and ambient traffic once the host opens the channel. Persisted.",
     inputSchema: {
       type: "object",
       properties: { channel: { type: "string", description: "Stream name or channel id ('zulip:general')" } },
