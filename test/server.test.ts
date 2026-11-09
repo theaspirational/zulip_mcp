@@ -3592,9 +3592,9 @@ for (const kind of ['edit', 'move', 'delete'] as const) {
   });
 }
 
-for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted', 'evicted edit', 'prior history', 'prior context'] as const) {
+for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted', 'evicted edit', 'prior history', 'prior context', 'positive retry evicted'] as const) {
   const edits = scenario === 'changed target' || scenario === 'explicit mention' ? [false, true] : [false];
-  const capacities = ['evicted edit', 'prior history', 'prior context'].includes(scenario) ? [false, true] : [false];
+  const capacities = scenario === 'positive retry evicted' ? [true] : ['evicted edit', 'prior history', 'prior context'].includes(scenario) ? [false, true] : [false];
   for (const { editReceived, fullCache } of edits.flatMap((editReceived) => capacities.map((fullCache) => ({ editReceived, fullCache })))) {
     test(`R6-1: refused real-adapter reply after ${scenario}, edit ${editReceived ? 'received' : 'lost'}, full cache ${fullCache}`, async (t) => {
       const quoted = (id: number) => `[said](/#narrow/near/${id}):\n\n\`\`\`quote\noriginal\n\`\`\`\nreply`;
@@ -3605,6 +3605,8 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
       });
       let row = raw(5, quoted(200));
       let historyVisible = false;
+      let targetAvailable = true;
+      let retainedAfterPositiveRetry = false;
       let poll: ((response: unknown) => void) | undefined;
       let eventId = 0;
       const adapter = new ZulipAdapter({
@@ -3614,7 +3616,7 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
           retrieve: async ({ anchor }: { anchor: number | string }) => ({
             messages: historyVisible && (typeof anchor !== 'number' || anchor < 5) ? [row] : [], found_newest: true,
           }),
-          getById: async ({ message_id }: { message_id: number }) => message_id === 200
+          getById: async ({ message_id }: { message_id: number }) => message_id === 200 && targetAvailable
             ? { message: raw(200, 'original', { sender_id: 100 }) }
             : message_id === 5 ? { message: row }
             : { result: 'error', code: 'BAD_REQUEST', msg: 'Invalid message(s)' },
@@ -3660,6 +3662,15 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
           internal.seen.delete(200);
           (ZulipAdapter as unknown as { quoteBudget: { tokens: number; updatedAt: number } }).quoteBudget = { tokens: 0, updatedAt: performance.now() };
         }
+        if (scenario === 'positive retry evicted') {
+          historyVisible = true;
+          await send({ result: 'error', code: 'BAD_EVENT_QUEUE_ID', msg: 'first retry' });
+          await until(() => h.pushed.some((p) => p.tags?.includes('zulip:missed')), 'positive history retry refused');
+          assert.ok(h.pushed.find((p) => p.tags?.includes('zulip:missed'))?.tags?.includes('chat:reply'));
+          assert.equal(h.server.delivery.watermark('zulip:general'), 1, 'refusal cannot advance past the reply');
+          retainedAfterPositiveRetry = pending();
+          targetAvailable = false;
+        }
         if (fullCache) {
           const cap = (ZulipAdapter as unknown as { SEEN_CAP: number }).SEEN_CAP;
           await send({ events: Array.from({ length: cap }, (_, i) => ({
@@ -3668,6 +3679,7 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
           await until(() => internal.seen.has(10_000 + cap - 1), 'cache filled through real events');
           assert.equal(internal.seen.size, cap);
           assert.equal(internal.seen.has(5), false, 'capacity evicted the verified reply');
+          assert.equal(internal.seen.has(200), false, 'capacity also evicted the target');
         }
         if (scenario === 'evicted edit') {
           internal.seen.delete(5);
@@ -3716,8 +3728,9 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
           assert.ok(!replay.tags?.includes('chat:reply'));
         } else {
           const recovered = h.pushed.filter((p) => p.tags?.includes('zulip:missed'));
-          assert.equal(recovered.length, scenario === 'unchanged evicted' ? 1 : 0, 'only an inconclusive unchanged reply gets the overlay');
-          if (scenario === 'unchanged evicted') assert.ok(recovered[0].tags?.includes('chat:reply'));
+          assert.equal(recovered.length, ['unchanged evicted', 'positive retry evicted'].includes(scenario) ? 1 : 0, 'an unchanged unaccepted reply must still be delivered');
+          if (['unchanged evicted', 'positive retry evicted'].includes(scenario)) assert.ok(recovered[0].tags?.includes('chat:reply'));
+          if (scenario === 'positive retry evicted') assert.equal(retainedAfterPositiveRetry, true, 'positive verification remains pending until acceptance');
         }
       } finally { await h.close(); }
     });

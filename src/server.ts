@@ -1265,10 +1265,15 @@ export class ZulipMcplServer {
         const targets = this.replyTargets(message);
         const unchanged = targets !== null && targets.length === verifiedTargets.length &&
           targets.every((target, i) => target === verifiedTargets[i]);
-        if (!inconclusiveReplies.has(message.messageId) || !unchanged) {
+        // A positive history check confirms, rather than consumes, the
+        // pending verdict. Only acceptance or withdrawal may release it:
+        // another refused attempt can outlive the adapter's bounded cache.
+        const positive = (message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true;
+        if (!unchanged || (!positive && !inconclusiveReplies.has(message.messageId))) {
           this.forgetPendingReply(channelId, id);
           return message;
         }
+        if (positive) return message;
         return {
           ...message,
           tags: [...new Set([...(message.tags ?? []).filter((tag) => tag !== CHAT_TAGS.ambient), CHAT_TAGS.reply])],

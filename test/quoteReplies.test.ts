@@ -962,3 +962,48 @@ for (const { contextEdit, fullCache } of (['unchanged', 'changed target', 'quote
     } finally { adapter.stopEvents(); }
   });
 }
+
+
+for (const changedTargets of [false, true]) {
+  test(`R6 history snapshots precede quote GET eviction, targets ${changedTargets ? 'changed' : 'unchanged'}`, async () => {
+    const cap = (ZulipAdapter as unknown as { SEEN_CAP: number }).SEEN_CAP;
+    let served = false;
+    let finish!: () => void;
+    const processed = new Promise<void>((resolve) => { finish = resolve; });
+    const gets: number[] = [];
+    const adapter = new ZulipAdapter({
+      messages: {
+        retrieve: async () => ({ messages: [raw(250, quote(9000)), raw(300, quote(changedTargets ? 201 : QUOTED))], found_newest: true }),
+        getById: async ({ message_id }: { message_id: number }) => {
+          gets.push(message_id);
+          return message_id === 9000 ? { message: raw(9000, 'another author') }
+            : { result: 'error', code: 'BAD_REQUEST', msg: 'Invalid message(s)' };
+        },
+      },
+      queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
+      events: { retrieve: async () => {
+        if (served) { finish(); return new Promise(() => {}); }
+        served = true;
+        // The final filler evicts the target; the verified reply is now the
+        // oldest of 2,000 entries. Seed solely through real queue events.
+        return { events: [raw(QUOTED, 'original', { sender_id: SELF }), raw(300, quote()),
+          ...Array.from({ length: cap - 1 }, (_, i) => raw(10_000 + i, 'filler', { sender_id: SELF })),
+        ].map((message, id) => ({ id, type: 'message', message, flags: [] })) };
+      } },
+    }, SELF, 'session');
+    adapter.startEvents((m) => { assert.equal(m.metadata?.replyToSelf, true); });
+    try {
+      await processed;
+      const seen = (adapter as unknown as { seen: Map<number, { replyToSelf: boolean }> }).seen;
+      assert.equal(seen.size, cap);
+      assert.equal(seen.keys().next().value, 300, 'verified reply is oldest');
+      assert.equal(seen.get(300)?.replyToSelf, true);
+      assert.equal(seen.has(QUOTED), false);
+      const page = await adapter.fetchHistory('zulip:general', { limit: 100 });
+      assert.deepEqual(gets, [9000, changedTargets ? 201 : QUOTED], 'earlier row GET evicts the reply before its classification');
+      assert.equal(page.messages[1].metadata?.replyToSelf, !changedTargets, 'only unchanged targets retain the pre-page verified verdict');
+      assert.equal(seen.get(300)?.replyToSelf, !changedTargets);
+      assert.deepEqual(page.inconclusiveReplyMessageIds ?? [], changedTargets ? [] : ['300']);
+    } finally { adapter.stopEvents(); }
+  });
+}
