@@ -150,8 +150,9 @@ export class ZulipMcplServer {
   private preLiveDropped = 0;
   /** Live-verified replies not yet accepted: history can fail closed under a
    *  tighter/shared lookup budget without erasing the verdict held for retry.
+   *  Target sets belong to that verification, not the adapter cache.
    *  Oldest-first eviction, capped per channel like the pre-live buffer. */
-  private pendingReplies = new Map<string, Set<number>>();
+  private pendingReplies = new Map<string, Map<number, readonly number[]>>();
   /** Commit scan-only advancement after buffered live verdicts are reconciled. */
   private preLiveScanned = new Map<string, number>();
   /** Watermarks as they stood when the connection began: what the sweep
@@ -445,7 +446,7 @@ export class ZulipMcplServer {
       // without acceptance (temporary policy disable or an early error).
       let through = scannedThrough;
       const held = new Set(this.delivery.heldIds(channelId));
-      for (const id of this.pendingReplies.get(channelId) ?? []) {
+      for (const id of this.pendingReplies.get(channelId)?.keys() ?? []) {
         if (!held.has(id)) through = Math.min(through, id - 1);
       }
       // A refused buffered reply must keep its hold below the scanned range.
@@ -846,6 +847,15 @@ export class ZulipMcplServer {
     return !this.isMuted(message.channelId) && this.isAllowed(message.channelId, message);
   }
 
+  /** Copy the adapter's bounded target set: mutable placement/history caches
+   *  must never redefine what a pending live verdict actually verified. */
+  private replyTargets(message: IncomingChannelMessage): readonly number[] | null {
+    const targets = (message.metadata as Record<string, unknown> | undefined)?.quoteTargets;
+    return Array.isArray(targets) && targets.length > 0 && targets.length <= 2 &&
+      targets.every((id) => Number.isSafeInteger(id) && id > 0)
+      ? [...new Set<number>(targets)].sort((a, b) => a - b) : null;
+  }
+
   private forgetPendingReply(channelId: string, id: number): void {
     const pending = this.pendingReplies.get(channelId);
     pending?.delete(id);
@@ -929,15 +939,16 @@ export class ZulipMcplServer {
    */
   private async onIncoming(message: IncomingChannelMessage, newChannel?: ChannelDescriptor): Promise<void> {
     const id = numericId(message);
-    if ((message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true && id !== null &&
+    const targets = this.replyTargets(message);
+    if ((message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true && targets !== null && id !== null &&
         !this.isMuted(message.channelId) && this.isAllowed(message.channelId, message)) {
       let pending = this.pendingReplies.get(message.channelId);
-      if (!pending) this.pendingReplies.set(message.channelId, pending = new Set());
+      if (!pending) this.pendingReplies.set(message.channelId, pending = new Map());
       if (!pending.has(id) && pending.size >= PRE_LIVE_BUFFER_CAP) {
-        const oldest = pending.values().next().value;
+        const oldest = pending.keys().next().value;
         if (oldest !== undefined) pending.delete(oldest);
       }
-      pending.add(id);
+      pending.set(id, targets);
     }
     if (!this.live) {
       if (this.preLive.length >= PRE_LIVE_BUFFER_CAP) {
@@ -1048,7 +1059,7 @@ export class ZulipMcplServer {
     try {
       for (const channelId of channels) {
         if (this.isMuted(channelId) || !this.isAllowed(channelId)) {
-          for (const id of this.pendingReplies.get(channelId) ?? []) this.forgetPendingReply(channelId, id);
+          for (const id of this.pendingReplies.get(channelId)?.keys() ?? []) this.forgetPendingReply(channelId, id);
           this.delivery.releaseAll(channelId);
           continue;
         }
@@ -1242,8 +1253,12 @@ export class ZulipMcplServer {
       const inconclusiveReplies = new Set(page.inconclusiveReplyMessageIds ?? []);
       out.push(...page.messages.map((message) => {
         const id = Number(message.messageId);
-        if (!this.pendingReplies.get(channelId)?.has(id)) return message;
-        if (!inconclusiveReplies.has(message.messageId)) {
+        const verifiedTargets = this.pendingReplies.get(channelId)?.get(id);
+        if (!verifiedTargets) return message;
+        const targets = this.replyTargets(message);
+        const unchanged = targets !== null && targets.length === verifiedTargets.length &&
+          targets.every((target, i) => target === verifiedTargets[i]);
+        if (!inconclusiveReplies.has(message.messageId) || !unchanged) {
           this.forgetPendingReply(channelId, id);
           return message;
         }

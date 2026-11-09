@@ -44,6 +44,9 @@ export interface RoutingHints {
  * Delivery callback. `newChannel` is set when the message belongs to a
  * channel the adapter has not described before (a DM from a new
  * conversation) — the server registers it with the host before routing.
+ * Reply-retaining adapters supply metadata.quoteTargets (up to two numeric
+ * ids) on live and history rows. The server snapshots these with the live
+ * verdict; missing targets fail closed for pending-reply retention.
  */
 export type OnIncomingMessage = (message: IncomingChannelMessage, newChannel?: ChannelDescriptor) => void;
 
