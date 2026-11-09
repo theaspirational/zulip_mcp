@@ -906,8 +906,10 @@ test('R6-1: an ineligible edit is resolved even without a cached true verdict', 
   } finally { adapter.stopEvents(); }
 });
 
-for (const contextEdit of ['unchanged', 'changed target', 'quote removed', 'explicit mention'] as const) {
-  test(`PR38: context retention after ${contextEdit} carries through deletion`, { timeout: 2000 }, async () => {
+for (const { contextEdit, fullCache } of (['unchanged', 'changed target', 'quote removed', 'explicit mention'] as const)
+  .flatMap((contextEdit) => [false, true].map((fullCache) => ({ contextEdit, fullCache })))) {
+  test(`PR38: context retention after ${contextEdit}, full cache ${fullCache}, carries through deletion`, { timeout: 2000 }, async () => {
+    const cap = (ZulipAdapter as unknown as { SEEN_CAP: number }).SEEN_CAP;
     let served = false;
     let live!: () => void;
     const received = new Promise<void>((resolve) => { live = resolve; });
@@ -918,6 +920,7 @@ for (const contextEdit of ['unchanged', 'changed target', 'quote removed', 'expl
     const deletion = new Promise<MessageChangeEvent>((resolve) => { deleted = resolve; });
     const adapter = new ZulipAdapter({
       messages: { retrieve: async () => ({ messages: [
+        raw(299, 'preceding context row'),
         raw(300, contextEdit === 'changed target' ? quote(201) : contextEdit === 'quote removed' ? 'quote removed' : quote(),
           { flags: contextEdit === 'explicit mention' ? ['mentioned'] : [] }),
         raw(301, 'context only'),
@@ -929,6 +932,9 @@ for (const contextEdit of ['unchanged', 'changed target', 'quote removed', 'expl
         return { events: [
           { id: 1, type: 'message', message: raw(QUOTED, 'original', { sender_id: SELF }), flags: [] },
           { id: 2, type: 'message', message: raw(300, quote()), flags: [] },
+          ...(fullCache ? Array.from({ length: cap - 1 }, (_, i) => ({
+            id: i + 3, type: 'message', message: raw(10_000 + i, 'cache filler', { sender_id: SELF }), flags: [],
+          })) : []),
         ] };
       } },
     }, SELF, 'session');
@@ -938,13 +944,17 @@ for (const contextEdit of ['unchanged', 'changed target', 'quote removed', 'expl
     }, undefined, undefined, deleted);
     try {
       await received;
+      await polling; // All filler events have entered the real bounded cache.
+      const seen = (adapter as unknown as { seen: Map<number, { replyToSelf: boolean }> }).seen;
+      if (fullCache) {
+        assert.equal(seen.size, cap);
+        assert.equal(seen.keys().next().value, 300, 'reply is the next row a new context message evicts');
+      }
       const context = await adapter.fetchContext('zulip:general', undefined, 10);
       assert.match(context!.content, /context only/);
-      const seen = (adapter as unknown as { seen: Map<number, { replyToSelf: boolean }> }).seen;
       const replyAfterContext = seen.get(300)?.replyToSelf;
       assert.ok(seen.has(301), 'previously unseen context rows are still remembered');
-      await polling;
-      nextPoll({ events: [{ id: 3, type: 'delete_message', message_ids: [300], message_type: 'stream', stream_id: 1 }] });
+      nextPoll({ events: [{ id: cap + 3, type: 'delete_message', message_ids: [300], message_type: 'stream', stream_id: 1 }] });
       const change = await deletion;
       assert.equal(change.kind, 'delete');
       assert.equal(change.replyToSelf, contextEdit === 'unchanged', 'deletion carries the retained or cleared verdict after context');

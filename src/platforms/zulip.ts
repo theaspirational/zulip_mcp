@@ -995,8 +995,11 @@ export class ZulipAdapter implements PlatformAdapter {
     // Refresh placement from context without letting its unclassified default
     // false erase a verified reply. No target GETs here: only unchanged,
     // eligible quotes retain the previous verdict, just as in history/edits.
+    // Remembering an earlier new row can evict a later verified reply at
+    // capacity. Snapshot every prior verdict before updating any cache row.
+    const previousById = new Map(page.messages.map((m) => [m.id, this.seen.get(m.id)]));
     for (const m of page.messages) {
-      const previous = this.seen.get(m.id);
+      const previous = previousById.get(m.id);
       const verdict = await this.classifyQuoteReply(m, async () => null);
       m.replyToSelf = this.replyToSelfForVerdict(verdict, quotedMessageIds(m.rawContent), previous);
       this.remember(channelId, m);

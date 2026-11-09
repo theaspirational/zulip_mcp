@@ -3592,9 +3592,9 @@ for (const kind of ['edit', 'move', 'delete'] as const) {
   });
 }
 
-for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted', 'evicted edit', 'prior history'] as const) {
+for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted', 'evicted edit', 'prior history', 'prior context'] as const) {
   const edits = scenario === 'changed target' || scenario === 'explicit mention' ? [false, true] : [false];
-  const capacities = ['evicted edit', 'prior history'].includes(scenario) ? [false, true] : [false];
+  const capacities = ['evicted edit', 'prior history', 'prior context'].includes(scenario) ? [false, true] : [false];
   for (const { editReceived, fullCache } of edits.flatMap((editReceived) => capacities.map((fullCache) => ({ editReceived, fullCache })))) {
     test(`R6-1: refused real-adapter reply after ${scenario}, edit ${editReceived ? 'received' : 'lost'}, full cache ${fullCache}`, async (t) => {
       const quoted = (id: number) => `[said](/#narrow/near/${id}):\n\n\`\`\`quote\noriginal\n\`\`\`\nreply`;
@@ -3653,7 +3653,7 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
         assert.equal(internal.seen.get(5)?.replyToSelf, true);
         const original = row.content;
         row = scenario === 'quote removed' ? raw(5, 'quote removed')
-          : ['changed target', 'evicted edit', 'prior history'].includes(scenario) ? raw(5, quoted(201))
+          : ['changed target', 'evicted edit', 'prior history', 'prior context'].includes(scenario) ? raw(5, quoted(201))
           : scenario === 'explicit mention' ? raw(5, quoted(200), { flags: ['mentioned'] }) : row;
         if (scenario === 'unchanged evicted') {
           internal.seen.delete(5); // Bounded cache eviction must not defeat the server's retained verdict.
@@ -3677,9 +3677,10 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
           assert.equal(changes[0].replyToSelfVerified, false, 'locate remembered only post-edit targets');
           assert.equal(pending(), true, 'no adapter withdrawal; server must compare the original targets');
         }
-        if (scenario === 'prior history') {
+        if (scenario === 'prior history' || scenario === 'prior context') {
           historyVisible = true;
-          await adapter.fetchHistory('zulip:general', { limit: 10 });
+          if (scenario === 'prior history') await adapter.fetchHistory('zulip:general', { limit: 10 });
+          else await adapter.fetchContext('zulip:general', undefined, 10);
           assert.equal(internal.seen.get(5)?.replyToSelf, false, 'read cached changed targets without a verdict');
           assert.equal(pending(), true, 'reads do not notify the server of withdrawal');
         }
