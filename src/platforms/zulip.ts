@@ -482,12 +482,16 @@ export class ZulipAdapter implements PlatformAdapter {
     return verdict;
   }
 
+  private quoteTargetsUnchanged(targets: ReadonlySet<number>, previous: SeenMessage | null | undefined): boolean {
+    return !previous || (targets.size === previous.quoteTargets.size && [...targets].every((id) => previous.quoteTargets.has(id)));
+  }
+
   /** Only an unresolved lookup of the same targets can retain a verified
    *  reply. Ineligible messages and confident negatives always clear it. */
   private replyToSelfForVerdict(verdict: QuoteVerdict, targets: ReadonlySet<number>, previous: SeenMessage | null | undefined): boolean {
     return verdict === 'reply' ||
       ((verdict === 'budget-skipped' || verdict === 'unverified') && previous?.replyToSelf === true &&
-        targets.size === previous.quoteTargets.size && [...targets].every((id) => previous.quoteTargets.has(id)));
+        this.quoteTargetsUnchanged(targets, previous));
   }
 
   /**
@@ -590,7 +594,8 @@ export class ZulipAdapter implements PlatformAdapter {
         previousContent,
         mentioned,
         replyToSelf,
-        ...(replyVerdict !== null ? { replyToSelfVerified: replyVerdict === 'reply' || replyVerdict === 'not-reply' } : {}),
+        ...(replyVerdict !== null ? { replyToSelfVerified: replyVerdict === 'reply' || replyVerdict === 'not-reply' ||
+          replyVerdict === 'ineligible' || (where.replyToSelf && !replyToSelf) } : {}),
         previouslyReplyToSelf: cached ? cached.replyToSelf : null,
         // The cache holds the pre-change verdict; a GET only the post-change one.
         previouslyMentioned: cached ? cached.mentioned : null,
@@ -921,6 +926,7 @@ export class ZulipAdapter implements PlatformAdapter {
     let getsLeft = HISTORY_QUOTE_GET_CAP;
     let pageRemainingMs = QUOTE_TIMEOUT_MS;
     const unverifiedMessageIds: string[] = [];
+    const inconclusiveReplyMessageIds: string[] = [];
     const resolve = async (id: number, remainingMs: number): Promise<QuoteLookup> => {
       const known = pageById.get(id) ?? this.seen.get(id);
       if (known) return known;
@@ -939,8 +945,13 @@ export class ZulipAdapter implements PlatformAdapter {
     };
     for (const m of page.messages) {
       if (!this.allowed(m)) continue;
+      const previous = this.seen.get(m.id);
+      const targets = quotedMessageIds(m.rawContent);
       const verdict = await this.classifyQuoteReply(m, resolve, Infinity);
-      m.replyToSelf = this.replyToSelfForVerdict(verdict, quotedMessageIds(m.rawContent), this.seen.get(m.id));
+      m.replyToSelf = this.replyToSelfForVerdict(verdict, targets, previous);
+      if ((verdict === 'budget-skipped' || verdict === 'unverified') && this.quoteTargetsUnchanged(targets, previous)) {
+        inconclusiveReplyMessageIds.push(String(m.id));
+      }
       if (verdict === 'budget-skipped') unverifiedMessageIds.push(String(m.id));
     }
     for (const m of page.messages) this.remember(channelId, m);
@@ -953,6 +964,7 @@ export class ZulipAdapter implements PlatformAdapter {
       scannedThrough: page.messages.length > 0 ? page.messages[page.messages.length - 1].id : null,
       reachedNewest: page.foundNewest,
       ...(unverifiedMessageIds.length > 0 ? { unverifiedMessageIds } : {}),
+      ...(inconclusiveReplyMessageIds.length > 0 ? { inconclusiveReplyMessageIds } : {}),
     };
   }
 

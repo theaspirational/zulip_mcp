@@ -61,6 +61,7 @@ interface FakeAdapter extends PlatformAdapter {
   change: OnMessageChange | null;
   /** The stream's messages, oldest first; fetchHistory pages over them by id. */
   history: IncomingChannelMessage[];
+  inconclusiveReplyIds: Set<string>;
   historyCalls: { channelId: string; query: ChannelHistoryQuery }[];
   subscribed: string[];
   acked: string[];
@@ -83,6 +84,7 @@ function fakeAdapter(withTyping = true): FakeAdapter {
     react: null,
     change: null,
     history: [],
+    inconclusiveReplyIds: new Set(),
     historyCalls: [],
     subscribed: [],
     acked: [],
@@ -105,6 +107,7 @@ function fakeAdapter(withTyping = true): FakeAdapter {
         messages: page.map((m) => ({ ...m, metadata: { ...(m.metadata as object), backscroll: true } })),
         scannedThrough: newest ? Number(newest.messageId) : null,
         reachedNewest: !newest || newest === rows[rows.length - 1],
+        inconclusiveReplyMessageIds: page.filter((m) => adapter.inconclusiveReplyIds.has(m.messageId)).map((m) => m.messageId),
       };
     },
     async ensureSubscribed(channelId) {
@@ -178,11 +181,15 @@ interface Harness {
 }
 
 interface HarnessOptions {
+  /** Use the production adapter with a local Zulip API fixture. */
+  platformAdapter?: PlatformAdapter;
   mcpl?: boolean;
   typing?: boolean;
   stateDir?: string;
   sessionId?: string;
   history?: IncomingChannelMessage[];
+  /** Fake history rows with inconclusive verdicts and unchanged targets. */
+  inconclusiveReplyIds?: string[];
   filters?: FiltersPlane;
   attachments?: ZulipMcplServerOptions['attachments'];
   batchWindowMs?: number;
@@ -200,7 +207,8 @@ function harness(opts: HarnessOptions = {}): Harness {
 
   const adapter = opts.reuse?.adapter ?? fakeAdapter(opts.typing ?? true);
   if (opts.history) adapter.history = opts.history;
-  const server = opts.reuse?.server ?? new ZulipMcplServer(adapter, fakeTools as unknown as ZulipToolRuntime, {
+  if (opts.inconclusiveReplyIds) adapter.inconclusiveReplyIds = new Set(opts.inconclusiveReplyIds);
+  const server = opts.reuse?.server ?? new ZulipMcplServer(opts.platformAdapter ?? adapter, fakeTools as unknown as ZulipToolRuntime, {
     serverInfo: { name: 'zulip-mcp-test', version: '0.0.0' },
     mcplEnabled: opts.mcpl ?? true,
     batchWindowMs: opts.batchWindowMs ?? 5,
@@ -2534,7 +2542,7 @@ for (const rejectOnce of [false, true]) {
       first.adapter.emit!(streamMsg(2));
       await until(() => first.server.delivery.tally('zulip:general')?.talliedThrough === 2, 'tally seeded');
     } finally { await first.close(); }
-    second = harness({ stateDir: dir, sessionId: 'after-scan', history: [streamMsg(5)] });
+    second = harness({ stateDir: dir, sessionId: 'after-scan', history: [streamMsg(5)], inconclusiveReplyIds: ['5'] });
     let refused = false;
     if (rejectOnce) second.policy.rejectPushes.has = (id) => {
       if (id !== '5' || refused) return false;
@@ -2646,7 +2654,7 @@ for (const reconnect of [false, true]) {
       await until(() => first.server.delivery.tally('zulip:general')?.talliedThrough === 2, 'tally seeded');
     } finally { await first.close(); }
 
-    second = harness({ stateDir: dir, sessionId: 'probe', history: [streamMsg(5)] });
+    second = harness({ stateDir: dir, sessionId: 'probe', history: [streamMsg(5)], inconclusiveReplyIds: ['5'] });
     const realFetch = second.adapter.fetchHistory!.bind(second.adapter);
     let calls = 0;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -2762,7 +2770,10 @@ for (const verified of [false, true]) {
         replyToSelf: false, replyToSelfVerified: verified, previouslyReplyToSelf: true,
         vanished: false, isDM: false, onOwnMessage: false, timestamp: new Date(),
       });
-      h.adapter.history = [streamMsg(5)]; // History also cannot verify a quote.
+      h.adapter.fetchHistory = async () => ({
+        messages: [streamMsg(5)], scannedThrough: 5, reachedNewest: true,
+        inconclusiveReplyMessageIds: verified ? [] : ['5'],
+      });
       h.policy.rejectPushes.delete('5');
       const other = { ...DESCRIPTOR, id: 'zulip:other', label: '#other', address: { stream_name: 'other', stream_id: 8 } };
       h.adapter.emit!(streamMsg(6, { channelId: other.id, mentioned: true }), other);
@@ -3062,7 +3073,7 @@ for (const beforeGrant of [false, true]) {
       const sweepGate = new Promise<void>((r) => { releaseSweep = r; });
       const fetchGate = new Promise<void>((r) => { releaseFetch = r; });
       second = harness({
-        stateDir: dir, sessionId: 'r3', history: [streamMsg(5)],
+        stateDir: dir, sessionId: 'r3', history: [streamMsg(5)], inconclusiveReplyIds: ['5'],
         attachments: {
           source: { async fetch() { fetching = true; await fetchGate; return { buf: Buffer.from('log'), mimeType: 'text/plain', overflow: false }; } },
           inline: { inlineImages: true, inlineTextMaxBytes: 5120, maxImages: 4 },
@@ -3176,7 +3187,7 @@ for (const failure of ['messaging disable', 'attributed exception'] as const) {
       const sweepGate = new Promise<void>((r) => { releaseSweep = r; });
       const fetchGate = new Promise<void>((r) => { releaseFetch = r; });
       second = harness({
-        stateDir: dir, sessionId: 'r3', history: [streamMsg(5)],
+        stateDir: dir, sessionId: 'r3', history: [streamMsg(5)], inconclusiveReplyIds: ['5'],
         attachments: {
           source: { async fetch() { fetching = true; await fetchGate; return { buf: Buffer.from('log'), mimeType: 'text/plain', overflow: false }; } },
           inline: { inlineImages: true, inlineTextMaxBytes: 5120, maxImages: 4 },
@@ -3278,7 +3289,7 @@ for (const mode of ['disable-during-heal', 'no-duplicate', 'host-refusal', 'requ
       const sweepGate = new Promise<void>((r) => { releaseSweep = r; });
       const fetchGate = new Promise<void>((r) => { releaseFetch = r; });
       second = harness({
-        stateDir: dir, sessionId: 'r3', history: [streamMsg(5)],
+        stateDir: dir, sessionId: 'r3', history: [streamMsg(5)], inconclusiveReplyIds: ['5'],
         attachments: {
           source: { async fetch() { fetching = true; await fetchGate; return { buf: Buffer.from('log'), mimeType: 'text/plain', overflow: false }; } },
           inline: { inlineImages: true, inlineTextMaxBytes: 5120, maxImages: 4 },
@@ -3383,7 +3394,7 @@ for (const mode of ['disable-during-heal', 'no-duplicate', 'host-refusal', 'requ
 for (const outcome of ['refusal', 'RPC error'] as const) {
   for (const acceptTail of [false, true]) {
     test(`R3-1 ceiling: ${outcome}, tail ${acceptTail ? 'accepted' : 'refused'}`, async (t) => {
-      const h = harness({ history: Array.from({ length: 101 }, (_, i) => streamMsg(i + 5)) });
+      const h = harness({ history: Array.from({ length: 101 }, (_, i) => streamMsg(i + 5)), inconclusiveReplyIds: ['5', '105'] });
       const healing = () => (h.server as unknown as { healing: boolean }).healing;
       try {
         await initialize(h, true);
@@ -3557,3 +3568,107 @@ for (const kind of ['edit', 'move', 'delete'] as const) {
   });
 }
 
+for (const scenario of ['changed target', 'quote removed', 'explicit mention', 'unchanged evicted'] as const) {
+  for (const editReceived of scenario === 'changed target' || scenario === 'explicit mention' ? [false, true] : [false]) {
+    test(`R6-1: refused real-adapter reply after ${scenario}, edit ${editReceived ? 'received' : 'lost'}`, async (t) => {
+      const quoted = (id: number) => `[said](/#narrow/near/${id}):\n\n\`\`\`quote\noriginal\n\`\`\`\nreply`;
+      const raw = (id: number, content: string, extra: Partial<ZulipRawMessage> = {}): ZulipRawMessage => ({
+        id, content, sender_id: 101, sender_full_name: 'User', sender_email: 'user@example.invalid',
+        display_recipient: 'general', stream_id: 7, subject: 'topic', timestamp: 1_700_000_000,
+        type: 'stream', flags: [], ...extra,
+      });
+      let row = raw(5, quoted(200));
+      let historyVisible = false;
+      let poll: ((response: unknown) => void) | undefined;
+      let eventId = 0;
+      const adapter = new ZulipAdapter({
+        streams: { retrieve: async () => ({ streams: [{ stream_id: 7, name: 'general' }] }) },
+        users: { me: { subscriptions: { add: async () => ({ result: 'success' }) } } },
+        messages: {
+          retrieve: async ({ anchor }: { anchor: number | string }) => ({
+            messages: historyVisible && (typeof anchor !== 'number' || anchor < 5) ? [row] : [], found_newest: true,
+          }),
+          getById: async ({ message_id }: { message_id: number }) => message_id === 200
+            ? { message: raw(200, 'original', { sender_id: 100 }) }
+            : { result: 'error', code: 'BAD_REQUEST', msg: 'Invalid message(s)' },
+        },
+        queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
+        events: { retrieve: async () => new Promise((resolve) => { poll = resolve; }) },
+      }, 100, 'test', { dmDiscoveryLimit: 0 });
+      const changes: MessageChangeEvent[] = [];
+      const startEvents = adapter.startEvents.bind(adapter);
+      t.mock.method(adapter, 'startEvents', (onMessage, onSystem, onReaction, onChange) =>
+        startEvents(onMessage, onSystem, onReaction, (change) => { changes.push(change); onChange?.(change); }));
+      const h = harness({ platformAdapter: adapter });
+      const send = async (response: unknown) => {
+        await until(() => poll !== undefined, 'queue poll');
+        const resolve = poll!;
+        poll = undefined;
+        resolve(response);
+      };
+      const message = (m: ZulipRawMessage) => send({ events: [{ id: ++eventId, type: 'message', message: m, flags: m.flags }] });
+      const pending = () => (h.server as unknown as { pendingReplies: Map<string, Set<number>> }).pendingReplies.get('zulip:general')?.has(5) ?? false;
+      try {
+        await initialize(h, true);
+        await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: FULL_GRANT });
+        await until(() => h.server.isLive, 'real adapter live');
+        if (scenario === 'explicit mention') {
+          await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:general', type: 'zulip', address: {} });
+        }
+        await message(raw(1, 'initial', { flags: ['mentioned'] }));
+        await until(() => h.server.delivery.watermark('zulip:general') === 1, 'initial acceptance');
+        h.policy.rejectPushes.add('5');
+        h.policy.rejectIds.add('5');
+        await message(row);
+        await until(() => h.server.delivery.heldIds('zulip:general', { replayable: true }).includes(5), 'verified reply refused');
+        assert.equal(pending(), true);
+        const internal = adapter as unknown as { seen: Map<number, { replyToSelf: boolean }> };
+        assert.equal(internal.seen.get(5)?.replyToSelf, true);
+        const original = row.content;
+        row = scenario === 'quote removed' ? raw(5, 'quote removed')
+          : scenario === 'changed target' ? raw(5, quoted(201))
+          : scenario === 'explicit mention' ? raw(5, quoted(200), { flags: ['mentioned'] }) : row;
+        if (scenario === 'unchanged evicted') {
+          internal.seen.delete(5); // Bounded cache eviction must not defeat the server's retained verdict.
+          internal.seen.delete(200);
+          (ZulipAdapter as unknown as { quoteBudget: { tokens: number; updatedAt: number } }).quoteBudget = { tokens: 0, updatedAt: performance.now() };
+        }
+        if (editReceived) {
+          await send({ events: [{ id: ++eventId, type: 'update_message', message_id: 5, user_id: 101,
+            orig_content: original, content: row.content, flags: row.flags }] });
+          await until(() => internal.seen.get(5)?.replyToSelf === false, 'edit cleared adapter verdict');
+          assert.equal(changes[0].replyToSelfVerified, true, 'the withdrawn cached verdict is resolved for the server');
+          assert.equal(pending(), false, 'edit also clears the pending server verdict');
+        }
+        historyVisible = true;
+        h.policy.rejectPushes.delete('5');
+        const refuseRetry = scenario === 'explicit mention' && !editReceived;
+        if (!refuseRetry) h.policy.rejectIds.delete('5');
+        h.pushed.length = 0;
+        h.incoming.length = 0;
+        await send({ result: 'error', code: 'BAD_EVENT_QUEUE_ID', msg: 'expired' });
+        if (refuseRetry) {
+          await until(() => h.hostSaw.some((req) => req.method === method.CHANNELS_INCOMING &&
+            (req.params as ChannelsIncomingParams).messages.some((m) => m.messageId === '5' && m.metadata?.recovered === true)), 'retry offered');
+          assert.equal(pending(), false, 'history drops a refuted pending verdict even when the retry is refused');
+          h.policy.rejectIds.delete('5');
+          await send({ result: 'error', code: 'BAD_EVENT_QUEUE_ID', msg: 'expired again' });
+        }
+        await until(() => h.server.delivery.watermark('zulip:general') === 5, 'gap retry completed');
+        assert.equal(pending(), false, 'retry releases the pending verdict');
+        if (scenario === 'explicit mention') {
+          const replay = h.incoming.find((m) => m.messageId === '5' && m.metadata?.recovered === true);
+          assert.ok(replay, 'explicit mention still reaches the open channel');
+          assert.equal(replay.metadata?.isExplicitMention, true);
+          assert.equal(replay.metadata?.isReplyToBot, false);
+          assert.ok(replay.tags?.includes('chat:mention'));
+          assert.ok(!replay.tags?.includes('chat:reply'));
+        } else {
+          const recovered = h.pushed.filter((p) => p.tags?.includes('zulip:missed'));
+          assert.equal(recovered.length, scenario === 'unchanged evicted' ? 1 : 0, 'only an inconclusive unchanged reply gets the overlay');
+          if (scenario === 'unchanged evicted') assert.ok(recovered[0].tags?.includes('chat:reply'));
+        }
+      } finally { await h.close(); }
+    });
+  }
+}

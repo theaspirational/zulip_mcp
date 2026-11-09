@@ -129,7 +129,8 @@ export interface MessageChangeEvent {
   mentioned: boolean;
   /** Verified quote-reply addressing, independent of Zulip's mention flag. */
   replyToSelf?: boolean;
-  /** True only for a resolved verdict (including content with no quote targets). */
+  /** Resolved verdict, including ineligibility or withdrawal of a cached true
+   *  after changed targets, even if the new target author is unresolved. */
   replyToSelfVerified?: boolean;
   previouslyReplyToSelf?: boolean | null;
   /** The bot was mentioned in the message as it read before the change, as
@@ -176,6 +177,10 @@ export interface ChannelHistoryPage {
   reachedNewest: boolean;
   /** Quote verdicts skipped for this page's GET/wait budget, not verified ambient. */
   unverifiedMessageIds?: string[];
+  /** Inconclusive quote verdicts whose targets match the prior cached row.
+   *  A cache miss also qualifies: the server may still hold a verified reply.
+   *  Only these rows may receive its pending-reply overlay. */
+  inconclusiveReplyMessageIds?: string[];
 }
 
 export interface PlatformAdapter {
