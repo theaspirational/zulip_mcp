@@ -905,3 +905,50 @@ test('R6-1: an ineligible edit is resolved even without a cached true verdict', 
     assert.equal(change.replyToSelfVerified, true);
   } finally { adapter.stopEvents(); }
 });
+
+for (const contextEdit of ['unchanged', 'changed target', 'quote removed', 'explicit mention'] as const) {
+  test(`PR38: context retention after ${contextEdit} carries through deletion`, { timeout: 2000 }, async () => {
+    let served = false;
+    let live!: () => void;
+    const received = new Promise<void>((resolve) => { live = resolve; });
+    let pollReady!: () => void;
+    const polling = new Promise<void>((resolve) => { pollReady = resolve; });
+    let nextPoll!: (response: unknown) => void;
+    let deleted!: (change: MessageChangeEvent) => void;
+    const deletion = new Promise<MessageChangeEvent>((resolve) => { deleted = resolve; });
+    const adapter = new ZulipAdapter({
+      messages: { retrieve: async () => ({ messages: [
+        raw(300, contextEdit === 'changed target' ? quote(201) : contextEdit === 'quote removed' ? 'quote removed' : quote(),
+          { flags: contextEdit === 'explicit mention' ? ['mentioned'] : [] }),
+        raw(301, 'context only'),
+      ], found_newest: true }) },
+      queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
+      events: { retrieve: async () => {
+        if (served) return new Promise((resolve) => { nextPoll = resolve; pollReady(); });
+        served = true;
+        return { events: [
+          { id: 1, type: 'message', message: raw(QUOTED, 'original', { sender_id: SELF }), flags: [] },
+          { id: 2, type: 'message', message: raw(300, quote()), flags: [] },
+        ] };
+      } },
+    }, SELF, 'session');
+    adapter.startEvents((message) => {
+      assert.equal(message.metadata?.replyToSelf, true, 'live quote is verified');
+      live();
+    }, undefined, undefined, deleted);
+    try {
+      await received;
+      const context = await adapter.fetchContext('zulip:general', undefined, 10);
+      assert.match(context!.content, /context only/);
+      const seen = (adapter as unknown as { seen: Map<number, { replyToSelf: boolean }> }).seen;
+      const replyAfterContext = seen.get(300)?.replyToSelf;
+      assert.ok(seen.has(301), 'previously unseen context rows are still remembered');
+      await polling;
+      nextPoll({ events: [{ id: 3, type: 'delete_message', message_ids: [300], message_type: 'stream', stream_id: 1 }] });
+      const change = await deletion;
+      assert.equal(change.kind, 'delete');
+      assert.equal(change.replyToSelf, contextEdit === 'unchanged', 'deletion carries the retained or cleared verdict after context');
+      assert.equal(replyAfterContext, contextEdit === 'unchanged', 'context applies the same reply retention rule');
+    } finally { adapter.stopEvents(); }
+  });
+}

@@ -992,7 +992,15 @@ export class ZulipAdapter implements PlatformAdapter {
     const page = await fetchHistory(this.zulipClient, dmIds
       ? { dmUserIds: dmIds, limit: historySize }
       : { streamName: streamNameOf(channelId), limit: historySize });
-    for (const m of page.messages) this.remember(channelId, m);
+    // Refresh placement from context without letting its unclassified default
+    // false erase a verified reply. No target GETs here: only unchanged,
+    // eligible quotes retain the previous verdict, just as in history/edits.
+    for (const m of page.messages) {
+      const previous = this.seen.get(m.id);
+      const verdict = await this.classifyQuoteReply(m, async () => null);
+      m.replyToSelf = this.replyToSelfForVerdict(verdict, quotedMessageIds(m.rawContent), previous);
+      this.remember(channelId, m);
+    }
     const messages = page.messages.filter((m) => this.allowed(m));
     if (messages.length === 0) return null;
 
