@@ -943,9 +943,12 @@ export class ZulipAdapter implements PlatformAdapter {
         if (query.quoteLookupBudget) query.quoteLookupBudget.remainingMs = Math.max(0, query.quoteLookupBudget.remainingMs - waited);
       }
     };
+    // Snapshot every row before any target GET can remember a new message
+    // and evict a later row's verified verdict from the bounded cache.
+    const previousById = new Map(page.messages.map((m) => [m.id, this.seen.get(m.id)]));
     for (const m of page.messages) {
       if (!this.allowed(m)) continue;
-      const previous = this.seen.get(m.id);
+      const previous = previousById.get(m.id);
       const targets = quotedMessageIds(m.rawContent);
       const verdict = await this.classifyQuoteReply(m, resolve, Infinity);
       m.replyToSelf = this.replyToSelfForVerdict(verdict, targets, previous);
