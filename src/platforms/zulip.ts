@@ -1054,6 +1054,7 @@ export class ZulipAdapter implements PlatformAdapter {
     let pageRemainingMs = QUOTE_TIMEOUT_MS;
     const unverifiedMessageIds: string[] = [];
     const inconclusiveReplyMessageIds: string[] = [];
+    const unresolvedReplyMessageIds: string[] = [];
     const resolve = async (id: number, remainingMs: number): Promise<QuoteLookup> => {
       const known = pageById.get(id) ?? this.seen.get(id);
       if (known) return known;
@@ -1079,6 +1080,7 @@ export class ZulipAdapter implements PlatformAdapter {
       const targets = quotedMessageIds(m.rawContent);
       const verdict = await this.classifyQuoteReply(m, resolve, Infinity);
       m.replyToSelf = this.replyToSelfForVerdict(verdict, targets, previous);
+      if (verdict === 'budget-skipped' || verdict === 'unverified') unresolvedReplyMessageIds.push(String(m.id));
       if ((verdict === 'budget-skipped' || verdict === 'unverified') && this.quoteTargetsUnchanged(targets, previous)) {
         inconclusiveReplyMessageIds.push(String(m.id));
       }
@@ -1095,6 +1097,7 @@ export class ZulipAdapter implements PlatformAdapter {
       reachedNewest: page.foundNewest,
       ...(unverifiedMessageIds.length > 0 ? { unverifiedMessageIds } : {}),
       ...(inconclusiveReplyMessageIds.length > 0 ? { inconclusiveReplyMessageIds } : {}),
+      ...(unresolvedReplyMessageIds.length > 0 ? { unresolvedReplyMessageIds } : {}),
     };
   }
 

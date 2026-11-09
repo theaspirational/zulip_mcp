@@ -3736,3 +3736,162 @@ for (const scenario of ['changed target', 'quote removed', 'explicit mention', '
     });
   }
 }
+
+/** Local API/queue fixture: all classification and history paging use ZulipAdapter. */
+function pendingLossFixture() {
+  const quoted = '[said](/#narrow/near/200):\n\n```quote\noriginal\n```\nreply';
+  const raw = (id: number, content = quoted, extra: Partial<ZulipRawMessage> = {}): ZulipRawMessage => ({
+    id, content, sender_id: 101, sender_full_name: 'User', sender_email: 'user@example.invalid',
+    display_recipient: 'general', stream_id: 7, subject: 'topic', timestamp: 1_700_000_000,
+    type: 'stream', flags: [], ...extra,
+  });
+  let rows: ZulipRawMessage[] = [];
+  let targetAvailable = true;
+  let poll: ((response: unknown) => void) | undefined;
+  let eventId = 0;
+  let reads = 0;
+  const adapter = new ZulipAdapter({
+    streams: { retrieve: async () => ({ streams: [{ stream_id: 7, name: 'general' }] }) },
+    users: { me: { subscriptions: { add: async () => ({ result: 'success' }) } } },
+    messages: {
+      retrieve: async ({ anchor, num_after }: { anchor: number | string; num_after: number }) => {
+        reads++;
+        const messages = rows.filter((row) => typeof anchor !== 'number' || row.id > anchor).slice(0, num_after || rows.length);
+        return { messages, found_newest: messages.at(-1)?.id === rows.at(-1)?.id || messages.length === 0 };
+      },
+      getById: async () => targetAvailable ? { message: raw(200, 'original', { sender_id: 100 }) }
+        : { result: 'error', code: 'BAD_REQUEST', msg: 'Invalid message(s)' },
+    },
+    queues: { register: async () => ({ queue_id: 'q', last_event_id: -1 }) },
+    events: { retrieve: async () => new Promise((resolve) => { poll = resolve; }) },
+  }, 100, 'test', { dmDiscoveryLimit: 0 });
+  const h = harness({ platformAdapter: adapter });
+  const send = async (response: unknown) => {
+    await until(() => poll !== undefined, 'queue poll');
+    const resolve = poll!;
+    poll = undefined;
+    resolve(response);
+  };
+  return {
+    h, adapter, raw,
+    set rows(value: ZulipRawMessage[]) { rows = value; },
+    get reads() { return reads; },
+    async message(id: number, content?: string, extra?: Partial<ZulipRawMessage>) {
+      await send({ events: [{ id: ++eventId, type: 'message', message: raw(id, content, extra), flags: extra?.flags ?? [] }] });
+    },
+    async messages(ids: number[]) {
+      await send({ events: ids.map((id) => ({ id: ++eventId, type: 'message', message: raw(id), flags: [] })) });
+    },
+    async gap() {
+      const before = reads;
+      await send({ result: 'error', code: 'BAD_EVENT_QUEUE_ID', msg: 'expired' });
+      await until(() => reads > before, 'gap history read');
+      await new Promise((r) => setTimeout(r, 30));
+    },
+    loseTarget() {
+      targetAvailable = false;
+      // Simulate bounded adapter cache eviction, not a changed quote or verdict.
+      (adapter as unknown as { seen: Map<number, unknown> }).seen.clear();
+    },
+  };
+}
+
+for (const source of ['reconnect', 'history-first'] as const) {
+  test(`R6-1 round4 ${source}: refused real-adapter reply survives an inaccessible target`, async () => {
+    const f = pendingLossFixture();
+    let h = f.h;
+    try {
+      await initialize(h, true);
+      await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: FULL_GRANT });
+      await until(() => h.server.isLive, 'live');
+      await f.message(1, 'initial', { flags: ['mentioned'] });
+      await until(() => h.server.delivery.watermark('zulip:general') === 1, 'initial acceptance');
+      h.policy.rejectPushes.add('5');
+      f.rows = [f.raw(5)];
+      if (source === 'reconnect') {
+        await f.message(5);
+        await until(() => h.server.delivery.heldIds('zulip:general').includes(5), 'refused live reply');
+        await h.close();
+        h = harness({ reuse: { server: h.server, adapter: h.adapter } });
+        h.policy.rejectPushes.add('5');
+        f.loseTarget();
+        await initialize(h, true);
+        await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: FULL_GRANT });
+        await until(() => h.server.isLive, 'reconnected live');
+      } else {
+        await f.gap();
+        assert.ok(h.pushed.some((p) => p.tags?.includes('chat:reply') && p.tags?.includes('zulip:missed')), 'history-first reply was offered');
+        f.loseTarget();
+        await f.gap();
+      }
+      assert.ok(h.server.delivery.watermark('zulip:general')! < 5, 'unaccepted reply must still floor the watermark');
+      h.policy.rejectPushes.delete('5');
+      h.pushed.length = 0;
+      await f.gap();
+      await until(() => h.server.delivery.watermark('zulip:general') === 5, 'reply accepted');
+      assert.ok(h.pushed.some((p) => p.tags?.includes('chat:reply')), 'retry still carries reply addressing');
+    } finally { await h.close(); }
+  });
+}
+
+test('R6-1 round4 cap: real-adapter overflow cannot evict the oldest refused reply or scan past untracked replies', async (t) => {
+  const f = pendingLossFixture();
+  const h = f.h;
+  const logs: string[] = [];
+  t.mock.method(console, 'error', (...args) => { logs.push(args.join(' ')); });
+  try {
+    await initialize(h, true);
+    await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: FULL_GRANT });
+    await until(() => h.server.isLive, 'live');
+    await f.message(1, 'initial', { flags: ['mentioned'] });
+    await until(() => h.server.delivery.watermark('zulip:general') === 1, 'initial acceptance');
+    h.policy.rejectPushes.add('5');
+    f.rows = [f.raw(5)];
+    await f.message(5);
+    await until(() => h.server.delivery.heldIds('zulip:general').includes(5), 'oldest reply refused');
+    // Keep event handling real but disable further offers while filling the map.
+    await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: ['tools'] });
+    await f.messages(Array.from({ length: 5_001 }, (_, i) => 10_000 + i));
+    const seen = (f.adapter as unknown as { seen: Map<number, unknown> }).seen;
+    await until(() => seen.has(15_000), 'all replies classified', 10_000);
+    f.loseTarget();
+    f.rows = [f.raw(5)];
+    h.policy.rejectPushes.add('5');
+    await h.host.sendRequest(method.FEATURE_SETS_UPDATE, { effectiveCapabilities: FULL_GRANT });
+    await f.gap();
+    assert.ok(h.server.delivery.watermark('zulip:general')! < 5, 'oldest unresolved reply cannot be evicted');
+    const pending = (h.server as unknown as { pendingReplies: Map<string, Map<number, readonly number[]>> }).pendingReplies;
+    assert.ok(pending.get('zulip:general')!.size <= 5_000, 'bounded pending memory');
+    assert.equal(logs.filter((line) => /pending repl.*cap|pending repl.*limit/i.test(line)).length, 1, 'overflow logs once');
+    // Resolve the retained prefix, but the untracked overflow remains inaccessible.
+    h.policy.rejectPushes.delete('5');
+    f.rows = [f.raw(5), f.raw(14_999), f.raw(15_000)];
+    await f.gap();
+    assert.ok(h.server.delivery.watermark('zulip:general')! < 14_999, 'overflow itself must remain a conservative scan barrier');
+    await f.message(20_000, 'later acceptance', { flags: ['mentioned'] });
+    await until(() => h.pushed.some((p) => p.origin.messageId === '20000'), 'later message accepted');
+    assert.ok(h.server.delivery.watermark('zulip:general')! < 14_999, 'later acceptance cannot bypass the overflow floor');
+    // Genuine quote withdrawal releases the conservative barrier on re-scan.
+    f.rows = [f.raw(5, 'quote removed'), f.raw(14_999, 'quote removed'), f.raw(15_000, 'quote removed')];
+    await f.gap();
+    assert.ok(h.server.delivery.watermark('zulip:general')! >= 15_000);
+  } finally { await h.close(); }
+});
+
+
+test('an already accepted buffered reply duplicate does not reacquire a scan floor', async () => {
+  const h = harness();
+  try {
+    await initialize(h, true);
+    await settled(h);
+    const reply = streamMsg(5, { metadata: { replyToSelf: true, isDM: false }, tags: ['chat:reply'] });
+    h.adapter.emit!(reply);
+    await until(() => h.server.delivery.watermark('zulip:general') === 5, 'reply accepted');
+    const internal = h.server as unknown as { live: boolean; goLive(): Promise<void> };
+    internal.live = false;
+    h.adapter.emit!(reply);
+    await internal.goLive();
+    h.adapter.emit!(streamMsg(6, { mentioned: true }));
+    await until(() => h.server.delivery.watermark('zulip:general') === 6, 'later acceptance advances');
+  } finally { await h.close(); }
+});

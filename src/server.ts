@@ -148,11 +148,13 @@ export class ZulipMcplServer {
   private live = false;
   private preLive: { message: IncomingChannelMessage; newChannel?: ChannelDescriptor }[] = [];
   private preLiveDropped = 0;
-  /** Live-verified replies not yet accepted: history can fail closed under a
-   *  tighter/shared lookup budget without erasing the verdict held for retry.
-   *  Target sets belong to that verification, not the adapter cache.
-   *  Oldest-first eviction, capped per channel like the pre-live buffer. */
+  /** Verified replies not yet accepted, from live events OR history. Target
+   *  sets belong to that verification, not the adapter's bounded cache. */
   private pendingReplies = new Map<string, Map<number, readonly number[]>>();
+  /** At capacity, retain existing verdicts and conservatively protect the
+   *  untracked range. Re-scans can resolve it without unbounded per-id state. */
+  private pendingReplyOverflow = new Map<string, { from: number; through: number }>();
+  private pendingReplyOverflowLogged = new Set<string>();
   /** Commit scan-only advancement after buffered live verdicts are reconciled. */
   private preLiveScanned = new Map<string, number>();
   /** Watermarks as they stood when the connection began: what the sweep
@@ -298,7 +300,6 @@ export class ZulipMcplServer {
     this.sweepDone = false;
     this.preLive = [];
     this.preLiveDropped = 0;
-    this.pendingReplies.clear();
     this.preLiveScanned.clear();
     this.sweepAnchors = new Map(this.delivery.watermarkedChannels().map((id) => [id, this.delivery.watermark(id)!]));
   }
@@ -863,10 +864,39 @@ export class ZulipMcplServer {
       ? [...new Set<number>(targets)].sort((a, b) => a - b) : null;
   }
 
+  private syncReplyFloor(channelId: string): void {
+    const ids = this.pendingReplies.get(channelId)?.keys() ?? [];
+    const floor = Math.min(this.pendingReplyOverflow.get(channelId)?.from ?? Infinity, ...ids);
+    this.delivery.setScanFloor(channelId, Number.isFinite(floor) ? floor : undefined);
+  }
+
+  private rememberPendingReply(message: IncomingChannelMessage): void {
+    const channelId = message.channelId;
+    const id = numericId(message);
+    const targets = this.replyTargets(message);
+    if ((message.metadata as Record<string, unknown> | undefined)?.replyToSelf !== true ||
+        targets === null || id === null || id <= (this.delivery.watermark(channelId) ?? 0) ||
+        this.isMuted(channelId) || !this.isAllowed(channelId, message)) return;
+    let pending = this.pendingReplies.get(channelId);
+    if (!pending) this.pendingReplies.set(channelId, pending = new Map());
+    if (!pending.has(id) && pending.size >= PRE_LIVE_BUFFER_CAP) {
+      const overflow = this.pendingReplyOverflow.get(channelId);
+      this.pendingReplyOverflow.set(channelId, {
+        from: Math.min(overflow?.from ?? id, id), through: Math.max(overflow?.through ?? id, id),
+      });
+      if (!this.pendingReplyOverflowLogged.has(channelId)) {
+        this.pendingReplyOverflowLogged.add(channelId);
+        console.error(`[zulip-mcp] ${channelId}: pending reply cap reached; holding watermark for re-scan`);
+      }
+    } else pending.set(id, targets);
+    this.syncReplyFloor(channelId);
+  }
+
   private forgetPendingReply(channelId: string, id: number): void {
     const pending = this.pendingReplies.get(channelId);
     pending?.delete(id);
     if (pending?.size === 0) this.pendingReplies.delete(channelId);
+    this.syncReplyFloor(channelId);
   }
 
   /** The host accepted (or was handed) a message: its hold is released and the watermark may advance. */
@@ -945,18 +975,7 @@ export class ZulipMcplServer {
    * replay after go-live fetches them back. Live, it is routed at once.
    */
   private async onIncoming(message: IncomingChannelMessage, newChannel?: ChannelDescriptor): Promise<void> {
-    const id = numericId(message);
-    const targets = this.replyTargets(message);
-    if ((message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true && targets !== null && id !== null &&
-        !this.isMuted(message.channelId) && this.isAllowed(message.channelId, message)) {
-      let pending = this.pendingReplies.get(message.channelId);
-      if (!pending) this.pendingReplies.set(message.channelId, pending = new Map());
-      if (!pending.has(id) && pending.size >= PRE_LIVE_BUFFER_CAP) {
-        const oldest = pending.keys().next().value;
-        if (oldest !== undefined) pending.delete(oldest);
-      }
-      pending.set(id, targets);
-    }
+    this.rememberPendingReply(message);
     if (!this.live) {
       if (this.preLive.length >= PRE_LIVE_BUFFER_CAP) {
         const dropped = this.preLive.shift()!;
@@ -1066,7 +1085,9 @@ export class ZulipMcplServer {
     try {
       for (const channelId of channels) {
         if (this.isMuted(channelId) || !this.isAllowed(channelId)) {
+          this.pendingReplyOverflow.delete(channelId);
           for (const id of this.pendingReplies.get(channelId)?.keys() ?? []) this.forgetPendingReply(channelId, id);
+          this.syncReplyFloor(channelId);
           this.delivery.releaseAll(channelId);
           continue;
         }
@@ -1245,9 +1266,11 @@ export class ZulipMcplServer {
     afterId: number,
     throughId?: number,
     quoteLookupBudget?: { remainingMs: number },
-  ): Promise<{ messages: IncomingChannelMessage[]; truncated: boolean; complete: boolean; scannedThrough: number | null; unverifiedMessageIds: number[] }> {
+    retainReplies = true,
+  ): Promise<{ messages: IncomingChannelMessage[]; truncated: boolean; complete: boolean; scannedThrough: number | null; unverifiedMessageIds: number[]; unresolvedOverflowIds: number[] }> {
     const out: IncomingChannelMessage[] = [];
     const unverified = new Set<number>();
+    const unresolvedOverflow = new Set<number>();
     let cursor = afterId;
     let complete = false;
     while (out.length < this.catchupLimit) {
@@ -1261,6 +1284,9 @@ export class ZulipMcplServer {
       out.push(...page.messages.map((message) => {
         const id = Number(message.messageId);
         const verifiedTargets = this.pendingReplies.get(channelId)?.get(id);
+        // History-first verified replies need the same ownership as live ones,
+        // before any catch-up offer can be refused.
+        if (retainReplies) this.rememberPendingReply(message);
         if (!verifiedTargets) return message;
         const targets = this.replyTargets(message);
         const unchanged = targets !== null && targets.length === verifiedTargets.length &&
@@ -1270,7 +1296,7 @@ export class ZulipMcplServer {
         // another refused attempt can outlive the adapter's bounded cache.
         const positive = (message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true;
         if (!unchanged || (!positive && !inconclusiveReplies.has(message.messageId))) {
-          this.forgetPendingReply(channelId, id);
+          if (!positive) this.forgetPendingReply(channelId, id);
           return message;
         }
         if (positive) return message;
@@ -1280,6 +1306,15 @@ export class ZulipMcplServer {
           metadata: { ...(message.metadata as Record<string, unknown>), replyToSelf: true, isMention: true, isReplyToBot: true },
         };
       }));
+      const overflow = this.pendingReplyOverflow.get(channelId);
+      for (const id of page.unresolvedReplyMessageIds ?? page.inconclusiveReplyMessageIds ?? []) {
+        const numeric = Number(id);
+        if (overflow && numeric >= overflow.from && numeric <= overflow.through &&
+            !this.pendingReplies.get(channelId)?.has(numeric)) {
+          unresolvedOverflow.add(numeric);
+          unverified.add(numeric);
+        }
+      }
       for (const id of page.unverifiedMessageIds ?? []) {
         const numeric = Number(id);
         if (Number.isFinite(numeric) && !this.pendingReplies.get(channelId)?.has(numeric)) unverified.add(numeric);
@@ -1292,15 +1327,21 @@ export class ZulipMcplServer {
       }
     }
     // Not complete: the ceiling (or a bound) stopped the walk with more beyond the newest id scanned.
-    return { messages: out, truncated: !complete, complete, scannedThrough: cursor > afterId ? cursor : null, unverifiedMessageIds: [...unverified].sort((a, b) => a - b) };
+    return { messages: out, truncated: !complete, complete, scannedThrough: cursor > afterId ? cursor : null, unverifiedMessageIds: [...unverified].sort((a, b) => a - b), unresolvedOverflowIds: [...unresolvedOverflow].sort((a, b) => a - b) };
   }
 
   private advanceCatchUp(channelId: string, through: number, after: number): void {
-    // An accepted/empty catch-up scan releases every hold in its range,
-    // including ids deleted from history. Their pending verdicts go too.
-    for (const id of this.delivery.heldIds(channelId)) {
+    // Only accepted or genuinely resolved rows reach this point. Inconclusive
+    // overflow rows stop the scan below them, even on the final retry.
+    for (const id of this.pendingReplies.get(channelId)?.keys() ?? []) {
       if (id > after && id <= through) this.forgetPendingReply(channelId, id);
     }
+    const overflow = this.pendingReplyOverflow.get(channelId);
+    if (overflow && after < overflow.from && through >= overflow.from) {
+      if (through >= overflow.through) this.pendingReplyOverflow.delete(channelId);
+      else overflow.from = through + 1;
+    }
+    this.syncReplyFloor(channelId);
     if (this.live) this.delivery.advanceThrough(channelId, through, after);
     else this.preLiveScanned.set(channelId, Math.max(this.preLiveScanned.get(channelId) ?? 0, through));
   }
@@ -1361,6 +1402,15 @@ export class ZulipMcplServer {
       msgs = msgs.filter((message) => Number(message.messageId) < blocked);
       if (newestId <= after) return retry(after);
     }
+    // Unlike a never-verified quote, overflow cannot fail closed by advancing
+    // past it: a verified, unaccepted reply may be among these bounded-out ids.
+    const overflowBlocked = fetched.unresolvedOverflowIds.find((id) => id > after && id <= newestId);
+    if (overflowBlocked !== undefined) {
+      newestId = overflowBlocked - 1;
+      msgs = msgs.filter((message) => Number(message.messageId) < overflowBlocked);
+      if (newestId <= after) return false;
+    }
+    const truncated = fetched.truncated || blocked !== undefined || overflowBlocked !== undefined;
     const views = msgs.map(viewOf);
     const keepAll = keepAllHint || isDmChannelId(channelId);
     const kept = selectMissed(views, { keepAll, vicinity: MISSED_VICINITY });
@@ -1384,7 +1434,7 @@ export class ZulipMcplServer {
       count: keepAll ? kept.length : addressedCount,
       formatTime: this.formatTime,
       maxChars: this.missedBlockMaxChars,
-      moreBeyond: fetched.truncated || blocked !== undefined,
+      moreBeyond: truncated,
       newestScannedId: newestId,
     });
     const synthetic: IncomingChannelMessage = {
@@ -1407,7 +1457,7 @@ export class ZulipMcplServer {
       missed: true,
       reason,
       messages: kept.length,
-      ...(fetched.truncated || blocked !== undefined ? { truncated: true } : {}),
+      ...(truncated ? { truncated: true } : {}),
     }, () => onAttempt?.(newestId));
     if (ok) {
       for (const view of kept) this.forgetPendingReply(channelId, view.id);
@@ -1441,7 +1491,9 @@ export class ZulipMcplServer {
       if (!tally.talliedThrough) continue;
       let fetched: Awaited<ReturnType<ZulipMcplServer['fetchAfter']>>;
       try {
-        fetched = await this.fetchAfter(channelId, tally.talliedThrough);
+        // Tally reads are not delivery offers; do not reacquire replies already
+        // accepted by the staged reconnect sweep above.
+        fetched = await this.fetchAfter(channelId, tally.talliedThrough, undefined, undefined, false);
       } catch {
         continue;
       }

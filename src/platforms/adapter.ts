@@ -223,6 +223,9 @@ export interface ChannelHistoryPage {
    *  A cache miss also qualifies: the server may still hold a verified reply.
    *  Only these rows may receive its pending-reply overlay. */
   inconclusiveReplyMessageIds?: string[];
+  /** All inconclusive quote verdicts, even when adapter-cache targets changed.
+   *  Used conservatively when bounded server state no longer has the targets. */
+  unresolvedReplyMessageIds?: string[];
 }
 
 export interface PlatformAdapter {
