@@ -1,4 +1,5 @@
 /** Exact opt-in message references; never infer links from other text. */
+import { LEGACY_IDS, type MessageIds } from './message-ids.js';
 import type { ZulipSession } from './zulip-client.js';
 
 const MAX_TOKENS = 20;
@@ -11,9 +12,9 @@ function hashEncode(value: string): string {
 }
 
 /** Scan every token, independent of Markdown; only an immediate backslash escapes it. */
-function tokensIn(content: string): Token[] {
+function tokensIn(content: string, ids: MessageIds = LEGACY_IDS, bare?: () => void): Token[] {
   const tokens: Token[] = [];
-  const syntax = /\\?\[\[msg:([0-9]+)\]\]/g;
+  const syntax = ids.mode === 'legacy' ? /\\?\[\[msg:([0-9]+)\]\]/g : /\\?\[\[msg:([^\]\r\n]+)\]\]/g;
   let count = 0;
   for (let match; (match = syntax.exec(content));) {
     const escaped = match[0].startsWith('\\');
@@ -21,10 +22,10 @@ function tokensIn(content: string): Token[] {
     let id: number | undefined;
     if (!escaped) {
       if (++count > MAX_TOKENS) throw new Error(`At most ${MAX_TOKENS} message-link tokens are allowed per call (at ${text})`);
-      id = Number(match[1]);
+      id = ids.mode === 'legacy' ? Number(match[1]) : ids.parse(match[1], bare);
       if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`Cannot resolve ${text}: message id must be a positive safe integer`);
     }
-    tokens.push({ start: match.index, end: syntax.lastIndex, text, id });
+    tokens.push({ start: match.index, end: syntax.lastIndex, text: id !== undefined && ids.mode !== 'legacy' ? `[[msg:${ids.format(id)}]]` : text, id });
   }
   return tokens;
 }
@@ -62,9 +63,13 @@ function messageUrl(realm: string, id: number, message: any): string {
   return `${realm.replace(/\/+$/, '')}/#narrow/${narrow}/near/${id}`;
 }
 
+export function validateMessageLinks(content: string, ids: MessageIds, bare?: () => void): void {
+  tokensIn(content, ids, bare);
+}
+
 /** Resolve everything before the caller uploads, chunks, sends or edits anything. */
-export async function resolveMessageLinks(content: string, session: Pick<ZulipSession, 'client' | 'realm'>): Promise<string> {
-  const tokens = tokensIn(content);
+export async function resolveMessageLinks(content: string, session: Pick<ZulipSession, 'client' | 'realm'>, ids: MessageIds = LEGACY_IDS): Promise<string> {
+  const tokens = tokensIn(content, ids);
   if (!tokens.length) return content;
   const links = new Map<number, string>();
   for (const token of tokens) {

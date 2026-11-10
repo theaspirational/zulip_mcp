@@ -292,7 +292,7 @@ test('attributeMessage renders who/where/when into the body in the fetch_history
   // Ambient (no mention) has no marker; a DM says so instead of stream > topic.
   assert.equal((attributeMessage(incoming({ metadata: { topic: 'router', mentioned: false } }), () => 'T').content[0] as { text: string }).text.startsWith('[T id=17206924] [#qa > router] Mykhailo Buialo: @'), true);
   const dm = attributeMessage(incoming({ channelId: 'zulip:dm:760', threadId: undefined, metadata: { isDM: true, mentioned: false }, content: [{ type: 'text', text: 'hi' }] }), () => 'T');
-  assert.equal((dm.content[0] as { text: string }).text, '[T id=17206924] [DM] Mykhailo Buialo: hi');
+  assert.equal((dm.content[0] as { text: string }).text, '[T id=17206924] [DM zulip:dm:760 · Mykhailo Buialo] Mykhailo Buialo: hi');
 });
 
 test('attributeMessage: no timestamp style, attachments after the body, image-only content, and idempotence', () => {
@@ -330,5 +330,5 @@ test('renderMissedBlock on a DM conversation renders [DM] lines, with no mention
   const views = [viewOf(dmMsg(1, 'hey')), viewOf(dmMsg(2, 'you there?'))];
   assert.equal(views[0].isDM, true, 'selection still treats a DM as addressed');
   const block = renderMissedBlock(views, { streamName: 'DM: Bo', channelId: 'zulip:dm:42', reason: 'mention', count: 2, formatTime: () => 'T' });
-  assert.deepEqual(block.split('\n').slice(1, 3), ['[T id=1] [DM] Bo: hey', '[T id=2] [DM] Bo: you there?']);
+  assert.deepEqual(block.split('\n').slice(1, 3), ['[T id=1] [DM zulip:dm:42 · Bo] Bo: hey', '[T id=2] [DM zulip:dm:42 · Bo] Bo: you there?']);
 });

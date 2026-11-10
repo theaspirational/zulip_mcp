@@ -73,6 +73,7 @@ export interface RegisterAdditionalResult {
 }
 
 export interface ChannelManagerHooks {
+  formatMessageId?: (id: number) => number | string;
   /**
    * Called per channel after one `channels/incoming` round trip with what
    * the host ACCEPTED and what it REJECTED. A batch that never got an answer
@@ -737,8 +738,9 @@ export class ChannelManager {
       const isDM = channelId.startsWith('zulip:dm:');
       const stream = !isDM ? movedTo.channelId?.replace(/^zulip:/, '') ?? null : null;
       const topic = movedTo.topic ?? movedTo.likelyTopic;
-      const recovery = `send_message({reply_to: ${messageId}, content})`;
-      const data = { channelId, messageId, stream, movedTo };
+      const shownId = messageId === undefined ? undefined : this.hooks.formatMessageId?.(messageId) ?? messageId;
+      const recovery = `send_message({reply_to: ${typeof shownId === "string" ? JSON.stringify(shownId) : shownId}, content})`;
+      const data = { channelId, messageId: shownId, stream, movedTo };
       if (reference.deletedOrHidden) {
         throw new McplRpcError(-32602,
           `Nothing was posted: the message this conversation followed was deleted or moved where this bot can't see it, so it can't be replied to. To answer a newer message use send_message({reply_to: <its id>, content}); otherwise choose an explicit destination.`, data);

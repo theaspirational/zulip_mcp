@@ -10,6 +10,7 @@
  * Environment:
  *   ZULIP_REALM / ZULIP_EMAIL / ZULIP_API_KEY   - bot credentials
  *   ZULIP_RC_PATH                               - alternative: a zuliprc file
+ *   ZULIP_REALM_TAG / ZULIP_ID_MODE               - message IDs only: tag; legacy|compat|strict (default legacy)
  *   ZULIP_SESSION_ID                            - persistent monitoring state id
  *   ZULIP_SUBSCRIBE                             - comma-separated streams to join on startup
  *   ZULIP_STATE_DIR                             - where monitoring + delivery state lives
@@ -40,6 +41,7 @@
  *   MCPL_CONTEXT_HISTORY_SIZE                   - messages injected per open channel (20)
  */
 
+import { MessageIds } from './message-ids.js';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -102,6 +104,7 @@ async function main(): Promise<void> {
   }
 
   const session = await initializeZulipClient();
+  const messageIds = MessageIds.fromEnv(session.realm);
   const stateDir = process.env.ZULIP_STATE_DIR || join(homedir(), '.zulip_mcp_state');
   const filters = new FiltersPlane(process.env.ZULIP_FILTERS_FILE || join(stateDir, `${session.sessionId}.filters.json`));
   filters.start();
@@ -116,6 +119,7 @@ async function main(): Promise<void> {
   const formatTime = agentLineTimeFormatter();
   const adapter = new ZulipAdapter(session.client, session.selfUserId, session.sessionId, {
     formatTime,
+    messageIds,
     uploader,
     uploadPolicy,
     activeTopics: intEnv('ZULIP_ACTIVE_TOPICS', DEFAULT_ACTIVE_TOPICS),
@@ -125,7 +129,7 @@ async function main(): Promise<void> {
     filters,
     maxMessageLength: process.env.ZULIP_MAX_MESSAGE_LENGTH ? intEnv('ZULIP_MAX_MESSAGE_LENGTH', 10000) : undefined,
   });
-  const tools = new ZulipToolRuntime(session, stateDir, { uploader, uploadPolicy, formatTime });
+  const tools = new ZulipToolRuntime(session, stateDir, { uploader, uploadPolicy, formatTime, messageIds });
   tools.setReactionPolicy({
     suppressed: (name, code, type) => filters.reactionSuppressed(name, code, type),
   });
@@ -140,6 +144,7 @@ async function main(): Promise<void> {
     missedBlockMaxChars: intEnv('ZULIP_MISSED_BLOCK_MAX_CHARS', DEFAULT_MISSED_BLOCK_MAX_CHARS),
     attributeDelivery: process.env.ZULIP_ATTRIBUTE_DELIVERY !== 'false',
     formatTime,
+    messageIds,
     filters,
     attachments: {
       // Same validation as fetch_attachment: only /user_uploads/ on the realm

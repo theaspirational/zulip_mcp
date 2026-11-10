@@ -24,6 +24,8 @@
  * every connection starts from a fresh grant, registration and sweep.
  */
 
+import { LEGACY_IDS, idToolDefinitions, type MessageIds } from './message-ids.js';
+
 import {
   ERR_CHANNEL_OPEN_FAILED,
   ERR_UNKNOWN_CHANNEL,
@@ -101,6 +103,7 @@ const PRE_LIVE_BUFFER_CAP = 5000;
 const SHUTDOWN_INFLIGHT_GRACE_MS = 5000;
 
 export interface ZulipMcplServerOptions {
+  messageIds?: MessageIds;
   /** Server name/version reported in `initialize`. */
   serverInfo: { name: string; version: string };
   /** `false` forces plain-MCP mode even for hosts that advertise MCPL. */
@@ -166,6 +169,7 @@ export class ZulipMcplServer {
   private readonly formatTime: (d: Date) => string;
   /** Distinguishes change markers minted within the same second. */
   private changeSeq = 0;
+  private readonly messageIds: MessageIds;
   private readonly attributeDelivery: boolean;
   private readonly announceTimeoutMs: number;
   private readonly filters: FiltersPlane | null;
@@ -175,6 +179,7 @@ export class ZulipMcplServer {
     private readonly tools: ZulipToolRuntime,
     private readonly options: ZulipMcplServerOptions,
   ) {
+    this.messageIds = options.messageIds ?? tools.messageIds ?? LEGACY_IDS;
     this.adapters = new Map([[adapter.type, adapter]]);
     this.catchupLimit = Math.min(CATCHUP_HARD_CAP, Math.max(0, options.catchupLimit ?? DEFAULT_CATCHUP_LIMIT));
     this.missedBlockMaxChars = Math.max(1000, options.missedBlockMaxChars ?? DEFAULT_MISSED_BLOCK_MAX_CHARS);
@@ -182,7 +187,7 @@ export class ZulipMcplServer {
     this.attributeDelivery = options.attributeDelivery !== false;
     this.announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
     this.filters = options.filters ?? null;
-    this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default');
+    this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.messageIds);
     // A widened stream allowlist means channels the host has never seen:
     // make them known. A narrowed one is enforced on every delivery surface
     // (`isAllowed`); the host keeps its descriptors (a reopen would
@@ -219,6 +224,7 @@ export class ZulipMcplServer {
     this.channelManager = new ChannelManager(host, this.adapters, this.grant, options.batchWindowMs, {
       // The only place an open channel's watermark moves: on the host's
       // itemized acceptance of a channels/incoming batch.
+      formatMessageId: id => this.messageIds.format(id),
       onDelivered: (channelId, accepted, rejected) => this.onDelivered(channelId, accepted, rejected),
       // Policy is rechecked when the batch goes out, not only when it was
       // queued: a mute, a narrowed allowlist or a disabled feature set that
@@ -525,7 +531,7 @@ export class ZulipMcplServer {
 
         case 'tools/list':
           // MCPL RFC-008: each tool carries its class in _meta['mcpl/class'].
-          conn.sendResponse(req.id, { tools: withToolClasses(toolDefinitions) });
+          conn.sendResponse(req.id, { tools: withToolClasses(idToolDefinitions(toolDefinitions, this.messageIds)) });
           break;
 
         case 'tools/call': {
@@ -593,7 +599,7 @@ export class ZulipMcplServer {
         case method.CHANNELS_OPEN: {
           this.requireMcpl();
           const open = params as unknown as ChannelsOpenParams;
-          conn.sendResponse(req.id, await this.handleChannelOpen(open));
+          conn.sendResponse(req.id, this.messageIds.project(await this.handleChannelOpen(open)));
           break;
         }
 
@@ -620,7 +626,7 @@ export class ZulipMcplServer {
               this.stateTracker.recordSent(id, publish.channelId, text);
             }
           }
-          conn.sendResponse(req.id, { delivered: result.delivered, ...(result.messageId ? { messageId: result.messageId } : {}) });
+          conn.sendResponse(req.id, { delivered: result.delivered, ...(result.messageId ? { messageId: this.messageIds.format(result.messageId) } : {}) });
           break;
         }
 
@@ -634,7 +640,7 @@ export class ZulipMcplServer {
             break;
           }
           try {
-            const representation = await this.adapter.acknowledge(ack.channelId, ack.messageId, ack.value);
+            const representation = await this.adapter.acknowledge(ack.channelId, this.internalMessageId(ack.messageId), ack.value);
             conn.sendResponse(req.id, { acknowledged: true, representation });
           } catch (error) {
             conn.sendResponse(req.id, { acknowledged: false, reason: (error as Error).message });
@@ -713,6 +719,9 @@ export class ZulipMcplServer {
 
   private async handleChannelOpen(params: ChannelsOpenParams): Promise<ChannelsOpenResult> {
     if (!this.grant.has('channels.lifecycle')) throw capabilityDenied('channels.lifecycle');
+    if (this.messageIds.mode !== 'legacy' && params.history?.beforeMessageId !== undefined) {
+      params = { ...params, history: { ...params.history, beforeMessageId: String(this.messageIds.parse(params.history.beforeMessageId)) } };
+    }
     const descriptor = await this.findChannelRediscovering(params);
     // Opening a channel is proof the host knows it — the only proof available
     // when the answer to its announcement cannot reach us (#20 review).
@@ -799,8 +808,13 @@ export class ZulipMcplServer {
   }
 
   /** The delivered form of a message: attributed unless the host asked for bare bodies. */
+  private dmParticipants(channelId: string): string[] | undefined {
+    const metadata = this.channelManager.getChannel(channelId)?.metadata as { participants?: { name: string }[]; recipientName?: string } | undefined;
+    return metadata?.participants?.map(p => p.name) ?? (metadata?.recipientName ? [metadata.recipientName] : undefined);
+  }
+
   private attributed(message: IncomingChannelMessage): IncomingChannelMessage {
-    return this.attributeDelivery ? attributeMessage(message, this.formatTime) : message;
+    return this.attributeDelivery ? attributeMessage(message, this.formatTime, this.messageIds, this.dmParticipants(message.channelId)) : message;
   }
 
   private handleChannelClose(params: ChannelsCloseParams): { closed: boolean } {
@@ -1137,7 +1151,7 @@ export class ZulipMcplServer {
     const conn = this.conn;
     if (!conn || !this.mcplActive) return false;
     if (!this.grant.has('pushEvents') || !this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) {
-      console.error(`[zulip-mcp] pushEvents not granted; dropping addressed message ${message.messageId} on closed ${message.channelId}`);
+      console.error(`[zulip-mcp] pushEvents not granted; dropping addressed message ${this.messageIds.format(message.messageId)} on closed ${message.channelId}`);
       return false;
     }
     const meta = (typeof message.metadata === 'object' && message.metadata !== null ? message.metadata : {}) as Record<string, unknown>;
@@ -1176,7 +1190,7 @@ export class ZulipMcplServer {
       // Local policy exits above are not offers. Once attempted, a refusal
       // or ambiguous transport failure must still consume the replay.
       beforeOffer?.();
-      const result = (await conn.sendRequest(method.PUSH_EVENT, params)) as { accepted?: boolean; reason?: string } | undefined;
+      const result = (await conn.sendRequest(method.PUSH_EVENT, this.messageIds.project(params))) as { accepted?: boolean; reason?: string } | undefined;
       if (result && result.accepted === false) {
         console.error(`[zulip-mcp] push/event ${eventId} not accepted by host${result.reason ? `: ${result.reason}` : ''}`);
         return false;
@@ -1361,6 +1375,8 @@ export class ZulipMcplServer {
       maxChars: this.missedBlockMaxChars,
       moreBeyond: fetched.truncated || blocked !== undefined,
       newestScannedId: newestId,
+      messageIds: this.messageIds,
+      dmParticipants: this.dmParticipants(channelId),
     });
     const synthetic: IncomingChannelMessage = {
       channelId,
@@ -1536,7 +1552,7 @@ export class ZulipMcplServer {
     }
     try {
       const own = await this.serverTool(name, args);
-      const result = toToolCallResult(own !== undefined ? own : await this.tools.handleToolCall(name, args));
+      const result = toToolCallResult(own !== undefined ? this.messageIds.project(own) : await this.tools.handleToolCall(name, args));
       // §8: a tool of the rollback-capable feature set mints a checkpoint and
       // hands it back in `state`, which is the only way a host ever learns
       // one. A rollback to this checkpoint undoes every send made after it
@@ -1820,7 +1836,7 @@ export class ZulipMcplServer {
     if (this.filters.reactionSuppressed(ev.emoji, ev.emojiCode, ev.emojiType)) return;
     if (!this.mcplActive || !this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) return;
     const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
-    const target = ev.onOwnMessage ? 'your message' : `message ${ev.messageId}`;
+    const target = ev.onOwnMessage ? 'your message' : `message ${this.messageIds.format(ev.messageId)}`;
     const quoted = ev.messageSnippet ? ` — "${ev.messageSnippet}"` : '';
     const line = `[reaction] ${ev.reactorName} ${verb} :${ev.emoji}: on ${target}${quoted}`;
     const message: IncomingChannelMessage = {
@@ -1889,7 +1905,9 @@ export class ZulipMcplServer {
     }
 
     const head = messageLineHead({
-      id: ev.messageId,
+      id: this.messageIds.format(ev.messageId),
+      dmChannelId: ev.isDM ? ev.channelId : undefined,
+      dmParticipants: this.dmParticipants(ev.channelId) ?? [ev.authorName ?? "unknown author"],
       time: Number.isNaN(ev.timestamp.getTime()) ? '' : this.formatTime(ev.timestamp),
       stream: ev.isDM ? null : (ev.channelId.startsWith('zulip:') ? ev.channelId.slice('zulip:'.length) : ev.channelId),
       topic: ev.topic,
@@ -1981,6 +1999,11 @@ export class ZulipMcplServer {
 
   // ── Server → host ──
 
+  private internalMessageId(id: string): string {
+    return this.messageIds.mode !== 'legacy' && id.startsWith(`${this.messageIds.tag}:`)
+      ? String(this.messageIds.parse(id)) : id;
+  }
+
   private async registerChannelsWithHost(channels: ChannelDescriptor[]): Promise<ChannelsRegisterResult | undefined> {
     const conn = this.conn;
     if (!conn) throw new Error('not connected');
@@ -1996,7 +2019,12 @@ export class ZulipMcplServer {
   private async sendIncomingToHost(messages: IncomingChannelMessage[]): Promise<ChannelsIncomingResult | undefined> {
     const conn = this.conn;
     if (!conn) throw new Error('not connected');
-    return (await conn.sendRequest(method.CHANNELS_INCOMING, { messages })) as ChannelsIncomingResult | undefined;
+    const result = (await conn.sendRequest(method.CHANNELS_INCOMING, this.messageIds.project({ messages }))) as ChannelsIncomingResult | undefined;
+    // Host acceptance refers to the wire IDs, but batching/delivery accounting uses numeric IDs.
+    if (this.messageIds.mode !== 'legacy' && result?.results) {
+      return { ...result, results: result.results.map(r => ({ ...r, messageId: this.internalMessageId(r.messageId) })) };
+    }
+    return result;
   }
 }
 

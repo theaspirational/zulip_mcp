@@ -11,6 +11,65 @@ the same substrate as [discord-mcpl](https://github.com/anima-research/discord-m
 and [slack-mcpl](https://github.com/anima-research/slack-mcpl). Zulip only — the
 Discord and Slack adapters that once lived here moved to those servers.
 
+## Realm-qualified message IDs
+
+`ZULIP_ID_MODE` is `legacy` (default), `compat`, or `strict`; invalid values fail
+startup. Legacy preserves the existing numeric-ID schemas, outputs and input
+behavior, **except for the DM header change below**. Opt in on each server:
+
+```dotenv
+ZULIP_ID_MODE=compat
+ZULIP_REALM_TAG=chat-one
+```
+
+`ZULIP_REALM_TAG` must match `[a-z0-9][a-z0-9_-]{0,63}`; an invalid explicit tag
+fails startup in every mode, before API calls or startup subscriptions. If unset,
+it is derived deterministically from the realm hostname's first label: lowercase,
+replace characters outside `[a-z0-9_-]` with `-`, remove leading non-alphanumerics,
+truncate to 64 characters (fallback `realm`). For example,
+`chat-one.example.org` becomes `chat-one`. There is no hash suffix.
+**Operators must assign distinct tags to servers with the same first label:
+duplicate tags defeat the cross-realm protection.** This is an accidental-routing
+safeguard, not authentication.
+
+- **compat:** agent-visible message IDs are `chat-one:123`, including history,
+  receipts, live/change/reaction headers and structured message-ID fields. Own-tag
+  IDs and bare numbers are accepted; any bare ID produces an agent-visible warning
+  in the result (or error) and one stderr warning per call, even with several tokens.
+- **strict:** the same output, but bare IDs are refused. Use quoted strings in tool
+  calls, e.g. `fetch_around({message_id: "chat-one:123"})`.
+- Both opt-in modes reject a foreign tag with
+  `message_id tag "X" differs from this server's "Y"; use the matching server`.
+
+The nine tool fields are `send_message.reply_to`; `message_id` on `edit_message`,
+`move_messages`, `delete_message`, `add_reaction`, `remove_reaction`, `fetch_around`;
+and `fetch_history.before` / `.after`. Unescaped `[[msg:chat-one:123]]` tokens
+on send/edit follow the same rules (including bare-token warnings/refusals).
+All fields and tokens are checked before **any** lookup, upload, callback or write.
+Escaped tokens remain literal and do not look up or validate a target. The historical
+`reply_to` absent sentinels (null, empty string, numeric 0) remain absent.
+
+**channelIds never change:** `zulip:general`, `zulip:dm:9`, `zulip:dm:9+10` remain
+exactly as before; no host change is needed. User/stream IDs, Zulip API arguments,
+internal cursors, and persisted formats stay numeric. Message permalinks use Zulip's
+numeric URL IDs. User-authored bodies are not rewritten on delivery; synthetic
+system/event identifiers are not Zulip message IDs. Active-topic hints currently
+contain names/times, not message IDs. Monitoring resources and raw message outputs
+also qualify their message-ID fields in opt-in modes.
+
+### DM headers (including legacy mode)
+
+The human-readable message header now names the conversation channelId and the
+other participants by full name, excluding the bot, in numeric user-ID order:
+`[DM zulip:dm:9 · Ada Lovelace]` or
+`[group DM zulip:dm:9+10 · Ada Lovelace, Grace Hopper]`.
+This changes DM header text in live `channels/incoming`, closed-channel `push/event`,
+recovered replays, `fetch_history` / `fetch_around`, injected recent-history context,
+`<missed>` catch-up transcripts, and DM edit/move/delete event lines. The exact
+header mirror `attributionHeader` changes with it. Stream lines and all machine IDs,
+channel descriptors, routing and state formats are unchanged in legacy mode.
+`ZULIP_ATTRIBUTE_DELIVERY=false` still omits live/replay attribution headers.
+
 ## What you get
 
 **Plain MCP (Claude Code, Cursor, any MCP client)**

@@ -3,6 +3,8 @@
  * (attachments), bot identity for the self-filter, and startup subscriptions.
  */
 
+import { MessageIds } from './message-ids.js';
+
 import { readFileSync } from 'node:fs';
 import zulipInit from 'zulip-js';
 
@@ -51,6 +53,10 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
       "Either ZULIP_API_KEY or ZULIP_PASSWORD must be set (or provide ZULIP_RC_PATH)"
     );
   }
+
+  const configuredRealm = config.realm || (config.zuliprc
+    ? readFileSync(config.zuliprc, 'utf8').match(/^\s*site\s*=\s*(.+?)\s*$/m)?.[1] : '');
+  MessageIds.fromEnv(configuredRealm, env); // bad mode/tag fails before profile/settings/subscriptions
 
   // zulip-js's own typings cover a fraction of the surface this server uses.
   const client: any = await zulipInit(config);

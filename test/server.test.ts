@@ -32,6 +32,7 @@ import { ZulipMcplServer, type ZulipMcplServerOptions } from '../src/server.ts';
 import { ZulipAdapter } from '../src/platforms/zulip.ts';
 import type { ZulipRawMessage } from '../src/history.ts';
 import { FiltersPlane } from '../src/filters.ts';
+import { MessageIds } from '../src/message-ids.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { toolDefinitions } from '../src/tools.ts';
 import { TOOL_CLASSES } from '../src/tool-classes.ts';
@@ -178,6 +179,7 @@ interface Harness {
 }
 
 interface HarnessOptions {
+  messageIds?: MessageIds;
   tools?: ZulipToolRuntime;
   mcpl?: boolean;
   typing?: boolean;
@@ -202,6 +204,7 @@ function harness(opts: HarnessOptions = {}): Harness {
   const adapter = opts.reuse?.adapter ?? fakeAdapter(opts.typing ?? true);
   if (opts.history) adapter.history = opts.history;
   const server = opts.reuse?.server ?? new ZulipMcplServer(adapter, opts.tools ?? fakeTools as unknown as ZulipToolRuntime, {
+    messageIds: opts.messageIds,
     serverInfo: { name: 'zulip-mcp-test', version: '0.0.0' },
     mcplEnabled: opts.mcpl ?? true,
     batchWindowMs: opts.batchWindowMs ?? 5,
@@ -1043,16 +1046,16 @@ test('a DM from a new conversation registers its channel, is pushed with a reply
   assert.equal((push.origin as { stream?: string }).stream, undefined);
   // The stamp rides in origin: agent-framework stores origin as the message metadata on this path.
   assert.equal((push.origin as { attributed?: boolean }).attributed, true);
-  assert.equal((push.origin as { attributionHeader?: string }).attributionHeader, '[T id=500] [DM] Bo: ');
+  assert.equal((push.origin as { attributionHeader?: string }).attributionHeader, '[T id=500] [DM zulip:dm:42 · Bo] Bo: ');
   const first = (push.payload.content[0] as { text: string }).text;
   assert.match(first, /^<system>Direct message from Bo \(user id 42\)\. To reply, use send_dm\(\["42"\]\) or publish to channel zulip:dm:42/);
-  assert.equal((push.payload.content[1] as { text: string }).text, '[T id=500] [DM] Bo: hey, got a minute?');
+  assert.equal((push.payload.content[1] as { text: string }).text, '[T id=500] [DM zulip:dm:42 · Bo] Bo: hey, got a minute?');
 
   // The second message from the same conversation carries no affordance.
   await until(() => h.server.delivery.watermark('zulip:dm:42') === 500, 'watermark');
   h.adapter.emit!({ ...dm, messageId: '501', content: [{ type: 'text', text: 'still there?' }] });
   await until(() => h.pushed.length === 2, 'second push');
-  assert.equal((h.pushed[1].payload.content[0] as { text: string }).text, '[T id=501] [DM] Bo: still there?');
+  assert.equal((h.pushed[1].payload.content[0] as { text: string }).text, '[T id=501] [DM zulip:dm:42 · Bo] Bo: still there?');
 
   // Opening the DM channel routes the conversation through channels/incoming,
   // and a publish reaches the adapter with the DM channel id.
@@ -3615,3 +3618,41 @@ test('active topic metadata and text survive channels/incoming and push/event wi
     assert.deepEqual(h.pushed[0].payload.content[1], hint);
   } finally { await h.close(); }
 });
+
+
+for (const mode of ['compat', 'strict'] as const) {
+  test(`${mode}: wire IDs are tagged while acceptance, routing and persisted watermarks stay numeric`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'zulip-tag-wire-'));
+    const h = harness({ messageIds: new MessageIds('alpha', mode), stateDir: dir });
+    t.after(async () => { await h.close(); rmSync(dir, { recursive: true, force: true }); });
+    await initialize(h, true);
+    await settled(h);
+    h.adapter.emit!(streamMsg(7, { mentioned: true }));
+    await until(() => h.pushed.length === 1, 'tagged push');
+    assert.equal((h.pushed[0].origin as any).messageId, 'alpha:7');
+    assert.match((h.pushed[0].payload.content[0] as any).text, /id=alpha:7/);
+    assert.equal((h.pushed[0].origin as any).mcplChannelId, 'zulip:general');
+    await until(() => h.server.delivery.watermark('zulip:general') === 7, 'numeric push acceptance');
+    await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:general' });
+    h.adapter.emit!(streamMsg(8));
+    await until(() => h.incoming.some(m => m.messageId === 'alpha:8'), 'tagged incoming');
+    await until(() => h.server.delivery.watermark('zulip:general') === 8, 'numeric batch acceptance');
+    const published = await h.host.sendRequest(method.CHANNELS_PUBLISH, {
+      channelId: 'zulip:general', content: [{ type: 'text', text: 'hi' }],
+    }) as any;
+    assert.match(published.messageId, /^alpha:/);
+    const listed = await h.host.sendRequest(method.CHANNELS_LIST) as any;
+    assert.equal(listed.channels[0].id, 'zulip:general');
+    h.adapter.change!({
+      kind: 'edit', channelId: 'zulip:general', messageId: '8', messageIds: ['8'], authorId: '9', authorName: 'Ann',
+      authorEmail: 'ann@example.com', actorId: '9', topic: 'deploys', previousTopic: null, movedToChannelId: null,
+      content: 'edited text', previousContent: 'msg 8', mentioned: false, previouslyMentioned: false, vanished: false,
+      isDM: false, onOwnMessage: false, timestamp: new Date(),
+    });
+    await until(() => h.incoming.some(m => (m.metadata as any)?.targetMessageId === 'alpha:8'), 'tagged change target');
+    const changed = h.incoming.find(m => (m.metadata as any)?.targetMessageId === 'alpha:8')!;
+    assert.match((changed.content[0] as any).text, /\[edited\].*id=alpha:8/);
+    h.server.delivery.save();
+    assert.ok(!readFileSync(join(dir, 'test.delivery.json'), 'utf8').includes('alpha:'), 'disk format remains numeric');
+  });
+}

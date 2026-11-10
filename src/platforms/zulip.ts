@@ -14,6 +14,8 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
+import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
+
 import type {
   ChannelDescriptor,
   ContentBlock,
@@ -184,6 +186,7 @@ const ALLOW_ALL: FilterView = { streamAllowed: () => true, dmAllowed: () => true
 export interface ZulipAdapterOptions {
   /** Active topics per incoming stream event; 0 disables (default 6, max 50). */
   activeTopics?: number;
+  messageIds?: MessageIds;
   /** Refresh and text-repeat window in milliseconds (default 60000). */
   activeTopicsTtlMs?: number;
   /** Backscroll cap advertised per channel and enforced on channels/open. */
@@ -213,6 +216,7 @@ export class ZulipAdapter implements PlatformAdapter {
   onSelfChanged?: OnMessageChange;
 
   private eventLoop: ZulipEventLoop | null = null;
+  private readonly messageIds: MessageIds;
   private readonly activeTopics: ActiveTopicsCache;
   private readonly identity: ZulipIdentity;
   private readonly backscrollDefault: number;
@@ -268,6 +272,7 @@ export class ZulipAdapter implements PlatformAdapter {
     this.identity = { selfUserId, sessionId };
     this.backscrollDefault = options.backscrollDefault ?? DEFAULT_BACKSCROLL;
     this.backscrollLimits = options.backscrollLimits ?? new Map();
+    this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.activeTopics = new ActiveTopicsCache(zulipClient, options.activeTopics, Date.now, options.activeTopicsTtlMs);
     this.filters = options.filters ?? ALLOW_ALL;
     this.dmDiscoveryLimit = options.dmDiscoveryLimit ?? DEFAULT_DM_DISCOVERY_LIMIT;
@@ -435,13 +440,13 @@ export class ZulipAdapter implements PlatformAdapter {
       const result = await withTimeout<any>(
         this.zulipClient.messages.getById({ message_id: messageId, apply_markdown: false }),
         timeoutMs,
-        `GET message ${messageId}`,
+        `GET message ${this.messageIds.format(messageId)}`,
       );
       // This endpoint uses BAD_REQUEST for both missing and inaccessible ids.
       // Older (pre-5.0) servers omit code; only then use the legacy text.
       if (quoteLookup && result?.result === 'error' &&
           (result.code === 'BAD_REQUEST' || (result.code === undefined && result.msg === 'Invalid message(s)'))) return null;
-      assertApiSuccess(result, `message ${messageId}`);
+      assertApiSuccess(result, `message ${this.messageIds.format(messageId)}`);
       const raw = result?.message as ZulipRawMessage | undefined;
       if (!raw) throw new Error('response contained no message');
       if (raw.id !== messageId) throw new Error('response contained a different message id');
@@ -452,7 +457,7 @@ export class ZulipAdapter implements PlatformAdapter {
       this.movedAway.delete(messageId);
       return this.seen.get(messageId) ?? null;
     } catch (err) {
-      console.error(`[zulip-mcp] could not resolve message ${messageId} for ${purpose}:`, (err as Error).message);
+      console.error(`[zulip-mcp] could not resolve message ${this.messageIds.format(messageId)} for ${purpose}:`, (err as Error).message);
       if (quoteLookup) throw err;
       return null;
     }
@@ -623,7 +628,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // A cross-stream move of an uncached message whose origin cannot be
       // named has nowhere honest to go: the GET only knows the destination.
       if (crossStream && !cached && fromStream === null) {
-        console.error(`[zulip-mcp] dropping a move of message ${change.messageId}: origin stream ${change.streamId} unknown`);
+        console.error(`[zulip-mcp] dropping a move of message ${this.messageIds.format(change.messageId)}: origin stream ${change.streamId} unknown`);
         return;
       }
       const fromChannelId = fromStream !== null ? zulipChannelId(fromStream) : where.channelId;
@@ -856,7 +861,7 @@ export class ZulipAdapter implements PlatformAdapter {
   async acknowledge(_channelId: string, messageId: string, value?: string): Promise<string> {
     const name = (value ?? '').trim().replace(/^:|:$/g, '') || 'eyes';
     const result = await this.zulipClient.reactions.add({ message_id: Number(messageId), emoji_name: name, reaction_type: 'unicode_emoji' });
-    assertApiSuccess(result, `acknowledging message ${messageId}`);
+    assertApiSuccess(result, `acknowledging message ${this.messageIds.format(messageId)}`);
     return `:${name}:`;
   }
 
@@ -865,7 +870,7 @@ export class ZulipAdapter implements PlatformAdapter {
     this.noteSelfDeleted(id);
     try {
       const result = await this.zulipClient.messages.deleteById({ message_id: id });
-      assertApiSuccess(result, `deleting message ${messageId}`);
+      assertApiSuccess(result, `deleting message ${this.messageIds.format(messageId)}`);
     } catch (err) {
       this.selfDeleted.delete(id);
       throw err;
@@ -1001,7 +1006,9 @@ export class ZulipAdapter implements PlatformAdapter {
     // The shared line shape, so injected history reads like live delivery
     // and every line carries an id the agent can fetch_around.
     const formatted = messages.map((m) => messageLineHead({
-      id: m.id,
+      id: this.messageIds.format(m.id),
+      dmChannelId: dmIds ? channelId : undefined,
+      dmParticipants: m.recipients.filter(r => r.id !== this.identity.selfUserId).sort((a, b) => a.id - b.id).map(r => r.full_name),
       time: Number.isNaN(m.timestamp.getTime()) ? '' : this.formatTime(m.timestamp),
       stream: dmIds ? null : (m.streamName ?? streamNameOf(channelId)),
       topic: m.topic,
@@ -1116,7 +1123,7 @@ export class ZulipAdapter implements PlatformAdapter {
     onReaction?: OnReaction,
     onMessageChange?: OnMessageChange,
   ): void {
-    const loop = this.eventLoop = new ZulipEventLoop();
+    const loop = this.eventLoop = new ZulipEventLoop({ messageIds: this.messageIds });
     // Changes are placed asynchronously (a cache miss costs one GET) but must
     // reach the server in queue order: an edit followed by a deletion of the
     // same message reads backwards otherwise. Reactions await the earlier

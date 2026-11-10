@@ -35,6 +35,7 @@
  *     error object) also backs off rather than hot-spinning the poll.
  */
 
+import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 import type { PlatformSystemEvent, OnSystemEvent } from './adapter.js';
 
 export interface ZulipEventMessage {
@@ -178,6 +179,7 @@ export interface ZulipEventClient {
 }
 
 export interface ZulipEventLoopOptions {
+  messageIds?: MessageIds;
   /** First retry delay after a poll failure. Default 2000ms. */
   baseBackoffMs?: number;
   /** Upper bound for the exponential backoff. Default 60000ms. */
@@ -222,7 +224,10 @@ export class ZulipEventLoop {
   private readonly degradedThreshold: number;
   private readonly sleepFn: (ms: number) => Promise<void>;
 
+  private readonly messageIds: MessageIds;
+
   constructor(options: ZulipEventLoopOptions = {}) {
+    this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.degradedThreshold = options.degradedThreshold ?? DEFAULT_DEGRADED_THRESHOLD;
@@ -323,7 +328,7 @@ export class ZulipEventLoop {
       const gap = this.pendingGap;
       this.pendingGap = null;
       const since = gap.lastMessageId != null
-        ? `after message id ${gap.lastMessageId}` +
+        ? `after message id ${this.messageIds.format(gap.lastMessageId)}` +
           (gap.lastMessageTimestamp != null
             ? ` (${new Date(gap.lastMessageTimestamp * 1000).toISOString()})`
             : '')

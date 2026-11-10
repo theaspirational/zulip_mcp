@@ -20,7 +20,8 @@ import {
 } from "./content.js";
 import type { SelfMove } from "./platforms/adapter.js";
 import type { ZulipSession } from "./zulip-client.js";
-import { resolveMessageLinks } from "./message-links.js";
+import { LEGACY_IDS, type MessageIds } from "./message-ids.js";
+import { resolveMessageLinks, validateMessageLinks } from "./message-links.js";
 import { normalizeMarkdownTables } from "./markdown-tables.js";
 import { assertApiSuccess, dmChannelIdFor, dmCounterparts, fetchAround, fetchHistory, parseDmChannelId, renderReactions, type ReactionSummary, type ZulipMessage, type ZulipRecipient, editedTrailer } from './history.js';
 import { chunkMessage } from "./content.js";
@@ -141,9 +142,10 @@ export function parseDate(dateStr: string | undefined, defaultDate: Date): Date 
 }
 
 // Helper function to format messages
-export function formatMessages(messages: any[], format: string): string {
+export function formatMessages(messages: any[], format: string, ids: MessageIds = LEGACY_IDS): string {
   if (format === 'raw') {
-    return JSON.stringify(messages, null, 2);
+    if (ids.mode === 'legacy') return JSON.stringify(messages, null, 2);
+    return JSON.stringify(ids.project(messages.map(m => ({ ...m, id: ids.format(m.id) }))), null, 2);
   }
 
   if (format === 'summary') {
@@ -195,11 +197,14 @@ export function formatHistoryLines(
   policy: ReactionPolicy = SHOW_ALL,
   selfUserId: number | null = null,
   formatTime: (d: Date) => string = utcLineTime,
+  ids: MessageIds = LEGACY_IDS,
 ): string {
   if (messages.length === 0) return "(no messages)";
   return messages.map((m) => {
     const head = messageLineHead({
-      id: m.id,
+      id: ids.format(m.id),
+      dmChannelId: m.isDm ? dmChannelIdFor(dmCounterparts(m.recipients, selfUserId).map(r => r.id)) : undefined,
+      dmParticipants: m.recipients.filter(r => r.id !== selfUserId).sort((a, b) => a.id - b.id).map(r => r.full_name),
       time: Number.isNaN(m.timestamp.getTime()) ? "" : formatTime(m.timestamp),
       stream: m.isDm ? null : (m.streamName ?? ""),
       topic: m.topic,
@@ -225,6 +230,7 @@ export function toToolCallResult(result: unknown): ToolCallResult {
 }
 
 export class ZulipToolRuntime {
+  readonly messageIds: MessageIds;
   private readonly zulipClient: any;
   private readonly sessionId: string;
   private readonly monitoredChannels = new Map<string, ChannelState>();
@@ -261,8 +267,9 @@ export class ZulipToolRuntime {
   constructor(
     private readonly session: ZulipSession,
     private readonly stateDir: string = STATE_DIR,
-    options: { uploader?: Uploader; uploadPolicy?: UploadPolicy; formatTime?: (d: Date) => string; moveReadTimeoutMs?: number } = {},
+    options: { uploader?: Uploader; uploadPolicy?: UploadPolicy; formatTime?: (d: Date) => string; moveReadTimeoutMs?: number; messageIds?: MessageIds } = {},
   ) {
+    this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.moveReadTimeoutMs = options.moveReadTimeoutMs ?? LOCATE_TIMEOUT_MS;
     this.zulipClient = session.client;
     this.sessionId = session.sessionId;
@@ -295,7 +302,7 @@ export class ZulipToolRuntime {
     const id = numberOrUndefined(args.reply_to);
     if (!Number.isSafeInteger(id)) throw new Error("reply_to must be an integer message id");
     if (args.to !== undefined) throw new Error("reply_to sets the destination; omit to/topic");
-    const unreadable = () => new Error(`Cannot resolve reply_to ${id}: message not found or not accessible`);
+    const unreadable = () => new Error(`Cannot resolve reply_to ${this.messageIds.format(id!)}: message not found or not accessible`);
     let result;
     try {
       result = await this.zulipClient.messages.getById({ message_id: id });
@@ -309,7 +316,7 @@ export class ZulipToolRuntime {
     if (!message || !["stream", "private"].includes(message.type)) throw unreadable();
     const type = args.type === "direct" ? "private" : args.type === "channel" ? "stream" : args.type;
     if (type !== undefined && type !== message.type) {
-      throw new Error(`reply_to ${id}: type disagrees with the referenced message`);
+      throw new Error(`reply_to ${this.messageIds.format(id!)}: type disagrees with the referenced message`);
     }
     if (message.type === "stream") {
       const name = message.display_recipient;
@@ -375,6 +382,31 @@ export class ZulipToolRuntime {
 
   /** Execute a tool. Returns the raw handler result; see toToolCallResult. */
   async handleToolCall(name: string, args: any): Promise<any> {
+    if (this.messageIds.mode === "legacy") return this.handleValidatedCall(name, args);
+    let warned = false;
+    const warning = `Warning: bare message_id accepted by ${this.messageIds.tag}; use ${this.messageIds.tag}:<n>.`;
+    const bare = () => { if (!warned) { warned = true; console.error(`[zulip-mcp] ${warning}`); } };
+    try {
+      args = { ...args };
+      const fields = name === "send_message" ? ["reply_to"] : name === "fetch_history" ? ["before", "after"]
+        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around"].includes(name) ? ["message_id"] : [];
+      for (const field of fields) {
+        // Only send_message has the historical strict-schema absent sentinels.
+        if (field === "reply_to" && [undefined, null, "", 0].includes(args[field])) continue;
+        if (["before", "after"].includes(field) && args[field] === undefined) continue;
+        args[field] = this.messageIds.parse(args[field], bare);
+      }
+      // Validate ALL tokens before resolving reply destinations, users, uploads or any other API call.
+      if (["send_message", "edit_message"].includes(name) && typeof args.content === "string") validateMessageLinks(args.content, this.messageIds, bare);
+      const result = this.messageIds.project(await this.handleValidatedCall(name, args), ["send_message", "send_dm"].includes(name));
+      return warned ? { ...result, warnings: [warning] } : result;
+    } catch (error) {
+      if (warned && error instanceof Error) error.message += `\n${warning}`;
+      throw error;
+    }
+  }
+
+  private async handleValidatedCall(name: string, args: any): Promise<any> {
     const zulipClient = this.zulipClient;
     const monitoredChannels = this.monitoredChannels;
     args = args ?? {};
@@ -595,7 +627,7 @@ export class ZulipToolRuntime {
 
         // Format output — suppressed reaction markers never reach the model, raw format included.
         const format = args.format || "detailed";
-        const formattedOutput = formatMessages(stripSuppressedReactions(filteredMessages, this.reactionPolicy), format);
+        const formattedOutput = formatMessages(stripSuppressedReactions(filteredMessages, this.reactionPolicy), format, this.messageIds);
 
         return {
           channel: args.channel,
@@ -683,7 +715,7 @@ export class ZulipToolRuntime {
 
         // Format output — suppressed reaction markers never reach the model, raw format included.
         const format = args.format || "detailed";
-        const formattedOutput = formatMessages(stripSuppressedReactions(allUnreadMessages, this.reactionPolicy), format);
+        const formattedOutput = formatMessages(stripSuppressedReactions(allUnreadMessages, this.reactionPolicy), format, this.messageIds);
 
         return {
           total_unread: allUnreadMessages.length,
@@ -706,7 +738,7 @@ export class ZulipToolRuntime {
         const hasText = typeof args.content === "string" && args.content.trim() !== "";
         const hasFiles = Array.isArray(args.attachments) && args.attachments.length > 0;
         if (!hasText && !hasFiles) throw new Error("content is required (or at least one attachment)");
-        const resolvedContent = hasText ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session)) : "";
+        const resolvedContent = hasText ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session, this.messageIds)) : "";
         const reply = args.reply_to !== undefined ? await this.replyDestination(args) : undefined;
         if (reply) args = { ...args, type: reply.type, to: reply.to, topic: reply.topic };
         const uploaded = await this.uploadFor(args);
@@ -781,7 +813,7 @@ export class ZulipToolRuntime {
         // Null is an unused strict-schema destination; an empty move topic remains meaningful.
         if (moving) args = { ...args, topic: args.topic ?? undefined, stream_id: args.stream_id ?? undefined };
         if (!Number.isInteger(args.message_id) || args.message_id <= 0) throw new Error("message_id is required");
-        const operation = `${moving ? "moving" : "editing"} message ${args.message_id}`;
+        const operation = `${moving ? "moving" : "editing"} message ${this.messageIds.format(args.message_id)}`;
         if (!moving) {
           if (typeof args.content !== "string") throw new Error("content must be a string");
           if (args.topic !== undefined || args.stream_id !== undefined) throw new Error("use move_messages for topic or stream moves");
@@ -827,7 +859,7 @@ export class ZulipToolRuntime {
         const editFields = new URLSearchParams();
         for (const field of moving ? ["topic", "propagate_mode", "stream_id"] : ["content"]) {
           if (args[field] !== undefined) editFields.set(field, field === "content"
-            ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session)) : String(args[field]));
+            ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session, this.messageIds)) : String(args[field]));
         }
         const response = await fetch(`${apiUrl}/messages/${encodeURIComponent(args.message_id)}`, {
           method: "PATCH",
@@ -852,7 +884,7 @@ export class ZulipToolRuntime {
           const structured = fields.flatMap((field) => {
             const value = result?.[field];
             if (field === "code" ? typeof value !== "string" : value !== null && (typeof value !== "number" || !Number.isFinite(value))) return [];
-            let safe = String(value).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+            let safe = String(field === "first_message_id_allowed_to_move" && typeof value === "number" ? this.messageIds.format(value) : value).replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
             for (const credential of credentials.filter(Boolean)) safe = safe.replaceAll(credential, "[redacted]");
             return [`${field}=${safe.slice(0, 160)}`];
           });
@@ -916,7 +948,7 @@ export class ZulipToolRuntime {
           const result = await zulipClient.messages.deleteById({
             message_id: args.message_id,
           });
-          assertApiSuccess(result, `deleting message ${args.message_id}`);
+          assertApiSuccess(result, `deleting message ${this.messageIds.format(args.message_id)}`);
           return result;
         } catch (err) {
           this.onDeleteFailed?.(String(args.message_id));
@@ -959,7 +991,7 @@ export class ZulipToolRuntime {
 
         const topics = result.topics || [];
         const formatted = topics
-          .map((t: any, idx: number) => `${idx + 1}. **${t.name}** (latest msg: ${t.max_id})`)
+          .map((t: any, idx: number) => `${idx + 1}. **${t.name}** (latest msg: ${this.messageIds.format(t.max_id)})`)
           .join("\n");
 
         return {
@@ -1084,7 +1116,7 @@ export class ZulipToolRuntime {
           newest_id: page.messages[page.messages.length - 1]?.id ?? null,
           reached_oldest: page.foundOldest,
           reached_newest: page.foundNewest,
-          formatted_history: formatHistoryLines(page.messages, undefined, this.reactionPolicy, this.session.selfUserId, this.formatTime),
+          formatted_history: formatHistoryLines(page.messages, undefined, this.reactionPolicy, this.session.selfUserId, this.formatTime, this.messageIds),
         };
       }
 
@@ -1092,7 +1124,7 @@ export class ZulipToolRuntime {
         const messageId = numberOrUndefined(args.message_id);
         if (messageId === undefined) throw new Error("message_id must be a number");
         const limit = clampInt(args.limit, 50, 1, 200);
-        const page = await fetchAround(zulipClient, messageId, limit);
+        const page = await fetchAround(zulipClient, messageId, limit, this.messageIds);
         for (const message of page.messages) this.onMessageObserved?.(message.id);
         const anchor = page.messages.find((m) => m.id === messageId);
         return {
@@ -1103,7 +1135,7 @@ export class ZulipToolRuntime {
           count: page.messages.length,
           oldest_id: page.messages[0]?.id ?? null,
           newest_id: page.messages[page.messages.length - 1]?.id ?? null,
-          formatted_history: formatHistoryLines(page.messages, messageId, this.reactionPolicy, this.session.selfUserId, this.formatTime),
+          formatted_history: formatHistoryLines(page.messages, messageId, this.reactionPolicy, this.session.selfUserId, this.formatTime, this.messageIds),
         };
       }
 
@@ -1266,7 +1298,7 @@ export class ZulipToolRuntime {
         })),
       };
 
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(status, null, 2) }] };
+      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(this.messageIds.project(status), null, 2) }] };
     }
 
     // Handle individual channel unread count

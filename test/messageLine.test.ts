@@ -41,13 +41,13 @@ function zmsg(over: Partial<ZulipMessage>): ZulipMessage {
 
 test('fetch_history lines use the same head as live delivery: agent time when given, UTC otherwise, no mention mark on DMs', () => {
   const lines = formatHistoryLines(
-    [zmsg({ id: 1, mentioned: true }), zmsg({ id: 2, isDm: true, streamName: null, topic: '', mentioned: true, authorName: 'Bo', cleanContent: 'yo' })],
+    [zmsg({ id: 1, mentioned: true }), zmsg({ id: 2, isDm: true, streamName: null, topic: '', mentioned: true, authorName: 'Bo', cleanContent: 'yo', recipients: [{ id: 42, full_name: 'Bo', email: 'bo@example.com' }] })],
     2,
     undefined,
     null,
     () => 'T',
   ).split(String.fromCharCode(10));
-  assert.deepEqual(lines, ['[T id=1] [#qa > router] Ann (mention): hi', '[T id=2] [DM] Bo: yo <<']);
+  assert.deepEqual(lines, ['[T id=1] [#qa > router] Ann (mention): hi', '[T id=2] [DM zulip:dm:42 · Bo] Bo: yo <<']);
   assert.equal(formatHistoryLines([zmsg({})]), '[2026-09-14T08:42:52Z id=1] [#qa > router] Ann: hi', 'direct callers without a formatter get UTC seconds');
   assert.equal(utcLineTime(new Date('nope')), '');
 });

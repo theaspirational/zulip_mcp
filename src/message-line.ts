@@ -5,12 +5,12 @@
  * and `fetch_history` / `fetch_around`:
  *
  *   [<time> id=N] [#stream > topic] Author (mention): text
- *   [<time> id=N] [DM] Author: text
+ *   [<time> id=N] [DM zulip:dm:9 · Participant] Author: text
  *
  * `<time>` is the agent-visible time (see `agentLineTimeFormatter`); an
  * empty time leaves `[id=N]`. `(mention)` marks a stream message that
  * mentions the bot; a direct message is addressed by definition and says
- * `[DM]` instead. Surfaces append their own trailers after the text
+ * `[DM channelId · participants]` instead. Surfaces append their own trailers after the text
  * (attachments, reactions, the fetch_around anchor mark).
  *
  * Header fields are folded onto one line (control characters, newlines
@@ -22,6 +22,8 @@
 
 export interface MessageLineHead {
   id: number | string;
+  dmChannelId?: string;
+  dmParticipants?: string[];
   /** Rendered time; '' omits it. */
   time: string;
   /** Stream name, or null for a direct message. */
@@ -55,7 +57,8 @@ export function headerField(value: string): string {
 
 /** `[<time> id=N] [#stream > topic] Author (mention): ` -- the text follows. */
 export function messageLineHead(h: MessageLineHead): string {
-  const where = h.stream === null ? '[DM]' : `[#${headerField(h.stream)} > ${headerField(h.topic)}]`;
+  const dm = h.dmChannelId ? `[${h.dmChannelId.slice('zulip:dm:'.length).includes('+') ? 'group DM' : 'DM'} ${headerField(h.dmChannelId)} · ${(h.dmParticipants ?? []).map(headerField).join(', ')}]` : '[DM]';
+  const where = h.stream === null ? dm : `[#${headerField(h.stream)} > ${headerField(h.topic)}]`;
   const mark = h.stream !== null && h.mentioned ? ' (mention)' : '';
   const time = headerField(h.time);
   return `[${time ? `${time} ` : ''}id=${h.id}] ${where} ${headerField(h.author)}${mark}: `;

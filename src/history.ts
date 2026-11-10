@@ -10,6 +10,7 @@
  * watermark is just the highest id already forwarded.
  */
 
+import { LEGACY_IDS, type MessageIds } from './message-ids.js';
 import type { ChannelDescriptor, IncomingChannelMessage, TextContent } from '@animalabs/mcpl-core';
 import { CHAT_TAGS } from '@animalabs/mcpl-core';
 import { cleanMarkdown, extractZulipAttachments, type AttachmentRef } from './content.js';
@@ -301,12 +302,12 @@ export async function fetchHistory(zulipClient: any, q: HistoryQuery): Promise<H
  * looked up first to learn where it lives; a message that cannot be read
  * fails loudly rather than silently widening to everything.
  */
-export async function fetchAround(zulipClient: any, messageId: number, limit: number): Promise<HistoryPage> {
+export async function fetchAround(zulipClient: any, messageId: number, limit: number, ids: MessageIds = LEGACY_IDS): Promise<HistoryPage> {
   const half = Math.max(0, Math.floor(Math.min(ZULIP_MAX_PAGE, limit) / 2));
   const single = await zulipClient.messages.getById({ message_id: messageId, apply_markdown: false });
-  assertApiSuccess(single, `message ${messageId}`);
+  assertApiSuccess(single, `message ${ids.format(messageId)}`);
   const anchorMsg = single?.message ? normalizeMessage(single.message as ZulipRawMessage) : null;
-  if (!anchorMsg) throw new Error(`message ${messageId} is not readable by this bot`);
+  if (!anchorMsg) throw new Error(`message ${ids.format(messageId)} is not readable by this bot`);
   const narrow = anchorMsg.isDm
     ? narrowFor({ dmUserIds: anchorMsg.recipients.map((r) => r.id) })
     : narrowFor({ streamName: anchorMsg.streamName ?? undefined, topic: anchorMsg.topic || undefined });
@@ -318,7 +319,7 @@ export async function fetchAround(zulipClient: any, messageId: number, limit: nu
     apply_markdown: false,
     include_anchor: true,
   });
-  assertApiSuccess(result, `messages around ${messageId}`);
+  assertApiSuccess(result, `messages around ${ids.format(messageId)}`);
   const messages: ZulipMessage[] = ((result?.messages ?? []) as ZulipRawMessage[])
     .map(normalizeMessage)
     .sort((a, b) => a.id - b.id);
