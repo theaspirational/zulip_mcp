@@ -12,8 +12,16 @@ export interface SubscriptionEvent {
   user_ids?: number[];
 }
 
+export type StreamsMode = 'list' | 'subscribed' | 'public';
+
+export function parseStreamsMode(mode: string | undefined): StreamsMode {
+  if (mode === undefined) return 'list';
+  if (mode === 'list' || mode === 'subscribed' || mode === 'public') return mode;
+  throw new Error('ZULIP_STREAMS_MODE must be list, subscribed, or public');
+}
+
 export class Subscriptions {
-  readonly mode: 'all' | 'subscribed';
+  readonly mode: StreamsMode;
   private known = false;
   private streams = new Map<number, string>();
   private revision = 0;
@@ -25,12 +33,11 @@ export class Subscriptions {
   private listeners: (() => void)[] = [];
 
   constructor(mode: string | undefined, private readonly options: { retryMs?: number; timeoutMs?: number } = {}) {
-    if (mode && mode !== 'all' && mode !== 'subscribed') throw new Error('ZULIP_STREAMS_MODE must be all or subscribed');
-    this.mode = mode === 'subscribed' ? 'subscribed' : 'all';
+    this.mode = parseStreamsMode(mode);
   }
 
   allows(id: number | undefined): boolean {
-    return this.mode === 'all' || (this.known && id !== undefined && this.streams.has(id));
+    return this.mode !== 'subscribed' || (this.known && id !== undefined && this.streams.has(id));
   }
 
   resolveName(name: string): number | undefined {

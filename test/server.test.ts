@@ -3771,3 +3771,45 @@ test('subscription changes announce a newly deliverable private channel before a
     assert.equal(h.incoming.length, 0); assert.equal(h.pushed.length, 0);
   } finally { await h.close(); plane.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+for (const mode of ['list', 'public'] as const) {
+  test(`filters_get ${mode}: explicit mode reporting and legacy bytes`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zulip-mode-wire-'));
+    const plane = new FiltersPlane(join(dir, 'filters.json'), { ZULIP_STREAMS_MODE: mode, ZULIP_STREAMS: 'general' });
+    plane.start();
+    const h = harness({ filters: plane });
+    try {
+      await initialize(h, true);
+      await settled(h);
+      const response = await h.host.sendRequest('tools/call', { name: 'filters_get', arguments: {} }) as any;
+      const legacy = {
+        streams: ['general'], dmUsers: null, mutedStreams: [], reactionChannels: [],
+        plane: plane.planeStatus(), reactionSuppression: plane.suppressionStatus(),
+        note: 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ' +
+          'suppressedReactionEmojis is operator-owned and reported as a count/digest, never the entries.',
+      };
+      if (mode === 'list') assert.equal(response.content[0].text, JSON.stringify(legacy, null, 2));
+      else {
+        const got = JSON.parse(response.content[0].text);
+        assert.equal(got.streamsMode, 'public');
+        assert.equal(got.streams, null, 'ignored configured list is not reported as effective');
+        assert.match(got.note, /ignores the stream list/);
+        assert.equal(Object.hasOwn(got, 'subscriptions'), false);
+      }
+      await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:general', type: 'zulip', address: {} });
+      plane.update(f => ({ ...f, mutedStreams: ['general'] }));
+      h.adapter.emit!(streamMsg(910, { mentioned: true }));
+      h.adapter.emit!(streamMsg(911));
+      await new Promise(r => setTimeout(r, 25));
+      assert.equal(h.incoming.length, 0, 'mutes win, even for mentions');
+      assert.equal(h.pushed.length, 0);
+      plane.update(f => ({ ...f, streams: ['other'], mutedStreams: [] }));
+      h.adapter.emit!(streamMsg(912));
+      if (mode === 'public') await until(() => h.incoming.length === 1, 'public mode ignores stream list');
+      else {
+        await new Promise(r => setTimeout(r, 25));
+        assert.equal(h.incoming.length, 0, 'list mode restricts delivery');
+      }
+    } finally { await h.close(); plane.stop(); rmSync(dir, { recursive: true, force: true }); }
+  });
+}

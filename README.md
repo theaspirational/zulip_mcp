@@ -222,7 +222,7 @@ are likely to touch:
 | `ZULIP_STATE_DIR` | `~/.zulip_mcp_state` | Where those files live |
 | `ZULIP_SUBSCRIBE` | — | Streams to subscribe the bot to on startup |
 | `ZULIP_FILTERS_FILE` | `<state dir>/<session>.filters.json` | The filters plane file (hot-reloaded) |
-| `ZULIP_STREAMS_MODE` | `all` | `subscribed` restricts stream delivery and reads to current bot subscriptions |
+| `ZULIP_STREAMS_MODE` | `list` | `list`, `subscribed`, or `public`; see [stream scope modes](#stream-scope-modes) |
 | `ZULIP_STREAMS`, `ZULIP_DM_USERS`, `ZULIP_MUTED_STREAMS` | — | Seed for the filters file on first materialization |
 | `ZULIP_SUPPRESSED_REACTIONS_BASELINE` | `DISCORD_SUPPRESSED_REACTIONS_BASELINE` | Host-owned reaction markers withheld from the model; re-read every start, never persisted (connectome-host injects the `DISCORD_` name into every MCPL child) |
 | `ZULIP_CATCHUP_LIMIT` | 3000 | Per-channel ceiling for catch-up and gap recovery (max 10000). For an always-open desk channel a few hundred is plenty |
@@ -531,10 +531,34 @@ usable, lets the host's own `channels/open` be served, and leaves the
 re-announcement to the next refresh; descriptors are recorded before the
 announcement goes out so that open succeeds when it lands.
 
-## Subscribed streams only
+## Stream scope modes
+
+`ZULIP_STREAMS_MODE` explicitly selects stream scope; invalid values fail startup
+with the allowed values. When unset it defaults to `list`, preserving existing
+deployments exactly:
+
+- `list`: register the queue with `all_public_streams=true`; delivery is limited
+  to the configured `ZULIP_STREAMS` / filters-file `streams` list. An empty or
+  unset list retains its existing meaning: every stream the bot can see.
+- `subscribed`: only current bot subscriptions, optionally narrowed by the list;
+  details below. The queue omits `all_public_streams`.
+- `public`: request all public streams in the realm plus subscribed private
+  streams, with `all_public_streams=true` and no stream-list restriction.
+  Both `ZULIP_STREAMS` and filters-file `streams` are **ignored**, including
+  hot-reloaded or tool-written changes. `filters_get` reports `streams: null`.
+  **Zulip's live message delivery in public streams without a subscription still
+  needs verification on a live server.** An existing code comment suggests a
+  subscription may still be required even with `all_public_streams`; this mode
+  does not establish that unsubscribed public-stream delivery works.
+
+Mutes win in every mode; DM rules are unchanged. `filters_get` reports
+`streamsMode` only for `subscribed` and `public`, keeping list-mode output
+unchanged. The mode itself requires a restart; filter lists remain hot-reloaded.
+
+### Subscribed streams only
 
 Set `ZULIP_STREAMS_MODE=subscribed` to deliver only streams the **bot itself
-is currently subscribed to**, public or private. The default (`all`, or unset)
+is currently subscribed to**, public or private. The default (`list`, or unset)
 retains the existing behavior, including `all_public_streams=true`. Subscribed
 mode omits `all_public_streams` when registering the queue, so Zulip does not
 send unrelated public-stream events. The immutable-ID `StreamReadGate` remains

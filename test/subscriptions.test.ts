@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -219,7 +220,7 @@ test('default mode still delivers unsubscribed public streams and makes no subsc
     assert.equal(f.subscriptionReads, 0); assert.equal(f.incoming.length, 1);
     assert.equal(f.registrations[0].all_public_streams, 'true');
     assert.equal(f.plane.streamAllowed('public'), true);
-    assert.equal(f.plane.subscriptions.mode, 'all');
+    assert.equal(f.plane.subscriptions.mode, 'list');
   } finally { f.close(); }
   assert.throws(() => new Subscriptions('typo'), /ZULIP_STREAMS_MODE/);
 });
@@ -339,4 +340,52 @@ test('revocation after quote classification but before live emission treats the 
     await f.batch([{ id: 3, type: 'message', message: { ...raw(90), content: quote(88) } }]);
     assert.equal(f.incoming[0].metadata.replyToSelf, false);
   } finally { f.close(); }
+});
+
+for (const mode of [undefined, 'list', 'public'] as const) {
+  test(`${mode ?? 'unset'} mode: queue, adapter list scope, hot reload and DMs`, async () => {
+    const f = await eventFixture({
+      ...(mode === undefined ? {} : { ZULIP_STREAMS_MODE: mode }),
+      ZULIP_STREAMS: 'general', ZULIP_MUTED_STREAMS: 'general', ZULIP_DM_USERS: '42',
+    });
+    try {
+      assert.equal(f.registrations[0].all_public_streams, 'true');
+      assert.equal(f.subscriptionReads, 0);
+      const dm = (id: number, sender: number) => ({ ...raw(id), type: 'private', sender_id: sender,
+        display_recipient: [{ id: sender, full_name: 'Peer', email: 'peer@example.invalid' },
+          { id: SELF, full_name: 'Bot', email: 'bot@example.invalid' }] });
+      await f.batch([
+        ...[raw(1), raw(2, 'public', 14), raw(3, 'private', 13), dm(4, 42), dm(5, 43)]
+          .map(message => ({ id: message.id, type: 'message', message, flags: ['mentioned'] })),
+      ]);
+      // Non-subscribed modes enforce mutes at the server delivery boundary (tested on the wire).
+      assert.deepEqual(f.incoming.map(m => m.channelId), mode === 'public'
+        ? ['zulip:general', 'zulip:public', 'zulip:private', 'zulip:dm:42'] : ['zulip:general', 'zulip:dm:42']);
+      f.plane.update(filters => ({ ...filters, streams: ['private'], mutedStreams: ['public'] }));
+      const before = f.incoming.length;
+      await f.batch([raw(6), raw(7, 'public', 14), raw(8, 'private', 13)]
+        .map(message => ({ id: message.id, type: 'message', message })));
+      assert.deepEqual(f.incoming.slice(before).map(m => m.channelId), mode === 'public'
+        ? ['zulip:general', 'zulip:public', 'zulip:private'] : ['zulip:private']);
+      f.plane.update(filters => ({ ...filters, streams: [] }));
+      assert.equal(f.plane.streamAllowed('general'), true, 'empty list retains legacy unrestricted meaning');
+    } finally { f.close(); }
+  });
+}
+
+test('invalid stream modes fail construction naming all allowed values', () => {
+  for (const mode of ['', 'all', 'typo', 'PUBLIC', ' subscribed ']) {
+    assert.throws(() => new FiltersPlane('/unused/filters.json', { ZULIP_STREAMS_MODE: mode }),
+      /ZULIP_STREAMS_MODE must be list, subscribed, or public/);
+  }
+});
+
+
+test('invalid stream mode fails CLI startup before credentials or client initialization', () => {
+  const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+    env: { PATH: process.env.PATH, NO_UPDATE_NOTIFIER: '1', ZULIP_STREAMS_MODE: 'invalid' },
+    encoding: 'utf8', timeout: 10_000,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /ZULIP_STREAMS_MODE must be list, subscribed, or public/);
 });

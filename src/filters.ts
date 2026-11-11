@@ -394,7 +394,8 @@ export class FiltersPlane {
     const allow = this.effective.streams;
     if (this.subscriptions.mode === 'subscribed')
       return this.streamReadAllowed(streamId ?? this.subscriptions.resolveName(streamName));
-    return !allow || allow.includes(streamName);
+    // Public mode deliberately ignores both the env seed and hot-reloaded stream list.
+    return this.subscriptions.mode === 'public' || !allow || allow.includes(streamName);
   }
 
   streamMuted(streamName: string): boolean {

@@ -50,6 +50,7 @@ import { McplConnection } from '@animalabs/mcpl-core';
 import { isMainModule } from './content.js';
 import { fetchCapped, resolveInlineOptions } from './attachments.js';
 import { parseZulipAttachmentUrl } from './content.js';
+import { parseStreamsMode } from './subscriptions.js';
 import { FiltersPlane } from './filters.js';
 import { DEFAULT_ACTIVE_TOPICS, DEFAULT_ACTIVE_TOPICS_TTL_MS } from './active-topics.js';
 import { DEFAULT_BACKSCROLL, ZulipAdapter } from './platforms/zulip.js';
@@ -96,6 +97,8 @@ export function parseBackscrollLimits(raw: string | undefined): Map<string, numb
 }
 
 async function main(): Promise<void> {
+  // Validate before client initialization (and any network or credential access).
+  parseStreamsMode(process.env.ZULIP_STREAMS_MODE);
   const args = process.argv.slice(2);
   const tcpIdx = args.indexOf('--tcp');
   const tcpPort = tcpIdx >= 0 ? parseInt(args[tcpIdx + 1], 10) : undefined;

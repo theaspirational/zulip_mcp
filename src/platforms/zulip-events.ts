@@ -38,7 +38,7 @@
 
 import { unanchoredSystemEvent } from '../system-events.js';
 import { diagnosticError } from '../diagnostics.js';
-import type { SubscriptionEvent } from '../subscriptions.js';
+import type { SubscriptionEvent, StreamsMode } from '../subscriptions.js';
 import type { WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 import type { PlatformSystemEvent, OnSystemEvent } from './adapter.js';
@@ -193,7 +193,7 @@ export interface ZulipEventLoopOptions {
   /** Snapshot cutoff for the entire long-poll batch, including awaited handlers. */
   readEpoch?: () => number | undefined;
   messageIds?: MessageIds;
-  streamsMode?: 'all' | 'subscribed';
+  streamsMode?: StreamsMode;
   /** First retry delay after a poll failure. Default 2000ms. */
   baseBackoffMs?: number;
   /** Upper bound for the exponential backoff. Default 60000ms. */
@@ -239,12 +239,12 @@ export class ZulipEventLoop {
   private readonly sleepFn: (ms: number) => Promise<void>;
 
   private readonly messageIds: MessageIds;
-  private readonly streamsMode: 'all' | 'subscribed';
+  private readonly streamsMode: StreamsMode;
   private readonly readEpoch?: () => number | undefined;
 
   constructor(options: ZulipEventLoopOptions = {}) {
     this.messageIds = options.messageIds ?? LEGACY_IDS;
-    this.streamsMode = options.streamsMode ?? 'all';
+    this.streamsMode = options.streamsMode ?? 'list';
     this.readEpoch = options.readEpoch;
     this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;

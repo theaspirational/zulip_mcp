@@ -1787,7 +1787,8 @@ export class ZulipMcplServer {
             subscriptions,
             effectiveSubscribedStreams: subscriptions.streams.filter(s => plane.streamReadAllowed(s.id)),
           } : {}),
-          streams: f.streams ? this.visibleStreamNames(f.streams) : null,
+          ...(plane.subscriptions.mode === 'public' ? { streamsMode: 'public' } : {}),
+          streams: plane.subscriptions.mode === 'public' ? null : f.streams ? this.visibleStreamNames(f.streams) : null,
           dmUsers: f.dmUsers ?? null,
           mutedStreams: this.visibleStreamNames(f.mutedStreams ?? []),
           reactionChannels: this.visibleChannelIds(f.reactionChannels ?? []),
@@ -1795,7 +1796,9 @@ export class ZulipMcplServer {
           reactionSuppression: plane.suppressionStatus(),
           note: (this.streamGate
             ? 'null = no explicit allowlist; subscribed mode still requires current subscription. The host decides which registered channels to open. '
-            : 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ') +
+            : plane.subscriptions.mode === 'public'
+              ? 'public mode ignores the stream list; muted streams still apply. Live delivery without a subscription requires verification on a live Zulip server. '
+              : 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ') +
             'suppressedReactionEmojis is operator-owned and reported as a count/digest, never the entries.',
         };
       }
