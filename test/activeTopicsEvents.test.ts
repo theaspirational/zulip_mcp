@@ -81,14 +81,15 @@ test('r1: move, rename/resolve and delete events invalidate lists without a chan
     await send(7, 31); await send(8, 31);
     assert.ok(seen.at(-2).metadata.activeTopics);
     assert.equal(typeof change, 'function');
-    change(event);
+    const placedEvent = { messageId: 30, messageIds: [30], propagateMode: 'change_one', ...event };
+    change(placedEvent);
     await send(7, 32);
     assert.equal(seen.at(-1).metadata.activeTopics, undefined);
     if (event.newStreamId === 8) {
       await send(8, 32); assert.equal(seen.at(-1).metadata.activeTopics, undefined);
     }
     await turn();
-    change(event); // invalidate again while requests are pending
+    change(placedEvent); // invalidate again while requests are pending
     pending.splice(0).forEach(resolve => resolve({ result: 'success', topics: [{ name: 'old', max_id: 10 }] })); await turn();
     await send(7, 33); assert.equal(seen.at(-1).metadata.activeTopics, undefined, 'late snapshot must not resurrect invalidated names');
     await turn();

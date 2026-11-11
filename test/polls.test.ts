@@ -1,16 +1,16 @@
 /** Fixtures checked against offline Zulip 12.3 server sources; reconstructed from Zulip's poll widget format, NOT upstream
- * captures: widget_type/extra_data; vote {key,vote:1|-1}; new_option {option,idx}.
+ * captures: widget_type/extra_data; vote {key,vote:1|-1}; question {question}; new_option {option,idx}.
  * Keys are canned,N or sender_id,idx. No network is used. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyPollUpdate, boundedPollRead, parsePollSubmessage, PollCache, pollContent, reconstructPoll, POLL_LIMITS, pollDrops, type WidgetSubmessage } from '../src/polls.ts';
+import { applyPollUpdate, boundedPollRead, parsePollSubmessage, PollCache, pollContent, reconstructPoll, POLL_LIMITS, pollDrops, PlacementVersions, type WidgetSubmessage } from '../src/polls.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { ZulipAdapter, type FilterView } from '../src/platforms/zulip.ts';
 import { MessageIds } from '../src/message-ids.ts';
-import type { ZulipRawMessage } from '../src/history.ts';
+import { normalizeMessage, type ZulipRawMessage } from '../src/history.ts';
 import type { IncomingChannelMessage } from '@animalabs/mcpl-core';
 
 function sub(id: number, content: unknown, sender_id = 7, message_id = 77): WidgetSubmessage {
@@ -362,3 +362,199 @@ for (const cached of [false, true]) test(`an unresolved ${cached ? 'placement' :
   await cache.locate(client, 1);
   assert.equal(gets, 3);
  });
+
+
+const emptyInit = sub(1, { widget_type: 'poll', extra_data: { question: '', options: [] } }, 790);
+const question = (id: number, text: unknown) => sub(id, { type: 'question', question: text }, 790);
+
+test('empty initialization then bounded question updates reconstruct current results', async t => {
+  const before = pollDrops.text_truncated ?? 0;
+  const state = reconstructPoll([question(3, 'Q'.repeat(3000)), emptyInit])!;
+  assert.equal(state.question, 'Q'.repeat(POLL_LIMITS.text));
+  assert.equal(pollDrops.text_truncated, before + 1);
+  assert.equal(parsePollSubmessage(question(4, 123)), null);
+  assert.equal(parsePollSubmessage(sub(4, { type: 'delete_option', key: 'canned,0' })), null,
+    'not a Zulip 12.3 poll type; ignored rather than invented');
+  const { tools } = toolsFixture(t, raw({ submessages: [emptyInit, question(2, 'Current?'), added, vote(5, '42,0')] }));
+  const result = await tools.handleToolCall('get_poll_results', { message_id: 77 });
+  assert.equal(result.question, 'Current?');
+  assert.equal(result.options[0].count, 1);
+});
+
+test('live empty initialization then question updates change vote text and metadata', async () => {
+  const result = await eventFixture([
+    { id: 0, type: 'message', message: raw({ submessages: [emptyInit] }) },
+    envelope(question(2, 'Current?')), envelope(added), envelope(vote(5, '42,0')),
+    envelope(question(6, 'Revised?')), envelope(vote(7, '42,0', false)),
+  ]);
+  assert.equal(result.incoming.length, 2, 'question updates themselves do not notify');
+  assert.match((result.incoming[0].content[0] as any).text, /'Current\?'/);
+  assert.equal(result.incoming[1].metadata?.question, 'Revised?');
+});
+
+function placementFixture(getById: () => Promise<any>, filters?: FilterView) {
+  const adapter = new ZulipAdapter({ messages: { getById }, users: { async retrieve() { return directory; } } }, 790, 'race', { filters });
+  const internal = adapter as any;
+  internal.polls.remember(raw());
+  internal.remember('zulip:general', normalizeMessage(raw()));
+  const incoming: IncomingChannelMessage[] = [];
+  return { adapter, internal, incoming, vote: (id = 2) => internal.onPollSubmessage(vote(id), (m: IncomingChannelMessage) => incoming.push(m)) };
+}
+const moved = (messageId = 77, propagateMode: 'change_one' | 'change_all' | 'change_later' = 'change_one') => ({
+  messageId, source: { channelId: 'zulip:general', topic: 'Release' }, propagateMode,
+  newStreamId: 13, destinationChannelId: 'zulip:private', topic: 'Hidden',
+});
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('confirmed move tool overtakes a placement GET: no stale restore or addressed vote', async t => {
+  let release!: (value: unknown) => void;
+  const read = new Promise(resolve => { release = resolve; });
+  const checked: string[] = [];
+  const f = placementFixture(() => read, {
+    streamAllowed: name => { checked.push(name); return name === 'general'; },
+    streamMuted: name => name === 'private', dmAllowed: () => true,
+  });
+  f.internal.refreshPollPlacement(77, true);
+  await Promise.resolve();
+  const { tools } = toolsFixture(t);
+  let stored = raw();
+  (tools as any).session.authHeader = 'Basic dGVzdDp0ZXN0';
+  (tools as any).session.client.messages.getById = async () => ({ result: 'success', message: stored });
+  t.mock.method(globalThis, 'fetch', async () => {
+    stored = raw({ stream_id: 13, display_recipient: 'private', subject: 'Hidden' });
+    return new Response(JSON.stringify({ result: 'success' }));
+  });
+  tools.onMoved = move => f.adapter.noteSelfMoved(move);
+  await tools.handleToolCall('move_messages', { message_id: 77, stream_id: 13, topic: 'Hidden' });
+  const version = f.internal.seen.get(77).placementVersion;
+  const before = pollDrops.unknown_placement ?? 0;
+  await f.vote();
+  assert.equal(pollDrops.unknown_placement, before + 1, 'pending placement vote counted');
+  release({ result: 'success', message: raw() });
+  await settle();
+  assert.equal(f.internal.seen.get(77).channelId, 'zulip:private');
+  assert.equal(f.internal.seen.get(77).placementVersion, version, 'stale GET cannot write');
+  await f.vote(3);
+  assert.equal(checked.at(-1), 'private');
+  assert.deepEqual(f.incoming, []);
+});
+
+for (const mode of ['change_all', 'change_later'] as const) test(`tool ${mode} invalidates poll-only and pending envelopes`, async () => {
+  let release!: (value: unknown) => void;
+  const f = placementFixture(() => new Promise(resolve => { release = resolve; }));
+  f.internal.seen.delete(77);
+  f.internal.refreshPollPlacement(77, true);
+  await Promise.resolve();
+  f.adapter.noteSelfMoved(moved(70, mode));
+  release({ result: 'success', message: raw() });
+  await settle();
+  await f.vote();
+  assert.deepEqual(f.incoming, []);
+  assert.equal(f.internal.seen.has(77), false);
+});
+
+for (const reader of ['locate', 'fetchContext', 'fetchHistory'] as const) test(`ordinary ${reader} cannot restore a poll placement across a tool move`, async () => {
+  let release!: (value: unknown) => void;
+  const read = new Promise(resolve => { release = resolve; });
+  const f = placementFixture(() => read, { streamAllowed: name => name === 'general', dmAllowed: () => true });
+  f.internal.zulipClient.messages.retrieve = () => read;
+  if (reader === 'locate') f.internal.seen.delete(77);
+  const pending = reader === 'locate' ? f.internal.locate(77)
+    : reader === 'fetchContext' ? f.adapter.fetchContext('zulip:general', undefined, 10)
+    : f.adapter.fetchHistory('zulip:general', { limit: 10 });
+  f.adapter.noteSelfMoved(moved());
+  release({ result: 'success', message: raw(), messages: [raw()], found_newest: true, found_oldest: true });
+  await pending;
+  const at = f.internal.seen.get(77);
+  assert.ok(!at || at.channelId === 'zulip:private');
+  await f.vote();
+  assert.deepEqual(f.incoming, []);
+});
+
+test('placement CAS rejects stale cache restores, event writes and versions forgotten under churn', () => {
+  const cache = new PollCache(1);
+  const stamp = cache.placements.snapshot();
+  cache.remember(raw());
+  const observed = cache.entry(77).placementVersion!;
+  cache.invalidatePlacement(id => id === 77);
+  cache.remember(raw(), observed);
+  assert.equal(cache.entry(77).placementUnknown, true);
+  const versions = new PlacementVersions();
+  versions.write(77, versions.snapshot());
+  for (let id = 100; id < 4200; id++) versions.write(id, versions.snapshot());
+  assert.equal(versions.write(77, stamp), null, 'eviction cannot reset a placement version');
+  assert.equal(versions.current(77, observed), false);
+});
+
+test('evicted in-flight poll records cannot replace a newer record or restore seen', async () => {
+  let release!: (value: unknown) => void;
+  const cache = new PollCache(1);
+  const pending = cache.locate({ messages: { getById: () => new Promise(resolve => { release = resolve; }) } }, 77);
+  await Promise.resolve();
+  cache.entry(88);
+  cache.remember(raw({ subject: 'New' }));
+  release({ result: 'success', message: raw() });
+  await pending;
+  assert.equal(cache.entry(77).message?.subject, 'New');
+});
+
+
+test('an asynchronous server move handler cannot overwrite a newer confirmed tool move', async () => {
+  let release!: (value: unknown) => void;
+  const f = placementFixture(async () => ({ result: 'success', message: raw() }));
+  f.internal.streamNamesById.set(12, 'general');
+  f.internal.zulipClient.streams = { retrieve: () => new Promise(resolve => { release = resolve; }) };
+  const pending = f.internal.onZulipChange({
+    kind: 'edit', messageId: 77, messageIds: [77], actorId: 42, editedAt: 1700000010,
+    streamId: 12, newStreamId: 14, origTopic: 'Release', topic: 'Older',
+    propagateMode: 'change_one', content: null, origContent: null, flags: [],
+  }, () => {});
+  await Promise.resolve();
+  f.adapter.noteSelfMoved(moved());
+  const version = f.internal.seen.get(77).placementVersion;
+  release({ result: 'success', streams: [{ stream_id: 14, name: 'other' }] });
+  await pending;
+  assert.equal(f.internal.seen.get(77).channelId, 'zulip:private');
+  assert.equal(f.internal.seen.get(77).topic, 'Hidden');
+  assert.equal(f.internal.seen.get(77).placementVersion, version);
+});
+
+
+for (const mode of ['change_all', 'change_later'] as const) test(`propagated ${mode} fences ordinary GETs with no cached envelope`, async () => {
+  let release!: (value: unknown) => void;
+  const f = placementFixture(() => new Promise(resolve => { release = resolve; }));
+  f.internal.seen.clear();
+  f.internal.polls.records.clear();
+  const pending = f.internal.locate(77);
+  f.adapter.noteSelfMoved(moved(70, mode));
+  release({ result: 'success', message: raw() });
+  assert.equal(await pending, null);
+  assert.equal(f.internal.seen.has(77), false);
+});
+
+
+test('a queued cache restore cannot overwrite a synchronous tool move', async () => {
+  const f = placementFixture(async () => { throw new Error('cache hit must not GET'); });
+  f.internal.seen.clear();
+  f.internal.polls.remember(raw()); // A genuinely current, synchronous cache hit.
+  f.internal.refreshPollPlacement(77);
+  f.adapter.noteSelfMoved(moved());
+  await settle();
+  assert.equal(f.internal.seen.has(77), false, 'old cached general/Release envelope stays historical');
+  await f.vote();
+  assert.deepEqual(f.incoming, []);
+});
+
+
+test('self deletion fences an already pending poll placement read', async () => {
+  let release!: (value: unknown) => void;
+  const f = placementFixture(() => new Promise(resolve => { release = resolve; }));
+  f.internal.refreshPollPlacement(77, true);
+  await Promise.resolve();
+  f.adapter.noteSelfDeleted(77);
+  release({ result: 'success', message: raw() });
+  await settle();
+  await f.vote();
+  assert.deepEqual(f.incoming, []);
+  assert.equal(f.internal.placed(77, f.internal.seen.get(77)), false);
+});

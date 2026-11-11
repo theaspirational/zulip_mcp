@@ -14,6 +14,7 @@ export interface PollOption { key: string; text: string; voters: Set<number> }
 export interface PollState { question: string; options: Map<string, PollOption> }
 export type PollUpdate =
   | { type: 'init'; question: string; options: string[] }
+  | { type: 'question'; question: string }
   | { type: 'new_option'; key: string; text: string }
   | { type: 'vote'; key: string; voterId: number; action: 'vote' | 'unvote' };
 
@@ -40,6 +41,11 @@ export function parsePollSubmessage(s: WidgetSubmessage): PollUpdate | null {
     if (!options.every((x: unknown) => typeof x === 'string')) return null;
     return { type: 'init', question: textLimit(c.extra_data.question), options: options.map(textLimit) };
   }
+  // Zulip 12.3 validate_poll_data allows exactly question, new_option and vote.
+  // Unknown types (including other widgets) are intentionally ignored.
+  if (c.type === 'question' && typeof c.question === 'string') {
+    return { type: 'question', question: textLimit(c.question) };
+  }
   if (c.type === 'new_option' && typeof c.option === 'string' && Number.isSafeInteger(c.idx) && c.idx >= 0 && c.idx <= 1000) {
     return { type: 'new_option', key: `${s.sender_id},${c.idx}`, text: textLimit(c.option) };
   }
@@ -57,7 +63,9 @@ export function applyPollUpdate(state: PollState | null, update: PollUpdate | nu
       [`canned,${i}`, { key: `canned,${i}`, text: textLimit(text), voters: new Set<number>() }])) };
   }
   if (!state) return null;
-  if (update.type === 'new_option') {
+  if (update.type === 'question') {
+    state.question = textLimit(update.question);
+  } else if (update.type === 'new_option') {
     if (!state.options.has(update.key)) {
       if (state.options.size >= POLL_LIMITS.options) countPollDrop('option_limit');
       else state.options.set(update.key, { key: update.key, text: textLimit(update.text), voters: new Set() });
@@ -102,6 +110,40 @@ export async function boundedPollRead<T>(read: Promise<T>, ms = 3000): Promise<T
   } finally { clearTimeout(timer); }
 }
 
+/** Shared by ALL placement writers, including ordinary history/quote GETs.
+ * A stamp is taken BEFORE observing/awaiting data; writes are CAS operations.
+ * Eviction advances a conservative floor, so forgetting a version can never
+ * resurrect an old observation. Versions never reset when either cache evicts.
+ */
+export class PlacementVersions {
+  private sequence = 0;
+  private floor = 0;
+  private versions = new Map<number, number>();
+  snapshot(): number { return this.sequence; }
+  current(id: number, version: number | undefined): boolean {
+    return version !== undefined && this.versions.get(id) === version;
+  }
+  /** A propagated move may include an uncached, in-flight GET target whose
+   * source is not known yet. Fence all older observations conservatively. */
+  barrier(): void { this.floor = ++this.sequence; }
+  canWrite(id: number, observedAt: number): boolean {
+    return observedAt >= Math.max(this.versions.get(id) ?? 0, this.floor);
+  }
+  write(id: number, observedAt: number): number | null {
+    if (!this.canWrite(id, observedAt)) return null;
+    this.versions.delete(id);
+    const version = ++this.sequence;
+    this.versions.set(id, version);
+    if (this.versions.size > 4000) {
+      const oldest = this.versions.keys().next().value!;
+      this.floor = Math.max(this.floor, this.versions.get(oldest)!);
+      this.versions.delete(oldest);
+    }
+    return version;
+  }
+}
+
+/** placementVersion is the envelope observation, not a second generation. */
 export interface PollRecord { message?: ZulipRawMessage; state: PollState | null; placementUnknown?: boolean; placementVersion?: number }
 export class PollCache {
   private records = new Map<number, PollRecord>();
@@ -110,7 +152,8 @@ export class PollCache {
   private inFlight = 0;
   private tokens: number = POLL_LIMITS.lookups;
   private refilled: number;
-  constructor(private cap = POLL_LIMITS.polls as number, private now = Date.now) {
+  constructor(private cap = POLL_LIMITS.polls as number, private now = Date.now,
+    readonly placements = new PlacementVersions()) {
     this.cap = Math.max(1, Math.min(cap, POLL_LIMITS.polls));
     this.refilled = now();
   }
@@ -123,12 +166,14 @@ export class PollCache {
     }
     return entry;
   }
-  remember(message: ZulipRawMessage): void {
+  remember(message: ZulipRawMessage, observedAt = this.placements.snapshot()): void {
     // Ordinary messages must not evict useful polls.
     if (!message.submessages?.length) return;
     const entry = this.entry(message.id);
+    const version = this.placements.write(message.id, observedAt);
+    if (version === null) return;
     entry.placementUnknown = false;
-    entry.placementVersion = (entry.placementVersion ?? 0) + 1;
+    entry.placementVersion = version;
     entry.message = { ...message, submessages: undefined, content: message.content.slice(0, POLL_LIMITS.text) };
     entry.state = reconstructPoll(message.submessages) ?? entry.state;
   }
@@ -137,7 +182,7 @@ export class PollCache {
     const ids: number[] = [];
     for (const [id, entry] of this.records) if (matches(id, entry)) {
       entry.placementUnknown = true;
-      entry.placementVersion = (entry.placementVersion ?? 0) + 1;
+      this.placements.write(id, this.placements.snapshot());
       ids.push(id);
     }
     return ids;
@@ -145,8 +190,10 @@ export class PollCache {
   async locate(client: any, id: number, refreshPlacement = false): Promise<PollRecord> {
     const entry = this.entry(id);
     if (refreshPlacement) entry.placementUnknown = true;
-    if (entry.message && entry.state && !entry.placementUnknown) return entry;
-    const version = entry.placementVersion;
+    if (entry.message && entry.state && !entry.placementUnknown &&
+        this.placements.current(id, entry.placementVersion)) return entry;
+    entry.placementUnknown = true;
+    const observedAt = this.placements.snapshot();
     const now = this.now();
     for (const [key, expires] of this.attempts) if (expires <= now) this.attempts.delete(key);
     if (this.attempts.has(id)) { countPollDrop('negative_cached'); return entry; }
@@ -163,11 +210,13 @@ export class PollCache {
         .finally(() => { this.inFlight--; });
       const result = await boundedPollRead<any>(read);
       if (result?.result !== 'success' || result.message?.id !== id) return entry;
-      if (entry.placementVersion !== version) return entry; // A move overtook this GET.
+      if (this.records.get(id) !== entry) return entry; // Evicted while awaiting GET.
+      const version = this.placements.write(id, observedAt);
+      if (version === null) return entry; // A newer placement overtook this GET.
+      entry.placementVersion = version;
       entry.placementUnknown = false;
       entry.message = { ...result.message, submessages: undefined, content: String(result.message.content ?? '').slice(0, POLL_LIMITS.text) };
-      entry.state = refreshPlacement ? entry.state ?? reconstructPoll(result.message.submessages)
-        : reconstructPoll(result.message.submessages);
+      entry.state ??= reconstructPoll(result.message.submessages);
     } catch { /* Missing, inaccessible, malformed or timed out: no repeat GET storm. */ }
     return entry;
   }
