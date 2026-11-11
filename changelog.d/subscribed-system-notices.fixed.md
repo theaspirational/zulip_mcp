@@ -1,0 +1,1 @@
+Subscribed mode no longer exposes cross-stream message anchors in connection notices. Gap, degraded and recovered markers are generic; host-visible diagnostic details are redacted. Default-mode markers and diagnostics remain unchanged.

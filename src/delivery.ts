@@ -23,6 +23,7 @@
  * monitoring state. Best-effort: a failed save is logged, never fatal.
  */
 
+import { diagnosticError } from './diagnostics.js';
 import { LEGACY_IDS, type MessageIds } from './message-ids.js';
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -86,6 +87,7 @@ export class DeliveryState {
     private readonly stateDir: string | null,
     private readonly sessionId: string,
     private readonly messageIds: MessageIds = LEGACY_IDS,
+    private readonly privateDiagnostics = false,
   ) {
     this.load();
   }
@@ -113,7 +115,7 @@ export class DeliveryState {
       }
       for (const id of parsed.lastOpen ?? []) if (typeof id === 'string') this.lastOpen.add(id);
     } catch (err) {
-      console.error('[zulip-mcp] Failed to load delivery state:', (err as Error).message);
+      diagnosticError(this.privateDiagnostics, 'delivery', '[zulip-mcp] Failed to load delivery state:', (err as Error).message);
     }
   }
 
@@ -133,7 +135,7 @@ export class DeliveryState {
       writeFileSync(tmp, JSON.stringify(out, null, 2) + '\n');
       renameSync(tmp, path);
     } catch (err) {
-      console.error('[zulip-mcp] Failed to save delivery state:', (err as Error).message);
+      diagnosticError(this.privateDiagnostics, 'delivery', '[zulip-mcp] Failed to save delivery state:', (err as Error).message);
     }
   }
 
@@ -204,7 +206,7 @@ export class DeliveryState {
       // Keep the lowest ids: the floor protects everything above it anyway.
       const highest = Math.max(...held.keys());
       if (messageId >= highest) {
-        console.error(`[zulip-mcp] ${channelId}: undelivered floor holds ${held.size} ids; not tracking ${this.messageIds.format(messageId)}`);
+        diagnosticError(this.privateDiagnostics, 'delivery', `[zulip-mcp] ${channelId}: undelivered floor holds ${held.size} ids; not tracking ${this.messageIds.format(messageId)}`);
         return;
       }
       held.delete(highest);

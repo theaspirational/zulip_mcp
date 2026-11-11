@@ -7,6 +7,7 @@
  * are the plain-MCP surface every client gets.
  */
 
+import { diagnosticError } from './diagnostics.js';
 import { StreamReadGate, STREAM_READ_TOOLS, CONDITIONAL_STREAM_READ_TOOLS } from './stream-read-gate.js';
 
 import { pollContent, reconstructPoll, pollResults, PollUsers, boundedPollRead } from "./polls.js";
@@ -240,6 +241,7 @@ export class ZulipToolRuntime {
   readonly messageIds: MessageIds;
   private zulipClient: any;
   private readonly sessionId: string;
+  private readonly privateDiagnostics: boolean;
   private readonly monitoredChannels = new Map<string, ChannelState>();
 
   private reactionPolicy: ReactionPolicy = SHOW_ALL;
@@ -274,8 +276,9 @@ export class ZulipToolRuntime {
   constructor(
     private readonly session: ZulipSession,
     private readonly stateDir: string = STATE_DIR,
-    options: { uploader?: Uploader; uploadPolicy?: UploadPolicy; formatTime?: (d: Date) => string; moveReadTimeoutMs?: number; messageIds?: MessageIds } = {},
+    options: { privateDiagnostics?: boolean; uploader?: Uploader; uploadPolicy?: UploadPolicy; formatTime?: (d: Date) => string; moveReadTimeoutMs?: number; messageIds?: MessageIds } = {},
   ) {
+    this.privateDiagnostics = options.privateDiagnostics ?? false;
     this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.moveReadTimeoutMs = options.moveReadTimeoutMs ?? LOCATE_TIMEOUT_MS;
     this.zulipClient = session.client;
@@ -380,9 +383,9 @@ export class ZulipToolRuntime {
           });
         }
 
-        console.error(`Loaded state for session ${this.sessionId}: ${this.monitoredChannels.size} Zulip channels`);
+        diagnosticError(!!this.streamGate || this.privateDiagnostics, 'tool-runtime', `Loaded state for session ${this.sessionId}: ${this.monitoredChannels.size} Zulip channels`);
       } catch (error) {
-        console.error(`Failed to load state: ${error}`);
+        diagnosticError(!!this.streamGate || this.privateDiagnostics, 'tool-runtime', `Failed to load state: ${error}`);
       }
     }
   }
@@ -402,7 +405,7 @@ export class ZulipToolRuntime {
 
       writeFileSync(this.stateFile(), JSON.stringify(state, null, 2));
     } catch (error) {
-      console.error(`Failed to save state: ${error}`);
+      diagnosticError(!!this.streamGate || this.privateDiagnostics, 'tool-runtime', `Failed to save state: ${error}`);
     }
   }
 
@@ -419,7 +422,7 @@ export class ZulipToolRuntime {
     if (this.messageIds.mode === "legacy") return this.handleValidatedCall(name, args);
     let warned = false;
     const warning = `Warning: bare message_id accepted by ${this.messageIds.tag}; use ${this.messageIds.tag}:<n>.`;
-    const bare = () => { if (!warned) { warned = true; console.error(`[zulip-mcp] ${warning}`); } };
+    const bare = () => { if (!warned) { warned = true; diagnosticError(!!this.streamGate || this.privateDiagnostics, 'tool-runtime', `[zulip-mcp] ${warning}`); } };
     try {
       args = { ...args };
       const fields = ["send_message", "send_poll"].includes(name) ? ["reply_to"] : name === "fetch_history" ? ["before", "after"]

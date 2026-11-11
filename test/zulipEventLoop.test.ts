@@ -210,6 +210,14 @@ test('queue expiry is a RETURNED error object; re-registers and emits a message-
   assert.equal(gaps[0].metadata?.newQueueId, 'q2');
   // The gap text carries the usable since-anchor (message id), not event id 42.
   assert.match(gaps[0].text, /message id 9001/);
+  assert.deepEqual(gaps[0], {
+    kind: 'gap',
+    text: 'Zulip event queue q1 expired and was re-registered as q2. ' +
+      'Messages arriving after message id 9001 (2024-03-09T16:00:00.000Z) and before re-registration may have been missed. ' +
+      'Check recent channel history from that point if continuity matters.',
+    metadata: { platform: 'zulip', expiredQueueId: 'q1', lastMessageId: 9001,
+      lastMessageTimestamp: 1_710_000_000, newQueueId: 'q2' },
+  }, 'default gap payload remains exactly unchanged');
 });
 
 test('malformed non-throwing response (no events, no error code) sleeps instead of hot-spinning', async () => {

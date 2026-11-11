@@ -38,6 +38,7 @@
  * desired-vs-effective state so disk ≠ process is always witnessed.
  */
 
+import { diagnosticError } from './diagnostics.js';
 import { StreamReadGate } from './stream-read-gate.js';
 import { Subscriptions } from './subscriptions.js';
 
@@ -298,7 +299,7 @@ export class FiltersPlane {
         );
       }
       this.apply(fromFile, true);
-      console.error(`[zulip-mcp] filters loaded from ${this.path}`);
+      diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', `[zulip-mcp] filters loaded from ${this.path}`);
     } else {
       try {
         saveFiltersFile(this.path, this.effective);
@@ -306,10 +307,10 @@ export class FiltersPlane {
         throw new Error(`cannot create the filters file ${this.path}: ${(err as Error).message}`);
       }
       this.apply(this.effective, true);
-      console.error(`[zulip-mcp] filters file seeded from env -> ${this.path}`);
+      diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', `[zulip-mcp] filters file seeded from env -> ${this.path}`);
     }
     if (this.baseline.length > 0) {
-      console.error(`[zulip-mcp] reaction-suppression baseline from the host: ${this.baseline.length} marker(s)`);
+      diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', `[zulip-mcp] reaction-suppression baseline from the host: ${this.baseline.length} marker(s)`);
     }
     this.tracker = new FiltersFilePollTracker(filtersFileMtime(this.path));
     this.poll = setInterval(() => this.tick(), this.options.pollMs ?? 3000);
@@ -329,18 +330,18 @@ export class FiltersPlane {
     if (action === 'none') return;
     if (action === 'missing') {
       if (this.markBroken('missing')) {
-        console.error(`[zulip-mcp] filters file ${this.path} is MISSING — last-known-good filters stay in force until it reappears`);
+        diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', `[zulip-mcp] filters file ${this.path} is MISSING — last-known-good filters stay in force until it reappears`);
       }
       return;
     }
     const next = loadFiltersFile(this.path);
     if (!next) {
       if (this.markBroken('invalid')) {
-        console.error(`[zulip-mcp] filters file changed but is unparseable — keeping previous filters (${this.path})`);
+        diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', `[zulip-mcp] filters file changed but is unparseable — keeping previous filters (${this.path})`);
       }
       return;
     }
-    if (this.apply(next, false)) console.error(`[zulip-mcp] filters hot-reloaded from ${this.path}`);
+    if (this.apply(next, false)) diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', `[zulip-mcp] filters hot-reloaded from ${this.path}`);
   }
 
   /** The effective filters (normalized). */
@@ -479,7 +480,7 @@ export class FiltersPlane {
         try {
           l(normalized, prev);
         } catch (err) {
-          console.error('[zulip-mcp] filters listener failed:', (err as Error).message);
+          diagnosticError(this.subscriptions.mode === 'subscribed', 'filters', '[zulip-mcp] filters listener failed:', (err as Error).message);
         }
       }
     }

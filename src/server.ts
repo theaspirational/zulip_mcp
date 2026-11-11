@@ -24,6 +24,7 @@
  * every connection starts from a fresh grant, registration and sweep.
  */
 
+import { diagnosticError } from './diagnostics.js';
 import { StreamReadGate, STREAM_READ_TOOLS, CONDITIONAL_STREAM_READ_TOOLS } from './stream-read-gate.js';
 
 import { LEGACY_IDS, idToolDefinitions, type MessageIds } from './message-ids.js';
@@ -192,7 +193,7 @@ export class ZulipMcplServer {
     this.filters = options.filters ?? null;
     this.streamGate = this.filters?.streamReadGate;
     if (this.streamGate) this.tools.setStreamReadPolicy(this.streamGate);
-    this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.messageIds);
+    this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.messageIds, !!this.streamGate);
     // A widened stream allowlist means channels the host has never seen:
     // make them known. A narrowed one is enforced on every delivery surface
     // (`isAllowed` and the output gate); retained descriptors are hidden,
@@ -211,7 +212,7 @@ export class ZulipMcplServer {
       }
       const before = new Set(prev.streams ?? []);
       const widened = !next.streams || (next.streams ?? []).some((name) => prev.streams && !before.has(name));
-      if (widened || this.filters?.subscriptions.mode === 'subscribed') void this.applyFilterChange().catch(() => { console.error('[zulip-mcp] channel refresh withheld by current policy'); });
+      if (widened || this.filters?.subscriptions.mode === 'subscribed') void this.applyFilterChange().catch(() => { diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] channel refresh withheld by current policy'); });
       void this.healUndelivered();
     });
 
@@ -239,6 +240,7 @@ export class ZulipMcplServer {
     this.channelManager = new ChannelManager(host, this.adapters, this.grant, options.batchWindowMs, {
       // The only place an open channel's watermark moves: on the host's
       // itemized acceptance of a channels/incoming batch.
+      subscribedMode: !!this.streamGate,
       visible: descriptor => this.descriptorVisible(descriptor),
       formatMessageId: id => this.messageIds.format(id),
       onDelivered: (channelId, accepted, rejected) => this.onDelivered(channelId, accepted, rejected),
@@ -250,6 +252,7 @@ export class ZulipMcplServer {
       onGivenUp: (channelId, messages) => this.onGivenUp(channelId, messages),
     });
     this.contextProvider = new ContextProvider(this.channelManager, this.grant, options.contextHistorySize, {
+      privateDiagnostics: !!this.streamGate,
       excludeChannel: (channelId) => this.isMuted(channelId) || !this.isAllowed(channelId),
       captureAuthorization: (channelId) => {
         const address = this.channelManager.getChannel(channelId)?.address as { stream_id?: number } | undefined;
@@ -303,7 +306,7 @@ export class ZulipMcplServer {
       await this.run(conn);
     } catch (err) {
       if ((err as Error).name !== 'ConnectionClosedError') {
-        console.error('[zulip-mcp] Connection error:', err);
+        diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] Connection error:', err);
       }
     }
 
@@ -361,12 +364,12 @@ export class ZulipMcplServer {
         try {
           await this.channelManager.registerChannels();
         } catch (error) {
-          console.error('Failed to register channels after initial policy:', error);
+          diagnosticError(!!this.streamGate, 'server', 'Failed to register channels after initial policy:', error);
         }
         try {
           await this.runReconnectSweep();
         } catch (error) {
-          console.error('[zulip-mcp] Reconnect catch-up sweep failed:', error);
+          diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] Reconnect catch-up sweep failed:', error);
         }
         await this.goLive();
       });
@@ -412,13 +415,13 @@ export class ZulipMcplServer {
       await Promise.race([Promise.allSettled([...this.inFlight]), grace]);
       clearTimeout(timer);
       if (this.inFlight.size > 0) {
-        console.error(`[zulip-mcp] ${this.inFlight.size} delivery(ies) still in flight at shutdown; left for the next catch-up sweep`);
+        diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] ${this.inFlight.size} delivery(ies) still in flight at shutdown; left for the next catch-up sweep`);
       }
     }
     try {
       await this.channelManager.flush();
     } catch (error) {
-      console.error('[zulip-mcp] final flush failed:', (error as Error).message ?? error);
+      diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] final flush failed:', (error as Error).message ?? error);
     }
     this.channelManager.destroy();
     this.commitScannedCatchUp();
@@ -458,7 +461,7 @@ export class ZulipMcplServer {
       try {
         await this.route(message, newChannel);
       } catch (err) {
-        console.error('[zulip-mcp] delivery of a held message failed:', (err as Error).message);
+        diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] delivery of a held message failed:', (err as Error).message);
       } finally {
         // A policy return or construction error may settle without queueing.
         // Transfer any still-pending reply to existing replay ownership.
@@ -472,7 +475,7 @@ export class ZulipMcplServer {
     this.delivery.save();
     this.live = true;
     if (this.preLiveDropped > 0) {
-      console.error(`[zulip-mcp] ${this.preLiveDropped} live message(s) exceeded the pre-live buffer; held below the watermark for replay`);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] ${this.preLiveDropped} live message(s) exceeded the pre-live buffer; held below the watermark for replay`);
       this.preLiveDropped = 0;
     }
     void this.healUndelivered();
@@ -503,7 +506,7 @@ export class ZulipMcplServer {
   private async handleInitialize(conn: McplConnection): Promise<boolean> {
     const msg = await conn.nextMessage();
     if (msg.type !== 'request' || msg.request.method !== method.INITIALIZE) {
-      console.error('[zulip-mcp] Expected initialize request, got:', msg);
+      diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] Expected initialize request, got:', msg);
       conn.close();
       return false;
     }
@@ -536,7 +539,7 @@ export class ZulipMcplServer {
     // notification is handed to the main loop untouched.
     const next = await conn.nextMessage();
     if (next.type === 'notification' && next.notification.method === 'notifications/initialized') {
-      console.error(`[zulip-mcp] Client initialized (${this.mcplActive ? 'MCPL' : 'MCP'} mode)`);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] Client initialized (${this.mcplActive ? 'MCPL' : 'MCP'} mode)`);
     } else if (next.type === 'request') {
       await this.handleRequest(conn, next.request);
     } else {
@@ -720,7 +723,7 @@ export class ZulipMcplServer {
         return;
       }
       const e = err as Error;
-      console.error(`[zulip-mcp] handleRequest error: method=${req.method}`, e.stack ?? e.message);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] handleRequest error: method=${req.method}`, e.stack ?? e.message);
       conn.sendError(req.id, -32603, e.message ?? String(err));
     }
   }
@@ -760,7 +763,7 @@ export class ZulipMcplServer {
     } catch (err) {
       // Notifications cannot be answered; a failing one is logged, never fatal.
       const e = err as Error;
-      console.error(`[zulip-mcp] notification ${notif.method} failed:`, e.message ?? String(err));
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] notification ${notif.method} failed:`, e.message ?? String(err));
     }
     void conn;
   }
@@ -857,7 +860,7 @@ export class ZulipMcplServer {
       if (!params.channelId || !(err instanceof McplRpcError) || err.code !== ERR_UNKNOWN_CHANNEL) throw err;
       const { added } = await this.applyFilterChange();
       if (added.length > 0) {
-        console.error(`[zulip-mcp] channels/open ${params.channelId}: re-discovery registered ${added.join(', ')}`);
+        diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] channels/open ${params.channelId}: re-discovery registered ${added.join(', ')}`);
       }
       return this.channelManager.findChannel(params);
     }
@@ -928,6 +931,7 @@ export class ZulipMcplServer {
    * system marker (a delivery gap, degraded polling) is about the
    * connection, not the stream it rides on. Default mode lets it bypass
    * mute/allowlist; subscribed mode still gates its stream-derived envelope.
+   * Its connection payload is unanchored at source and broadcast boundaries.
    */
   private mayDeliver(message: IncomingChannelMessage): boolean {
     if (!this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) return false;
@@ -1176,7 +1180,7 @@ export class ZulipMcplServer {
               undefined, (through) => this.delivery.markReplayed(channelId, ids.filter((id) => id <= through)));
           }
         } catch (err) {
-          console.error(`[zulip-mcp] replay of undelivered messages on ${channelId} failed:`, (err as Error).message);
+          diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] replay of undelivered messages on ${channelId} failed:`, (err as Error).message);
         }
       }
       this.delivery.save();
@@ -1209,7 +1213,7 @@ export class ZulipMcplServer {
         this.delivery.release(channelId, id);
       }
     }
-    if (replayed > 0) console.error(`[zulip-mcp] ${channelId}: replaying ${replayed} undelivered message(s) from history`);
+    if (replayed > 0) diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] ${channelId}: replaying ${replayed} undelivered message(s) from history`);
   }
 
   /** Queue history back to an open channel as recovered delivery. Returns how many. */
@@ -1240,7 +1244,7 @@ export class ZulipMcplServer {
     if (!conn || !this.mcplActive) return false;
     if (this.streamGate && !this.mayDeliver(message)) return false;
     if (!this.grant.has('pushEvents') || !this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) {
-      console.error(`[zulip-mcp] pushEvents not granted; dropping addressed message ${this.messageIds.format(message.messageId)} on closed ${message.channelId}`);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] pushEvents not granted; dropping addressed message ${this.messageIds.format(message.messageId)} on closed ${message.channelId}`);
       return false;
     }
     const meta = (typeof message.metadata === 'object' && message.metadata !== null ? message.metadata : {}) as Record<string, unknown>;
@@ -1285,12 +1289,12 @@ export class ZulipMcplServer {
       const result = (await conn.sendRequest(method.PUSH_EVENT, this.messageIds.project(params))) as { accepted?: boolean; reason?: string } | undefined;
       if (this.streamGate && !this.mayDeliver(message)) return false;
       if (result && result.accepted === false) {
-        console.error(`[zulip-mcp] push/event ${eventId} not accepted by host${result.reason ? `: ${result.reason}` : ''}`);
+        diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] push/event ${eventId} not accepted by host${result.reason ? `: ${result.reason}` : ''}`);
         return false;
       }
       return true;
     } catch (err) {
-      console.error('[zulip-mcp] push/event failed:', (err as Error).message);
+      diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] push/event failed:', (err as Error).message);
       return false;
     }
   }
@@ -1323,7 +1327,7 @@ export class ZulipMcplServer {
     await this.backfillMissedTallies();
     this.delivery.save();
     if (delivered > 0) {
-      console.error(`[zulip-mcp] Reconnect catch-up: delivered missed messages from ${delivered} channel(s)`);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] Reconnect catch-up: delivered missed messages from ${delivered} channel(s)`);
     }
   }
 
@@ -1427,7 +1431,7 @@ export class ZulipMcplServer {
     try {
       fetched = await this.fetchAfter(channelId, after, retryWindow?.through, passBudget);
     } catch (err) {
-      console.error(`[zulip-mcp] catch-up: history fetch failed for ${channelId}:`, (err as Error).message);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] catch-up: history fetch failed for ${channelId}:`, (err as Error).message);
       onAttempt?.(Infinity); // A history failure consumes the heal attempt, unlike a local policy abort.
       return false;
     } finally {
@@ -1574,7 +1578,7 @@ export class ZulipMcplServer {
           const msgs = (await this.fetchAfter(channelId, watermark)).messages;
           if (current()) contributions.push({ current, recovered: this.replayOnOpen(channelId, msgs), closed: 0 });
         } catch (err) {
-          console.error(`[zulip-mcp] gap recovery failed for ${channelId}:`, (err as Error).message);
+          diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] gap recovery failed for ${channelId}:`, (err as Error).message);
         }
       }
       for (const channelId of this.delivery.watermarkedChannels()) {
@@ -1711,7 +1715,7 @@ export class ZulipMcplServer {
     for (const descriptor of descriptors) this.descriptorVisible(descriptor);
     const result = await this.channelManager.registerAdditional(descriptors, { retryBacklog: true, retryRefused: opts.retryRefused });
     this.streamGate?.recheck();
-    if (result.announced.length > 0) console.error(`[zulip-mcp] registered ${result.announced.length} newly visible channel(s): ${result.announced.join(', ')}`);
+    if (result.announced.length > 0) diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] registered ${result.announced.length} newly visible channel(s): ${result.announced.join(', ')}`);
     return { visible: descriptors.length, added: result.announced, local: result.local, refused: result.refused, reason: this.streamGate && result.reason ? 'Announcement not confirmed' : result.reason };
   }
 
@@ -1727,7 +1731,7 @@ export class ZulipMcplServer {
       const [descriptor] = await this.adapter.describeChannels([channelId]);
       if (descriptor) await this.channelManager.registerAdditional([descriptor]);
     } catch (error) {
-      console.error(`[zulip-mcp] could not register ${channelId} from a message change:`, (error as Error).message);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] could not register ${channelId} from a message change:`, (error as Error).message);
     }
   }
 
@@ -1748,7 +1752,7 @@ export class ZulipMcplServer {
       return await this.channelManager.registerAdditional(allowed, { retryBacklog: true });
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.error(`[zulip-mcp] registering ${streams.join(', ')} after listen failed:`, error);
+      diagnosticError(!!this.streamGate, 'server', `[zulip-mcp] registering ${streams.join(', ')} after listen failed:`, error);
       return { ...empty, reason };
     }
   }
@@ -1950,24 +1954,24 @@ export class ZulipMcplServer {
     this.adapter.startEvents(
       (message, newChannel) => {
         const delivery = this.onIncoming(message, newChannel).catch((err) => {
-          console.error('[zulip-mcp] inbound delivery failed:', (err as Error).message);
+          diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] inbound delivery failed:', (err as Error).message);
         });
         this.inFlight.add(delivery);
         void delivery.finally(() => this.inFlight.delete(delivery));
       },
       (event) => {
         void this.onSystemEvent(event).catch((err) => {
-          console.error('[zulip-mcp] system event handling failed:', (err as Error).message);
+          diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] system event handling failed:', (err as Error).message);
         });
       },
       (reaction) => {
         void this.onReaction(reaction).catch((err) => {
-          console.error('[zulip-mcp] reaction handling failed:', (err as Error).message);
+          diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] reaction handling failed:', (err as Error).message);
         });
       },
       (change) => {
         void this.onMessageChange(change).catch((err) => {
-          console.error('[zulip-mcp] message change handling failed:', (err as Error).message);
+          diagnosticError(!!this.streamGate, 'server', '[zulip-mcp] message change handling failed:', (err as Error).message);
         });
       },
     );

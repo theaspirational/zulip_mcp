@@ -17,7 +17,8 @@
  *     We classify on the returned `code` field and re-register a fresh queue.
  *     Zulip offers no gap recovery for a dead queue, so any events between the
  *     last delivered message and re-registration are lost — we surface that as
- *     a 'gap' system event anchored on the last delivered *message* id/time
+ *     a 'gap' system event (unanchored in subscribed mode), otherwise
+ *     anchored on the last delivered *message* id/time
  *     (not the queue-local event id, which is meaningless to the new queue or
  *     the messages API) so the host/agent can consult history from there.
  *   - Transport failures (ECONNRESET, timeouts, and non-JSON proxy/HTML error
@@ -35,6 +36,8 @@
  *     error object) also backs off rather than hot-spinning the poll.
  */
 
+import { unanchoredSystemEvent } from '../system-events.js';
+import { diagnosticError } from '../diagnostics.js';
 import type { SubscriptionEvent } from '../subscriptions.js';
 import type { WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
@@ -275,7 +278,7 @@ export class ZulipEventLoop {
         await this.pollLoop(zulipClient, onMessage, onSystemEvent, onReaction, onChange, onQueueRegistered, onSubmessage, onSubscription);
       } catch (error) {
         if (this.stopped) return;
-        console.error('Zulip event loop error, restarting in 5s:', error);
+        diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop error, restarting in 5s:', error);
         await this.sleep(5000);
       }
     }
@@ -340,7 +343,7 @@ export class ZulipEventLoop {
     await onQueueRegistered?.();
     let lastEventId = registration.last_event_id;
 
-    console.error(`Zulip event queue registered: ${this.queueId}`);
+    diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', `Zulip event queue registered: ${this.queueId}`);
 
     // A previous queue died and the replacement starts from *now* — Zulip
     // has no gap recovery for dead queues, so events between the old
@@ -386,7 +389,7 @@ export class ZulipEventLoop {
         // Classify on the structured `code` before treating the missing
         // `events` array as a malformed response.
         if (response?.result === 'error' && response.code === 'BAD_EVENT_QUEUE_ID') {
-          console.error('Zulip event queue expired, re-registering...');
+          diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event queue expired, re-registering...');
           this.pendingGap = {
             queueId: this.queueId ?? 'unknown',
             lastMessageId: this.lastMessageId,
@@ -400,7 +403,7 @@ export class ZulipEventLoop {
           // would hot-spin the poll and peg a CPU core.
           this.consecutiveFailures++;
           const delay = this.backoffDelay(this.consecutiveFailures);
-          console.error(
+          diagnosticError(this.streamsMode === 'subscribed', 'zulip-events',
             `Zulip events.retrieve returned no events array (attempt ${this.consecutiveFailures}); retrying in ${delay}ms`,
           );
           this.maybeEmitDegraded(onSystemEvent, 'events.retrieve returned a malformed response (no events array)');
@@ -427,7 +430,7 @@ export class ZulipEventLoop {
                 await onSubmessage({ ...snapshot, id: event.submessage_id!, message_id: event.message_id,
                   sender_id: event.sender_id!, msg_type: event.msg_type, content: event.content! });
               }
-              catch (error) { console.error('Zulip event loop: submessage handler failed:', error); }
+              catch (error) { diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop: submessage handler failed:', error); }
             }
             continue;
           }
@@ -445,7 +448,7 @@ export class ZulipEventLoop {
                 user: event.user,
               });
             } catch (handlerError) {
-              console.error('Zulip event loop: onReaction handler threw:', handlerError);
+              diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop: onReaction handler threw:', handlerError);
             }
             continue;
           }
@@ -479,7 +482,7 @@ export class ZulipEventLoop {
                     flags: Array.isArray(event.flags) ? event.flags : [],
                   });
                 } catch (handlerError) {
-                  console.error('Zulip event loop: onChange handler threw:', handlerError);
+                  diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop: onChange handler threw:', handlerError);
                 }
               }
             }
@@ -501,7 +504,7 @@ export class ZulipEventLoop {
                   topic: typeof event.topic === 'string' ? event.topic : null,
                 });
               } catch (handlerError) {
-                console.error('Zulip event loop: onChange handler threw:', handlerError);
+                diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop: onChange handler threw:', handlerError);
               }
             }
             continue;
@@ -511,8 +514,11 @@ export class ZulipEventLoop {
             const msg = event.message as ZulipEventMessage;
             // Anchor future gap markers on the last delivered message — the
             // event id is queue-local and useless once the queue is replaced.
-            this.lastMessageId = msg.id;
-            this.lastMessageTimestamp = msg.timestamp;
+            // Subscribed mode keeps no cross-stream connection anchor at all.
+            if (this.streamsMode !== 'subscribed') {
+              this.lastMessageId = msg.id;
+              this.lastMessageTimestamp = msg.timestamp;
+            }
 
             // display_recipient is a string for stream messages, array for DMs
             const streamName = typeof msg.display_recipient === 'string'
@@ -531,7 +537,7 @@ export class ZulipEventLoop {
                 if (epoch === undefined) await onMessage(isStream ? streamName : null, msg, event.flags ?? []);
                 else await onMessage(isStream ? streamName : null, msg, event.flags ?? [], epoch);
               } catch (handlerError) {
-                console.error('Zulip event loop: onMessage handler threw:', handlerError);
+                diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop: onMessage handler threw:', handlerError);
               }
             }
           }
@@ -551,11 +557,11 @@ export class ZulipEventLoop {
         const delay = this.backoffDelay(this.consecutiveFailures);
         const nonJson = this.isNonJsonError(error, errMsg);
         if (nonJson) {
-          console.error(
+          diagnosticError(this.streamsMode === 'subscribed', 'zulip-events',
             `Zulip event poll got a non-JSON response (proxy/HTML error page?) (attempt ${this.consecutiveFailures}); retrying in ${delay}ms: ${errMsg}`,
           );
         } else {
-          console.error(`Zulip event poll error (attempt ${this.consecutiveFailures}); retrying in ${delay}ms:`, error);
+          diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', `Zulip event poll error (attempt ${this.consecutiveFailures}); retrying in ${delay}ms:`, error);
         }
         this.maybeEmitDegraded(
           onSystemEvent,
@@ -612,7 +618,7 @@ export class ZulipEventLoop {
     if (!this.degradedActive) return;
     const failures = this.consecutiveFailures;
     this.degradedActive = false;
-    console.error(`Zulip event polling recovered after ${failures} consecutive failures`);
+    diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', `Zulip event polling recovered after ${failures} consecutive failures`);
     this.emitSystemEvent(onSystemEvent, {
       kind: 'recovered',
       text:
@@ -625,10 +631,10 @@ export class ZulipEventLoop {
   private emitSystemEvent(onSystemEvent: OnSystemEvent | undefined, event: PlatformSystemEvent): void {
     if (!onSystemEvent) return;
     try {
-      onSystemEvent(event);
+      onSystemEvent(this.streamsMode === 'subscribed' ? unanchoredSystemEvent(event) : event);
     } catch (error) {
       // System-event delivery must never take down the poll loop.
-      console.error('Zulip event loop: onSystemEvent callback threw:', error);
+      diagnosticError(this.streamsMode === 'subscribed', 'zulip-events', 'Zulip event loop: onSystemEvent callback threw:', error);
     }
   }
 

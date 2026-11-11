@@ -14,6 +14,7 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
+import { diagnosticError } from '../diagnostics.js';
 import { StreamReadGate } from '../stream-read-gate.js';
 
 import type { Subscriptions } from '../subscriptions.js';
@@ -411,7 +412,7 @@ export class ZulipAdapter implements PlatformAdapter {
         }));
       }
     } catch (error) {
-      console.error('Failed to discover Zulip streams:', error);
+      diagnosticError(!!this.streamGate, 'zulip', 'Failed to discover Zulip streams:', error);
     }
     channels.push(...(await this.discoverDmChannels()));
     return channels;
@@ -465,7 +466,7 @@ export class ZulipAdapter implements PlatformAdapter {
         this.streamGate?.recheck();
         if (result?.result === 'success' && typeof result.stream_id === 'number') streamId = result.stream_id;
       } catch (error) {
-        console.error(`[zulip-mcp] could not resolve the stream id for #${name}:`, (error as Error).message);
+        diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] could not resolve the stream id for #${name}:`, (error as Error).message);
       }
       if (!this.streamAllowedById(name, streamId)) continue;
       out.push(this.streamDescriptor(name, streamId));
@@ -497,7 +498,7 @@ export class ZulipAdapter implements PlatformAdapter {
         this.describeDm(m);
       }
     } catch (error) {
-      console.error('Failed to discover Zulip DM conversations:', (error as Error).message);
+      diagnosticError(!!this.streamGate, 'zulip', 'Failed to discover Zulip DM conversations:', (error as Error).message);
     }
     return [...this.knownDms.values()];
   }
@@ -573,7 +574,7 @@ export class ZulipAdapter implements PlatformAdapter {
       this.movedAway.delete(messageId);
       return this.seen.get(messageId) ?? null;
     } catch (err) {
-      console.error(`[zulip-mcp] could not resolve message ${this.messageIds.format(messageId)} for ${purpose}:`, (err as Error).message);
+      diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] could not resolve message ${this.messageIds.format(messageId)} for ${purpose}:`, (err as Error).message);
       if (quoteLookup) throw err;
       return null;
     }
@@ -772,7 +773,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // A cross-stream move of an uncached message whose origin cannot be
       // named has nowhere honest to go: the GET only knows the destination.
       if (crossStream && !cached && fromStream === null) {
-        console.error(`[zulip-mcp] dropping a move of message ${this.messageIds.format(change.messageId)}: origin stream ${change.streamId} unknown`);
+        diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] dropping a move of message ${this.messageIds.format(change.messageId)}: origin stream ${change.streamId} unknown`);
         return;
       }
       const fromChannelId = fromStream !== null ? zulipChannelId(fromStream) : where.channelId;
@@ -1090,7 +1091,7 @@ export class ZulipAdapter implements PlatformAdapter {
         }
       }
     } catch (err) {
-      console.error(`[zulip-mcp] could not refresh the stream list for stream ${streamId}:`, (err as Error).message);
+      diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] could not refresh the stream list for stream ${streamId}:`, (err as Error).message);
     }
     return this.streamNamesById.get(streamId) ?? null;
   }
@@ -1127,7 +1128,7 @@ export class ZulipAdapter implements PlatformAdapter {
       } else {
         const streamId = addressOf(descriptor).stream_id;
         if (!streamId) {
-          console.error(`[zulip-mcp] sendTyping: no stream_id for ${channelId} (descriptor=${descriptor ? 'present' : 'missing'})`);
+          diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] sendTyping: no stream_id for ${channelId} (descriptor=${descriptor ? 'present' : 'missing'})`);
           return;
         }
         const retained = descriptor?.metadata as { readEpoch?: number } | undefined;
@@ -1138,11 +1139,11 @@ export class ZulipAdapter implements PlatformAdapter {
         result = await send({ type: 'stream', stream_id: streamId, topic, op, to: [] });
       }
       if (result?.result && result.result !== 'success') {
-        console.error(`[zulip-mcp] typing.send(${op}) non-success: ${result.result} ${result.msg ?? ''}`);
+        diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] typing.send(${op}) non-success: ${result.result} ${result.msg ?? ''}`);
       }
     } catch (err) {
       // Best-effort — swallow errors so typing never breaks the agent.
-      console.error(`[zulip-mcp] typing.send(${op}) failed:`, (err as Error).message);
+      diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] typing.send(${op}) failed:`, (err as Error).message);
     }
   }
 
@@ -1303,7 +1304,7 @@ export class ZulipAdapter implements PlatformAdapter {
       throw new Error(`not authorized to subscribe to #${streamName} (private stream; the bot must be invited)`);
     }
     const fresh = result.subscribed && Object.keys(result.subscribed).length > 0;
-    if (fresh) console.error(`[zulip-mcp] subscribed to #${streamName} for channel ${channelId}`);
+    if (fresh) diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] subscribed to #${streamName} for channel ${channelId}`);
   }
 
   startEvents(
@@ -1340,7 +1341,7 @@ export class ZulipAdapter implements PlatformAdapter {
           });
         })
         .catch((err) => {
-          console.error('[zulip-mcp] message change handling failed:', (err as Error).message);
+          diagnosticError(!!this.streamGate, 'zulip', '[zulip-mcp] message change handling failed:', (err as Error).message);
         });
     };
     const reactionHandler = onReaction
@@ -1368,7 +1369,7 @@ export class ZulipAdapter implements PlatformAdapter {
               timestamp: new Date(),
             });
           }).catch((err) => {
-            console.error('[zulip-mcp] reaction handling failed:', (err as Error).message);
+            diagnosticError(!!this.streamGate, 'zulip', '[zulip-mcp] reaction handling failed:', (err as Error).message);
           });
         }
       : undefined;
@@ -1388,7 +1389,7 @@ export class ZulipAdapter implements PlatformAdapter {
       if (this.identity.selfUserId !== null && msg.sender_id === this.identity.selfUserId) return;
       if (m.isDm) {
         if (!this.filters.dmAllowed({ id: m.authorId, email: m.authorEmail })) {
-          console.error(`[zulip-mcp] dropping DM from ${m.authorEmail} (${m.authorId}): not in the dmUsers allowlist`);
+          diagnosticError(!!this.streamGate, 'zulip', `[zulip-mcp] dropping DM from ${m.authorEmail} (${m.authorId}): not in the dmUsers allowlist`);
           return;
         }
         const { descriptor, isNew } = this.describeDm(m);
@@ -1434,7 +1435,7 @@ export class ZulipAdapter implements PlatformAdapter {
           this.streamNamesById.set(event.stream_id, event.value);
       }
     }).catch(error => {
-      console.error('Zulip event loop failed:', error);
+      diagnosticError(!!this.streamGate, 'zulip', 'Zulip event loop failed:', error);
     });
   }
 

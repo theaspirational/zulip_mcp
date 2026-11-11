@@ -41,6 +41,7 @@
  *   MCPL_CONTEXT_HISTORY_SIZE                   - messages injected per open channel (20)
  */
 
+import { diagnosticError } from './diagnostics.js';
 import { MessageIds } from './message-ids.js';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
@@ -69,7 +70,7 @@ function intEnv(name: string, fallback: number): number {
   if (raw === undefined || raw === '') return fallback;
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || n < 0) {
-    console.error(`[zulip-mcp] ignoring ${name}=${JSON.stringify(raw)} (not a non-negative integer); using ${fallback}`);
+    diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', `[zulip-mcp] ignoring ${name}=${JSON.stringify(raw)} (not a non-negative integer); using ${fallback}`);
     return fallback;
   }
   return n;
@@ -86,7 +87,7 @@ export function parseBackscrollLimits(raw: string | undefined): Map<string, numb
     const name = sep > 0 ? trimmed.slice(0, sep).trim() : '';
     const n = sep > 0 ? parseInt(trimmed.slice(sep + 1), 10) : NaN;
     if (!name || !Number.isFinite(n) || n < 0) {
-      console.error(`[zulip-mcp] ignoring ZULIP_BACKSCROLL_CHANNELS entry ${JSON.stringify(trimmed)} (want "stream:limit")`);
+      diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', `[zulip-mcp] ignoring ZULIP_BACKSCROLL_CHANNELS entry ${JSON.stringify(trimmed)} (want "stream:limit")`);
       continue;
     }
     out.set(name.replace(/^#/, ''), n);
@@ -99,7 +100,7 @@ async function main(): Promise<void> {
   const tcpIdx = args.indexOf('--tcp');
   const tcpPort = tcpIdx >= 0 ? parseInt(args[tcpIdx + 1], 10) : undefined;
   if (tcpIdx >= 0 && !(tcpPort! > 0)) {
-    console.error('Usage: zulip-mcp-server [--stdio | --tcp <port>]');
+    diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', 'Usage: zulip-mcp-server [--stdio | --tcp <port>]');
     process.exit(1);
   }
 
@@ -113,8 +114,8 @@ async function main(): Promise<void> {
   const uploadPolicy = resolveUploadPolicy(process.env, session.maxUploadBytes);
   const uploader = session.realm ? createZulipUploader(session) : undefined;
   if (uploadPolicy.roots.size > 0) {
-    console.error(`[zulip-mcp] upload roots: ${[...uploadPolicy.roots].map(([n, d]) => `${n}=${d}`).join(', ')}`);
-    if (!LOCAL_FILES_SUPPORTED) console.error(`[zulip-mcp] ZULIP_UPLOAD_ROOTS is set but local-file attachments are Linux-only on this platform (${process.platform}); base64 data still works`);
+    diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', `[zulip-mcp] upload roots: ${[...uploadPolicy.roots].map(([n, d]) => `${n}=${d}`).join(', ')}`);
+    if (!LOCAL_FILES_SUPPORTED) diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', `[zulip-mcp] ZULIP_UPLOAD_ROOTS is set but local-file attachments are Linux-only on this platform (${process.platform}); base64 data still works`);
   }
   // One line-time formatter for every surface (and one warning for a bad AGENT_TIMEZONE).
   const formatTime = agentLineTimeFormatter();
@@ -130,7 +131,7 @@ async function main(): Promise<void> {
     filters,
     maxMessageLength: process.env.ZULIP_MAX_MESSAGE_LENGTH ? intEnv('ZULIP_MAX_MESSAGE_LENGTH', 10000) : undefined,
   });
-  const tools = new ZulipToolRuntime(session, stateDir, { uploader, uploadPolicy, formatTime, messageIds });
+  const tools = new ZulipToolRuntime(session, stateDir, { privateDiagnostics: filters.subscriptions.mode === 'subscribed', uploader, uploadPolicy, formatTime, messageIds });
   tools.setReactionPolicy({
     suppressed: (name, code, type) => filters.reactionSuppressed(name, code, type),
   });
@@ -162,7 +163,7 @@ async function main(): Promise<void> {
   });
 
   if (tcpPort) {
-    console.error(`[zulip-mcp] Listening on TCP port ${tcpPort}`);
+    diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', `[zulip-mcp] Listening on TCP port ${tcpPort}`);
     const tcpServer = net.createServer();
     tcpServer.listen(tcpPort, '127.0.0.1');
     await new Promise<void>((resolve) => tcpServer.once('listening', resolve));
@@ -170,9 +171,9 @@ async function main(): Promise<void> {
     // One connection at a time.
     while (true) {
       const conn = await McplConnection.acceptTcp(tcpServer);
-      console.error('[zulip-mcp] Client connected');
+      diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', '[zulip-mcp] Client connected');
       await server.serve(conn);
-      console.error('[zulip-mcp] Client disconnected, waiting for next...');
+      diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', '[zulip-mcp] Client disconnected, waiting for next...');
     }
   }
 
@@ -185,7 +186,7 @@ async function main(): Promise<void> {
   const stop = async (why: string) => {
     if (stopping) return;
     stopping = true;
-    console.error(`[zulip-mcp] ${why}; shutting down`);
+    diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', `[zulip-mcp] ${why}; shutting down`);
     await server.shutdown();
     filters.stop();
     process.exit(0);
@@ -203,7 +204,7 @@ async function main(): Promise<void> {
 // bin symlink (npx zulip-mcp-server).
 if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((error) => {
-    console.error('Failed to start server:', error);
+    diagnosticError(process.env.ZULIP_STREAMS_MODE === 'subscribed', 'index', 'Failed to start server:', error);
     process.exit(1);
   });
 }

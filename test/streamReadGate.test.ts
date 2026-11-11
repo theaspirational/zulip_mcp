@@ -829,3 +829,152 @@ test('move destination regrant drops the retained source placement instead of le
     assert.equal(adapter.seen.has(999), false, 'source placement must not survive a discarded move snapshot');
   } finally { f.close(); }
 });
+
+
+test('reviewer-gap-probe: revoked last-message metadata cannot cross another subscribed channel', async () => {
+  const f = await fixture();
+  const s = f.server as any, a = f.adapter as any;
+  const outputs: any[] = [];
+  try {
+    s.mcplActive = true;
+    s.grant.has = () => true; s.grant.isFeatureSetActive = () => true;
+    s.conn = { async sendRequest(method: string, params: any) { outputs.push({method,params}); return {results: []}; } };
+    s.channelManager.allChannels.set('zulip:second', { id:'zulip:second', type:'zulip', label:'second', direction:'bidirectional', address: {stream_id:13} });
+    s.channelManager.openChannels.add('zulip:second');
+    let registration = 0, polls = 0;
+    a.zulipClient.callEndpoint = async () => ({ result:'success', subscriptions: registration <= 1 ? streams : [streams[1]] });
+    a.zulipClient.queues = { register: async () => ({queue_id: `q${++registration}`, last_event_id:-1}) };
+    a.zulipClient.events = { retrieve: async () => {
+      if (++polls === 1) return { events: [
+        {id:1,type:'message',message:raw(987654321),flags:[]},
+        {id:2,type:'subscription',op:'remove',stream_ids:[12]},
+      ] };
+      if (polls === 2) return {result:'error',code:'BAD_EVENT_QUEUE_ID'};
+      f.adapter.stopEvents(); return {events:[]};
+    } };
+    f.adapter.startEvents(() => {}, e => s.onSystemEvent(e));
+    for (let n=0; n<30 && polls<3; n++) await new Promise(r=>setTimeout(r,5));
+    assert.equal(polls,3);
+    assert.equal(f.plane.streamReadAllowed(12),false);
+    await s.channelManager.flush();
+    assert.ok(!JSON.stringify(outputs).includes('1700000000'));
+    assert.ok(!JSON.stringify(outputs).includes('2023-11-14'));
+    assert.ok(!JSON.stringify(outputs).includes('SECRET topic'));
+    assert.ok(!JSON.stringify(outputs).includes('987654321'), 'revoked message ID leaked through a gap marker on stream 13');
+  } finally { f.adapter.stopEvents(); s.channelManager.destroy(); f.close(); }
+});
+
+test('all connection notices, catch-up/reconnect, errors, counters, status and host logs omit revoked anchors', async () => {
+  const { ZulipEventLoop } = await import('../src/platforms/zulip-events.ts');
+  const { normalizeMessage } = await import('../src/history.ts');
+  const f = await fixture();
+  const s = f.server as any, a = f.adapter as any;
+  const outputs: any[] = [], logs: unknown[][] = [], notices: any[] = [];
+  const forbidden = ['987654321', '1700000000', '2023-11-14', 'general', 'SECRET topic', 'Ann'];
+  const poison = forbidden.join(' ');
+  const originalError = console.error;
+  console.error = (...args) => { logs.push(args); };
+  const conn = {
+    sendResponse(id: unknown, result: unknown) { outputs.push({ id, result }); },
+    sendError(id: unknown, code: unknown, message: unknown) { outputs.push({ id, code, message }); },
+    async sendRequest(method: string, params: any) {
+      outputs.push({ method, params });
+      return { accepted: true, results: [] };
+    },
+  };
+  const safe = {
+    channelId: 'zulip:second', messageId: '88', author: { id: '8', name: 'Safe author' },
+    timestamp: '2026-01-02T03:04:05.000Z', content: [{ type: 'text', text: 'safe history' }],
+    metadata: { streamId: 13, mentioned: true, topic: 'safe topic' },
+  };
+  try {
+    s.mcplActive = true; s.live = true;
+    s.grant.has = () => true; s.grant.isFeatureSetActive = () => true;
+    s.conn = conn;
+    s.channelManager.allChannels.set('zulip:second', {
+      id: 'zulip:second', type: 'zulip', label: 'second', direction: 'bidirectional', address: { stream_id: 13 },
+    });
+    s.channelManager.openChannels.add('zulip:second');
+    // Real retained stream content and monitoring/tally state precede revocation.
+    a.remember('zulip:general', normalizeMessage(raw(987654321)));
+    await f.runtime.handleToolCall('start_monitoring', { channels: ['general'] });
+    s.delivery.advance('zulip:general', 987654321);
+    s.delivery.markOpen('zulip:general'); s.delivery.markClosed('zulip:general', 12);
+    s.delivery.countMissed('zulip:general', { id: 987654321, text: poison });
+    f.remove();
+    assert.equal(a.seen.has(987654321), false);
+    assert.equal(s.delivery.tally('zulip:general'), undefined);
+    outputs.length = 0; logs.length = 0;
+    f.adapter.discoverChannels = async () => [];
+    // Exercise source-side redaction of every event kind, including raw error text.
+    const loop = new ZulipEventLoop({ streamsMode: 'subscribed', degradedThreshold: 1, sleep: async () => {} });
+    let poll = 0, registration = 0;
+    await loop.start({
+      queues: { async register() { return { queue_id: `q${++registration}`, last_event_id: -1 }; } },
+      events: { async retrieve() {
+        if (++poll === 1) return { events: [{ id: 1, type: 'message', message: raw(987654321) }] };
+        if (poll === 2) return { result: 'error', code: 'BAD_EVENT_QUEUE_ID' };
+        if (poll === 3) throw new Error(poison);
+        loop.stop(); return { events: [] };
+      } },
+    }, () => {}, e => notices.push(e));
+    assert.deepEqual(notices.map(e => e.kind), ['gap', 'degraded', 'recovered']);
+    for (const e of notices) assert.equal(e.metadata, undefined, 'connection source retains no anchor/reason/counter');
+    // A different adapter, retained marker, or recovery aggregate must not bypass
+    // the broadcast boundary. Check all three with deliberately tainted metadata.
+    f.adapter.fetchHistory = async () => ({ messages: [safe], scannedThrough: 88, reachedNewest: true });
+    s.delivery.advance('zulip:second', 80);
+    for (const kind of ['gap', 'degraded', 'recovered'] as const) {
+      await s.onSystemEvent({ kind, text: poison, metadata: {
+        lastMessageId: 987654321, lastMessageTimestamp: 1700000000,
+        streamName: 'general', topic: 'SECRET topic', authorName: 'Ann', reason: poison,
+      } });
+      await s.channelManager.flush();
+    }
+    const markers = outputs.flatMap(o => o.params?.messages ?? []).filter(m => m.metadata?.system);
+    assert.deepEqual(markers.map(m => m.metadata.kind), ['gap', 'degraded', 'recovered']);
+    for (const m of markers) {
+      assert.deepEqual(Object.keys(m.metadata).sort(), ['kind', 'readEpoch', 'system']);
+      assert.ok(!m.content[0].text.includes('recovered from history'), 'no cross-channel recovery totals');
+    }
+    // Actual reconnect catch-up block on the destination, not a fabricated notice.
+    s.channelManager.openChannels.delete('zulip:second');
+    s.sweepAnchors.set('zulip:second', 80); s.sweepDone = false;
+    await s.runReconnectSweep();
+    assert.ok(outputs.some(o => o.method === 'push/event' && o.params.tags?.includes('zulip:missed')));
+    // Errors may contain revoked data even when the requested destination is safe.
+    f.adapter.fetchHistory = async () => { throw new Error(poison); };
+    await s.catchUpClosedChannel('zulip:second', true, 80);
+    for (const [methodName, params] of [
+      ['tools/call', { name: 'filters_get', arguments: {} }],
+      ['tools/call', { name: 'channel_missed', arguments: { channel: 'second' } }],
+      ['resources/read', { uri: 'zulip://monitoring/status' }],
+      ['resources/read', { uri: 'zulip://unread/summary' }],
+      [`unknown/${poison}`, {}],
+    ] as const) await s.handleRequest(conn, { id: 1, method: methodName, params });
+    // First-DM system affordance uses only the DM's own sender, never a stream.
+    s.channelManager.allChannels.set('zulip:dm:8', {
+      id: 'zulip:dm:8', type: 'zulip', label: 'Safe DM', direction: 'bidirectional', address: { user_ids: [8] },
+    });
+    s.channelManager.openChannels.add('zulip:dm:8');
+    await s.onIncoming({ ...safe, channelId: 'zulip:dm:8', messageId: '89', metadata: { isDM: true } });
+    await s.channelManager.flush();
+    assert.ok(outputs.some(o => JSON.stringify(o).includes('<system>Direct message from Safe author')));
+    // Host errors and refusal reasons are untrusted diagnostic input too.
+    s.conn = { ...conn, async sendRequest(method: string, params: any) {
+      outputs.push({ method, params }); return { accepted: false, reason: poison };
+    } };
+    await s.pushEvent(safe, 'safe-refused-event');
+    s.conn = conn;
+    s.channelManager.openChannels.add('zulip:second');
+    f.adapter.fetchContext = async () => { throw new Error(poison); };
+    await s.contextProvider.handleBeforeInference({});
+    await s.handleRequest(conn, { id: 1, method: 'tools/call', params: { name: 'refresh_channels', arguments: {} } });
+    assert.ok(logs.length > 0, 'diagnostic branches were exercised');
+    const serialized = JSON.stringify({ outputs, logs, notices });
+    for (const token of forbidden) assert.ok(!serialized.includes(token), `revoked token escaped: ${token}`);
+  } finally {
+    console.error = originalError;
+    s.channelManager.destroy(); f.close();
+  }
+});

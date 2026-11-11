@@ -564,6 +564,12 @@ fresh authorized message response, not unscoped cached poll records.
 `fetch_attachment` also requires `message_id` for a currently readable message
 containing the attachment path; unscoped upload URLs are refused.
 
+Connection-wide gap/degraded/recovered notices in subscribed mode carry only
+the condition: no message anchors, timestamps, stream/topic names, error text
+or recovery totals. Catch-up content still uses source-ID/epoch authorization.
+Host-visible diagnostic logs omit details in this mode; default-mode notices
+and diagnostics are unchanged.
+
 Subscriptions are loaded with `GET /users/me/subscriptions` at startup and
 reloaded after queue registration/replacement. Unknown state fails closed for
 **all** streams, including explicitly allowlisted streams. Reads time out after

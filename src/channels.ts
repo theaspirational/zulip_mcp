@@ -10,6 +10,8 @@
  * and channel listing.
  */
 
+import { unanchoredSystemEvent } from './system-events.js';
+import { diagnosticError } from './diagnostics.js';
 import { ERR_UNKNOWN_CHANNEL } from '@animalabs/mcpl-core';
 import type {
   ChannelDescriptor,
@@ -73,6 +75,8 @@ export interface RegisterAdditionalResult {
 }
 
 export interface ChannelManagerHooks {
+  /** Connection notices and stderr must not serialize unscoped stream data. */
+  subscribedMode?: boolean;
   /** Rechecked for discovery, retained backlog, and list output alike. */
   visible?: (descriptor: ChannelDescriptor) => boolean;
   formatMessageId?: (id: number) => number | string;
@@ -156,7 +160,7 @@ export class ChannelManager {
    */
   async registerChannels(): Promise<void> {
     if (!this.grant.has('channels.register')) {
-      console.error('channels.register not granted; skipping channel registration');
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', 'channels.register not granted; skipping channel registration');
       return;
     }
 
@@ -171,7 +175,7 @@ export class ChannelManager {
           discovered.set(descriptor.id, descriptor);
         }
       } catch (error) {
-        console.error(`Failed to discover ${adapter.type} channels:`, error);
+        diagnosticError(!!this.hooks.subscribedMode, 'channels', `Failed to discover ${adapter.type} channels:`, error);
       }
     }
 
@@ -185,13 +189,13 @@ export class ChannelManager {
         if (descriptor && (!this.hooks.visible || this.hooks.visible(descriptor))) this.allChannels.set(id, descriptor);
       }
       const rejected = channels.length - accepted.size;
-      console.error(
+      diagnosticError(!!this.hooks.subscribedMode, 'channels',
         `Registered ${accepted.size} channels with host` +
           (rejected > 0 ? ` (${rejected} rejected)` : ''),
       );
     } catch (error) {
       // The registration never landed, so no descriptor is registered.
-      console.error('Failed to register channels:', error);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', 'Failed to register channels:', error);
     }
   }
 
@@ -250,7 +254,7 @@ export class ChannelManager {
     }
     if (added.length === 0) return { announced: [], local: [], refused: refusedNow };
     if (!this.grant.has('channels.register')) {
-      console.error(`channels.register not granted; ${added.length} new channel(s) stay unregistered`);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', `channels.register not granted; ${added.length} new channel(s) stay unregistered`);
       return { announced: [], local: [], refused: refusedNow, reason: 'channels.register is not in the grant' };
     }
 
@@ -286,7 +290,7 @@ export class ChannelManager {
               // The host accepted this one earlier and is now refusing it.
               // Unregistering it here would leave delivery running against a
               // channel the registry no longer has; keep it and say so.
-              console.error(`host refused ${d.id}, which it had already accepted; keeping it registered`);
+              diagnosticError(!!this.hooks.subscribedMode, 'channels', `host refused ${d.id}, which it had already accepted; keeping it registered`);
               announced.push(d.id);
               break;
             }
@@ -310,11 +314,11 @@ export class ChannelManager {
             local.push(d.id);
         }
       }
-      if (refusedNow.length > 0) console.error(`host refused ${refusedNow.length} channel(s): ${refusedNow.join(', ')}`);
+      if (refusedNow.length > 0) diagnosticError(!!this.hooks.subscribedMode, 'channels', `host refused ${refusedNow.length} channel(s): ${refusedNow.join(', ')}`);
       return { announced, local, refused: refusedNow };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      console.error(`Failed to announce ${added.length} channel(s) (${reason}); they stay usable here and are re-announced on the next refresh`);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', `Failed to announce ${added.length} channel(s) (${reason}); they stay usable here and are re-announced on the next refresh`);
       const local: string[] = [];
       for (const d of added) {
         if (this.hooks.visible && !this.hooks.visible(d)) {
@@ -346,7 +350,7 @@ export class ChannelManager {
    */
   confirmAnnounced(channelId: string): void {
     if (this.unannounced.delete(channelId)) {
-      console.error(`[channels] ${channelId} confirmed by the host acting on it; dropping it from the announcement backlog`);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', `[channels] ${channelId} confirmed by the host acting on it; dropping it from the announcement backlog`);
     }
     this.refused.delete(channelId);
   }
@@ -367,7 +371,7 @@ export class ChannelManager {
     while (this.unannounced.size > MAX_PENDING_ANNOUNCEMENTS) {
       const oldest = this.unannounced.keys().next().value as string;
       this.unannounced.delete(oldest);
-      console.error(`${MAX_PENDING_ANNOUNCEMENTS} channels are waiting to be announced; ${oldest} will not be retried again (it stays usable here)`);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', `${MAX_PENDING_ANNOUNCEMENTS} channels are waiting to be announced; ${oldest} will not be retried again (it stays usable here)`);
     }
   }
 
@@ -710,12 +714,13 @@ export class ChannelManager {
    * clobber the thread/topic routing hints of the real conversation.
    */
   broadcastSystemEvent(platformType: string, event: PlatformSystemEvent): void {
+    if (this.hooks.subscribedMode) event = unanchoredSystemEvent(event);
     const prefix = `${platformType}:`;
     const targets = Array.from(this.openChannels).filter(id => id.startsWith(prefix));
 
     if (targets.length === 0) {
       // No open channel to carry the marker — at least leave a trace.
-      console.error(`[system:${platformType}] ${event.kind}: ${event.text} (no open channels to notify)`);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', `[system:${platformType}] ${event.kind}: ${event.text} (no open channels to notify)`);
       return;
     }
 
@@ -1005,7 +1010,7 @@ export class ChannelManager {
     // a reduction must be respected immediately (§6.7), and holding messages
     // for a grant that may never arrive would deliver them out of time.
     if (!this.grant.has('channels.incoming')) {
-      console.error(
+      diagnosticError(!!this.hooks.subscribedMode, 'channels',
         `channels.incoming not granted; dropping ${allMessages.length} inbound message(s)`,
       );
       for (const [channelId, messages] of groupByChannel(allMessages)) this.report(this.hooks.onWithheld, channelId, messages);
@@ -1018,7 +1023,7 @@ export class ChannelManager {
     } catch (error) {
       const retry = queued.filter((q) => q.attempts + 1 < MAX_BATCH_ATTEMPTS && (!this.hooks.deliverable || this.hooks.deliverable(q.message)));
       const givenUp = queued.filter((q) => q.attempts + 1 >= MAX_BATCH_ATTEMPTS).map((q) => q.message);
-      console.error(
+      diagnosticError(!!this.hooks.subscribedMode, 'channels',
         `Failed to send ${allMessages.length} incoming message(s) to host` +
           (retry.length > 0 ? `; retrying ${retry.length}` : '') +
           (givenUp.length > 0 ? `; giving up on ${givenUp.length} (held below the watermark for a later replay)` : '') +
@@ -1057,13 +1062,13 @@ export class ChannelManager {
       byChannel.set(m.channelId, entry);
     }
     if (rejected > 0) {
-      console.error(`Host rejected ${rejected} of ${allMessages.length} incoming message(s); they are not delivered`);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', `Host rejected ${rejected} of ${allMessages.length} incoming message(s); they are not delivered`);
     }
     for (const [channelId, entry] of byChannel) {
       try {
         this.hooks.onDelivered?.(channelId, entry.accepted, entry.rejected);
       } catch (error) {
-        console.error('onDelivered hook failed:', (error as Error).message ?? error);
+        diagnosticError(!!this.hooks.subscribedMode, 'channels', 'onDelivered hook failed:', (error as Error).message ?? error);
       }
     }
   }
@@ -1077,7 +1082,7 @@ export class ChannelManager {
     try {
       hook(channelId, messages);
     } catch (error) {
-      console.error('channel manager hook failed:', (error as Error).message ?? error);
+      diagnosticError(!!this.hooks.subscribedMode, 'channels', 'channel manager hook failed:', (error as Error).message ?? error);
     }
   }
 

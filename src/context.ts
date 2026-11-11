@@ -6,6 +6,7 @@
  * PlatformAdapter per channel.
  */
 
+import { diagnosticError } from './diagnostics.js';
 import type {
   ContextBeforeInferenceParams,
   ContextBeforeInferenceResult,
@@ -24,6 +25,7 @@ const POSITION_CAPABILITY: Record<ContextInjection['position'], string> = {
 };
 
 export interface ContextProviderOptions {
+  privateDiagnostics?: boolean;
   /** Open channels for which nothing is injected (a muted stream). */
   excludeChannel?: (channelId: string) => boolean;
   captureAuthorization?: (channelId: string) => () => boolean;
@@ -31,6 +33,7 @@ export interface ContextProviderOptions {
 
 export class ContextProvider {
   private historySize: number;
+  private readonly privateDiagnostics: boolean;
   private readonly captureAuthorization: (channelId: string) => () => boolean;
   private readonly excludeChannel: (channelId: string) => boolean;
 
@@ -40,6 +43,7 @@ export class ContextProvider {
     historySize?: number,
     options: ContextProviderOptions = {},
   ) {
+    this.privateDiagnostics = options.privateDiagnostics ?? false;
     this.historySize = historySize ?? DEFAULT_HISTORY_SIZE;
     this.excludeChannel = options.excludeChannel ?? (() => false);
     this.captureAuthorization = options.captureAuthorization ?? (id => () => !this.excludeChannel(id));
@@ -81,7 +85,7 @@ export class ContextProvider {
         );
         if (injection) {
           if (!this.grant.has(POSITION_CAPABILITY[injection.position])) {
-            console.error(
+            diagnosticError(this.privateDiagnostics, 'context',
               `Dropping ${injection.position} injection for ${channelId}: ` +
                 `${POSITION_CAPABILITY[injection.position]} not granted`,
             );
@@ -92,7 +96,7 @@ export class ContextProvider {
           contributingTypes.add(adapter.type);
         }
       } catch (error) {
-        console.error(`Failed to get context for channel ${channelId}:`, error);
+        diagnosticError(this.privateDiagnostics, 'context', `Failed to get context for channel ${channelId}:`, error);
       }
     }
 

@@ -3,6 +3,7 @@
  * (attachments), bot identity for the self-filter, and startup subscriptions.
  */
 
+import { diagnosticError } from './diagnostics.js';
 import { MessageIds } from './message-ids.js';
 
 import { readFileSync } from 'node:fs';
@@ -81,7 +82,7 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
       if (!email && parsed.email) email = parsed.email;
       if (!apiKey && parsed.key) apiKey = parsed.key;
     } catch (err) {
-      console.error("Failed to parse zuliprc for direct-HTTP credentials:", err);
+      diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', "Failed to parse zuliprc for direct-HTTP credentials:", err);
     }
   }
 
@@ -100,10 +101,10 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
     const profile = await client.users.me.getProfile();
     if (profile && typeof profile.user_id === "number") {
       selfUserId = profile.user_id;
-      console.error(`Zulip MCP bot user_id: ${selfUserId}`);
+      diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', `Zulip MCP bot user_id: ${selfUserId}`);
     }
   } catch (err) {
-    console.error("Failed to fetch bot profile for self-filter:", err);
+    diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', "Failed to fetch bot profile for self-filter:", err);
   }
 
   // The realm's upload cap, so the outbound ceiling is what the server will
@@ -114,7 +115,7 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
     const mib = settings?.max_file_upload_size_mib;
     if (typeof mib === "number" && Number.isFinite(mib) && mib > 0) maxUploadBytes = Math.floor(mib * 1024 * 1024);
   } catch (err) {
-    console.error("Failed to read realm server settings (upload cap):", err);
+    diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', "Failed to read realm server settings (upload cap):", err);
   }
 
   // Auto-subscribe to streams named in ZULIP_SUBSCRIBE (comma-separated).
@@ -129,13 +130,13 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
         });
         const subscribed = result?.subscribed ?? {};
         const already = result?.already_subscribed ?? {};
-        console.error(`Zulip MCP auto-subscribed: new=${JSON.stringify(subscribed)} already=${JSON.stringify(already)}`);
+        diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', `Zulip MCP auto-subscribed: new=${JSON.stringify(subscribed)} already=${JSON.stringify(already)}`);
       } catch (err) {
-        console.error(`Zulip MCP auto-subscribe failed for [${streams.join(", ")}]:`, err);
+        diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', `Zulip MCP auto-subscribe failed for [${streams.join(", ")}]:`, err);
       }
     }
   }
 
-  console.error(`Zulip MCP initialized with session: ${sessionId}`);
+  diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', `Zulip MCP initialized with session: ${sessionId}`);
   return { client, selfUserId, realm, authHeader, sessionId, maxUploadBytes };
 }
