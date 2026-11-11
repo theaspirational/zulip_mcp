@@ -73,6 +73,8 @@ export interface RegisterAdditionalResult {
 }
 
 export interface ChannelManagerHooks {
+  /** Rechecked for discovery, retained backlog, and list output alike. */
+  visible?: (descriptor: ChannelDescriptor) => boolean;
   formatMessageId?: (id: number) => number | string;
   /**
    * Called per channel after one `channels/incoming` round trip with what
@@ -164,6 +166,7 @@ export class ChannelManager {
     for (const adapter of this.adapters.values()) {
       try {
         for (const descriptor of await adapter.discoverChannels()) {
+          if (this.hooks.visible && !this.hooks.visible(descriptor)) continue;
           channels.push(descriptor);
           discovered.set(descriptor.id, descriptor);
         }
@@ -216,6 +219,7 @@ export class ChannelManager {
      *  verdict can be applied without inventing a state it never had. */
     const before = new Map<string, 'confirmed' | 'pending' | 'refused' | 'new'>();
     for (const d of descriptors) {
+      if (this.hooks.visible && !this.hooks.visible(d)) continue;
       if (this.announcing.has(d.id)) continue; // already going out
       if (this.refused.has(d.id)) {
         if (!opts.retryRefused) {
@@ -239,7 +243,7 @@ export class ChannelManager {
     if (opts.retryBacklog) {
       const queued = new Set(added.map((d) => d.id));
       for (const [id, d] of this.unannounced) {
-        if (queued.has(id) || this.announcing.has(id)) continue;
+        if (queued.has(id) || this.announcing.has(id) || (this.hooks.visible && !this.hooks.visible(d))) continue;
         before.set(id, 'pending');
         added.push(d);
       }
@@ -487,7 +491,7 @@ export class ChannelManager {
    */
   listChannels(): ChannelsListResult {
     if (!this.grant.has('channels.register')) throw capabilityDenied('channels.register');
-    return { channels: Array.from(this.allChannels.values()) };
+    return { channels: Array.from(this.allChannels.values()).filter(d => !this.hooks.visible || this.hooks.visible(d)) };
   }
 
   /**

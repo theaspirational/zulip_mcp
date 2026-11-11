@@ -10,6 +10,7 @@ import { ZulipMcplServer } from '../src/server.ts';
 import { MessageIds } from '../src/message-ids.ts';
 import { STREAM_READ_TOOLS, NON_STREAM_READ_TOOLS, CONDITIONAL_STREAM_READ_TOOLS } from '../src/stream-read-gate.ts';
 import { toolDefinitions } from '../src/tools.ts';
+import { method } from '@animalabs/mcpl-core';
 
 const streams = [{ stream_id: 12, name: 'general' }, { stream_id: 13, name: 'second' }];
 const path = '/user_uploads/1/ab/cd/file.txt';
@@ -236,5 +237,185 @@ test('refresh_channels rechecks stream IDs after awaiting host registration', as
     const result = await pending;
     assert.equal(result.isError, true);
     assert.ok(!JSON.stringify(result).includes('zulip:general'));
+  } finally { f.close(); }
+});
+
+const HIDDEN = { stream_id: 987654321, name: 'forbidden-stream-needle' };
+const hiddenId = `zulip:${HIDDEN.name}`;
+const hiddenDescriptor = {
+  id: hiddenId, type: 'zulip', label: HIDDEN.name, direction: 'bidirectional',
+  address: { stream_id: HIDDEN.stream_id, stream_name: HIDDEN.name },
+} as const;
+function assertRedacted(value: unknown, surface: string) {
+  const text = JSON.stringify(value);
+  assert.ok(!text.includes(HIDDEN.name), `${surface}: leaked name: ${text}`);
+  assert.ok(!text.includes(String(HIDDEN.stream_id)), `${surface}: leaked immutable ID: ${text}`);
+}
+async function emissionFixture(unknown: boolean) {
+  const f = await fixture();
+  const server = f.server as any;
+  const outputs: any[] = [];
+  server.mcplActive = true;
+  server.grant.has = () => true;
+  server.grant.isFeatureSetActive = () => true;
+  const conn = {
+    sendResponse(id: unknown, result: unknown) { outputs.push({ id, result }); },
+    sendError(id: unknown, code: unknown, message: unknown, data: unknown) { outputs.push({ id, code, message, data }); },
+    async sendRequest(method: string, params: unknown) { outputs.push({ method, params }); return { results: [] }; },
+  };
+  f.plane.subscriptions.apply({ op: 'add', subscriptions: [HIDDEN] });
+  f.plane.update(current => ({ ...current, reactionChannels: [hiddenId] }));
+  server.conn = conn;
+  await server.channelManager.registerAdditional([hiddenDescriptor]); // intentionally unconfirmed
+  assert.equal(server.channelManager.unannounced.has(hiddenId), true, 'fixture must retain an actual retry backlog');
+  server.channelManager.openChannels.add(hiddenId);
+  const seed = () => (f.runtime as any).monitoredChannels.set(HIDDEN.name, {
+    streamId: HIDDEN.stream_id, channelName: HIDDEN.name, lastReadMessageId: 0, subscribed: true,
+  });
+  seed();
+  // Only retained metadata knows this channel after removal. Discovery is empty.
+  f.adapter.discoverChannels = async () => [];
+  if (unknown) {
+    f.client.callEndpoint = async () => ({ result: 'error' } as any);
+    await f.plane.subscriptions.refresh(true);
+    assert.equal(f.plane.subscriptions.status().known, false);
+  } else f.plane.subscriptions.apply({ op: 'remove', stream_ids: [HIDDEN.stream_id] });
+  await new Promise(resolve => setImmediate(resolve));
+  outputs.length = 0;
+  return { ...f, server, outputs, conn, seed };
+}
+
+for (const unknown of [false, true]) {
+  test(`reviewer backlog/list probe, unknown=${unknown}`, async () => {
+    const f = await emissionFixture(unknown);
+    try {
+      assertRedacted(await f.server.applyFilterChange(), 'refresh result');
+      assertRedacted(await f.server.channelManager.registerAdditional([], { retryBacklog: true }), 'registration result');
+      assert.equal(f.outputs.length, 0, 'unauthorized backlog must never be offered again');
+      await f.server.handleRequest(f.conn, { id: 1, method: method.CHANNELS_LIST });
+      assert.deepEqual(f.outputs[0].result.channels, []);
+      assertRedacted(f.outputs, 'retained descriptors');
+    } finally { f.server.channelManager.destroy(); f.close(); }
+  });
+
+  test(`reviewer stop_monitoring probe, unknown=${unknown}`, async () => {
+    const f = await emissionFixture(unknown);
+    try {
+      const partial = await f.runtime.handleToolCall('stop_monitoring', { channels: ['not-monitored'] });
+      assert.equal(partial.still_monitoring_count, 1);
+      assertRedacted(partial, 'still_monitoring');
+      const targeted = await f.runtime.handleToolCall('stop_monitoring', { channels: [HIDDEN.name] });
+      assert.equal(targeted.stopped_count, 1);
+      assertRedacted(targeted, 'stopped_channels');
+      f.seed();
+      const all = await f.runtime.handleToolCall('stop_monitoring', {});
+      assert.equal(all.stopped_count, 1);
+      assert.equal((f.runtime as any).monitoredChannels.size, 0, 'cleanup must work without read authority');
+      assertRedacted(all, 'stop all');
+    } finally { f.server.channelManager.destroy(); f.close(); }
+  });
+}
+
+test('emission inventory walk: no unauthorized stream name or ID on any host/agent surface', async () => {
+  for (const unknown of [false, true]) {
+    const f = await emissionFixture(unknown);
+    try {
+      const message = {
+        channelId: hiddenId, messageId: '77', author: { id: '7', name: 'Ann' },
+        timestamp: '2023-11-14T22:13:20Z', content: [{ type: 'text', text: HIDDEN.name }],
+        metadata: { streamId: HIDDEN.stream_id, mentioned: true },
+      };
+      f.client.messages.getById = async () => ({ result: 'success', message: raw(77, HIDDEN.stream_id, HIDDEN.name) });
+      (f.client.messages as any).deleteById = async () => ({ result: 'success', msg: HIDDEN.name });
+      (f.runtime as any).zulipClient.reactions = {
+        add: async () => ({ result: 'success', msg: HIDDEN.name }),
+        remove: async () => ({ result: 'success', msg: HIDDEN.name }),
+      };
+      (f.runtime as any).zulipClient.emojis = { retrieve: async () => ({ result: 'success', emoji: {} }) };
+      (f.client.users as any).me = { subscriptions: {
+        add: async () => ({ result: 'success', subscribed: { self: [HIDDEN.name] }, msg: HIDDEN.name }),
+        remove: async () => ({ result: 'success', removed: [HIDDEN.name], not_removed: [], msg: HIDDEN.name }),
+      } };
+      f.adapter.fetchContext = async () => ({ namespace: hiddenId, position: 'beforeUser', content: HIDDEN.name });
+      await f.server.registerChannelsWithHost([hiddenDescriptor]);
+      // Each descriptor variant and removal IDs have independent wire projections.
+      for (const params of [{ added: [hiddenDescriptor] }, { updated: [hiddenDescriptor] }, { removed: [hiddenId] }])
+        await f.server.channelsChangedWithHost(params);
+      await f.server.sendIncomingToHost([message]);
+      await f.server.pushEvent(message, 'event');
+      await f.server.pushEvent({ ...message, metadata: { system: true } }, 'system-event');
+      f.server.channelManager.onIncomingMessage(hiddenId, message);
+      f.server.channelManager.broadcastSystemEvent('zulip', { kind: 'degraded', text: 'Connection degraded' });
+      await f.server.channelManager.flush();
+      await f.server.onSystemEvent({ kind: 'degraded', text: 'Connection degraded' });
+      await f.server.channelManager.flush();
+      await f.server.onIncoming(message);
+      await f.server.onReaction({ channelId: hiddenId, streamId: HIDDEN.stream_id });
+      await f.server.onMessageChange({ channelId: hiddenId, streamId: HIDDEN.stream_id, kind: 'edit', previousTopic: null, movedToChannelId: null });
+      const request = async (method: string, params: any = {}) => {
+        await f.server.handleRequest(f.conn, { id: 1, method, params });
+        assertRedacted(f.outputs, `${method}, unknown=${unknown}`);
+      };
+      await request(method.CHANNELS_LIST);
+      await request(method.CHANNELS_OPEN, { channelId: hiddenId, type: 'zulip', address: hiddenDescriptor.address, history: { limit: 10 } });
+      await request(method.CONTEXT_BEFORE_INFERENCE);
+      await request(method.CHANNELS_PUBLISH, { channelId: hiddenId, content: [] });
+      await request(method.CHANNELS_ACKNOWLEDGE, { channelId: hiddenId, messageId: 'acme:77' });
+      await request(method.CHANNELS_TYPING, { channelId: hiddenId });
+      await request(method.CHANNELS_CLOSE, { channelId: hiddenId });
+      const checkpoint = f.server.stateTracker.createCheckpoint();
+      f.server.stateTracker.recordSent('77', hiddenId, HIDDEN.name);
+      await request(method.STATE_ROLLBACK, { featureSet: 'zulip.messaging', checkpoint });
+      await request('resources/list');
+      for (const uri of ['zulip://unread/summary', 'zulip://monitoring/status', `zulip://channel/${HIDDEN.name}/unread`, `zulip://invalid/${HIDDEN.name}`])
+        await request('resources/read', { uri });
+      // Static protocol metadata contains no stream-derived state.
+      for (const name of ['ping', 'tools/list', 'prompts/list', method.MCPL_MANIFEST, `unknown/${HIDDEN.name}`]) await request(name);
+      const args: Record<string, any> = {
+        ...argumentsFor,
+        start_monitoring: { channels: [HIDDEN.name] }, stop_monitoring: { channels: [HIDDEN.name] },
+        get_channel_history: { channel: HIDDEN.name }, get_unread_messages: { channels: [HIDDEN.name] },
+        fetch_history: { channel: HIDDEN.name }, get_stream_topics: { stream_id: HIDDEN.stream_id },
+        send_message: { type: 'stream', to: HIDDEN.name, content: 'hello' },
+        send_poll: { type: 'stream', to: HIDDEN.name, topic: 'T', question: 'Q?', options: ['Yes', 'No'] },
+        send_dm: { to: ['7'], content: 'hello' },
+        listen: { channels: [HIDDEN.name] }, unlisten: { channels: [HIDDEN.name] },
+        mute_channel: { channel: HIDDEN.name }, unmute_channel: { channel: HIDDEN.name },
+        set_reaction_visibility: { channel: hiddenId, visible: true },
+        filters_update: { addStreams: [HIDDEN.name] }, channel_missed: { channel: HIDDEN.name },
+        delete_message: { message_id: 'acme:77' }, add_reaction: { message_id: 'acme:77', emoji_name: 'eyes' },
+        remove_reaction: { message_id: 'acme:77', emoji_name: 'eyes' },
+        upload_file: {}, list_users: {}, find_user: { query: 'Ann' }, get_user_profile: { user_id: 7 },
+        list_emojis: {},
+      };
+      for (const { name } of toolDefinitions) {
+        assert.ok(args[name], `missing emission audit arguments: ${name}`);
+        f.seed();
+        await request('tools/call', { name, arguments: args[name] });
+      }
+      assertRedacted(f.outputs, `entire emission inventory, unknown=${unknown}`);
+    } finally { f.server.channelManager.destroy(); f.close(); }
+  }
+});
+
+
+test('wire boundary rechecks reads after an awaited resource helper has returned', async () => {
+  const f = await fixture();
+  const outputs: any[] = [];
+  try {
+    await f.runtime.handleToolCall('start_monitoring', { channels: ['general'] });
+    const original = f.runtime.readResource.bind(f.runtime);
+    f.runtime.readResource = async uri => {
+      const result = await original(uri);
+      f.remove(); // A helper's own final-return check is no longer sufficient.
+      return result;
+    };
+    await (f.server as any).handleRequest({
+      sendResponse(_id: unknown, result: unknown) { outputs.push({ result }); },
+      sendError(_id: unknown, _code: unknown, error: unknown) { outputs.push({ error }); },
+    }, { id: 1, method: 'resources/read', params: { uri: 'zulip://monitoring/status' } });
+    assert.equal(outputs.length, 1);
+    assert.ok(outputs[0].error);
+    assert.ok(!JSON.stringify(outputs).includes('general'));
   } finally { f.close(); }
 });

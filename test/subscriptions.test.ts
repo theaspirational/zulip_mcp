@@ -194,7 +194,7 @@ test('history tools and resources refuse unsubscribed streams, including tagged 
     const beforeResource = lists;
     f.plane.subscriptions.apply({ op: 'remove', subscriptions: [general] });
     await runtime.readResource('zulip://unread/summary');
-    await runtime.readResource('zulip://channel/general/unread');
+    await assert.rejects(runtime.readResource('zulip://channel/general/unread'), /subscribed-stream policy/);
     assert.equal(lists, beforeResource, 'legacy resources cannot read a removed stream');
     f.plane.subscriptions.apply({ op: 'add', subscriptions: [general] });
     // A stale/nonsensical response must not smuggle a different public stream through a permitted narrow.

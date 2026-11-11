@@ -475,9 +475,9 @@ export class ZulipToolRuntime {
             });
           } catch (error) {
             results.push({
-              channel: channelName,
+              ...(this.streamGate ? {} : { channel: channelName }),
               status: "error",
-              error: error instanceof Error ? error.message : String(error),
+              error: this.streamGate ? "Read refused by subscribed-stream policy" : error instanceof Error ? error.message : String(error),
             });
           }
         }
@@ -501,7 +501,7 @@ export class ZulipToolRuntime {
           this.saveState();
           return {
             message: "Stopped monitoring all channels",
-            stopped_channels: stopped,
+            ...(this.streamGate ? { stopped_count: stopped.length } : { stopped_channels: stopped }),
           };
         }
 
@@ -516,8 +516,8 @@ export class ZulipToolRuntime {
         this.saveState();
 
         return {
-          stopped_channels: stopped,
-          still_monitoring: Array.from(monitoredChannels.keys()),
+          ...(this.streamGate ? { stopped_count: stopped.length } : { stopped_channels: stopped }),
+          ...(this.streamGate ? { still_monitoring_count: monitoredChannels.size } : { still_monitoring: Array.from(monitoredChannels.keys()) }),
         };
       }
 
@@ -538,6 +538,12 @@ export class ZulipToolRuntime {
           const registration = result?.result === "success" && joined.length > 0
             ? await this.onSubscribed?.(joined)
             : undefined;
+          if (this.streamGate) return {
+            result: result?.result,
+            requested_count: channels.length,
+            unauthorized_count: unauthorized.length,
+            registered_count: registration?.announced.length ?? 0,
+          };
           return {
             result: result?.result,
             subscribed: result?.subscribed ?? {},
@@ -559,7 +565,7 @@ export class ZulipToolRuntime {
           };
         } catch (error) {
           return {
-            error: error instanceof Error ? error.message : String(error),
+            error: this.streamGate ? "Operation failed" : error instanceof Error ? error.message : String(error),
           };
         }
       }
@@ -573,6 +579,11 @@ export class ZulipToolRuntime {
           const result = await zulipClient.users.me.subscriptions.remove({
             subscriptions: JSON.stringify(channels),
           });
+          if (this.streamGate) return {
+            result: result?.result,
+            removed_count: Array.isArray(result?.removed) ? result.removed.length : 0,
+            not_removed_count: Array.isArray(result?.not_removed) ? result.not_removed.length : 0,
+          };
           return {
             result: result?.result,
             removed: result?.removed ?? [],
@@ -581,7 +592,7 @@ export class ZulipToolRuntime {
           };
         } catch (error) {
           return {
-            error: error instanceof Error ? error.message : String(error),
+            error: this.streamGate ? "Operation failed" : error instanceof Error ? error.message : String(error),
           };
         }
       }
@@ -693,6 +704,7 @@ export class ZulipToolRuntime {
           const state = monitoredChannels.get(channelName);
 
           if (!state) {
+            if (this.streamGate) this.streamGate.named(channelName);
             channelResults.push({
               channel: channelName,
               status: "not_monitored",
@@ -733,9 +745,9 @@ export class ZulipToolRuntime {
             });
           } catch (error) {
             channelResults.push({
-              channel: channelName,
+              ...(this.streamGate ? {} : { channel: channelName }),
               status: "error",
-              error: error instanceof Error ? error.message : String(error),
+              error: this.streamGate ? "Read refused by subscribed-stream policy" : error instanceof Error ? error.message : String(error),
             });
           }
         }
@@ -809,6 +821,11 @@ export class ZulipToolRuntime {
           if (last?.result === "error") throw new Error(last.msg ?? "Zulip refused the message");
           ids.push(last.id);
           this.onSent?.({ messageId: String(last.id), channelId, content: chunk });
+        }
+        if (this.streamGate && ["stream", "channel"].includes(args.type)) {
+          if (reply) this.streamGate.recheck();
+          else if (typeof args.to === "number") this.streamGate.assert(args.to);
+          else this.streamGate.named(String(args.to));
         }
         return {
           ...last,
@@ -1005,7 +1022,7 @@ export class ZulipToolRuntime {
             message_id: args.message_id,
           });
           assertApiSuccess(result, `deleting message ${this.messageIds.format(args.message_id)}`);
-          return result;
+          return this.streamGate ? { deleted_count: 1 } : result;
         } catch (err) {
           this.onDeleteFailed?.(String(args.message_id));
           throw err;
@@ -1091,14 +1108,14 @@ export class ZulipToolRuntime {
         const emoji = await this.resolveEmoji(String(args.emoji_name ?? ""));
         const result = await zulipClient.reactions.add({ message_id: args.message_id, ...emoji });
         if (result?.result === "error") throw new Error(result.msg ?? "Zulip refused the reaction");
-        return result;
+        return this.streamGate ? { updated_count: 1 } : result;
       }
 
       case "remove_reaction": {
         const emoji = await this.resolveEmoji(String(args.emoji_name ?? ""));
         const result = await zulipClient.reactions.remove({ message_id: args.message_id, ...emoji });
         if (result?.result === "error") throw new Error(result.msg ?? "Zulip refused removing the reaction");
-        return result;
+        return this.streamGate ? { updated_count: 1 } : result;
       }
 
       case "list_emojis": {
@@ -1386,6 +1403,10 @@ export class ZulipToolRuntime {
     if (channelMatch) {
       const channelName = channelMatch[1];
       const state = monitoredChannels.get(channelName);
+      if (this.streamGate) {
+        if (state) this.streamGate.assert(state.streamId);
+        else this.streamGate.named(channelName);
+      }
 
       if (!state) {
         return { contents: [{ uri, mimeType: "text/plain", text: `Channel "${channelName}" is not being monitored` }] };
@@ -1409,7 +1430,7 @@ export class ZulipToolRuntime {
 
         return { contents: [{ uri, mimeType: "text/plain", text }] };
       } catch (error) {
-        return { contents: [{ uri, mimeType: "text/plain", text: `Error checking #${channelName}: ${error}` }] };
+        return { contents: [{ uri, mimeType: "text/plain", text: this.streamGate ? 'Unable to check unread messages' : `Error checking #${channelName}: ${error}` }] };
       }
     }
 

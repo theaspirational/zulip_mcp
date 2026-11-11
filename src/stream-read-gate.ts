@@ -32,6 +32,18 @@ export class StreamReadGate {
   constructor(private readonly policy: StreamReadPolicy) {}
 
   allowed(id: number | undefined): boolean { return this.policy.allows(id); }
+  /** Synchronous output projection: retained state is not read authority. */
+  select<T>(items: T[], id: (item: T) => number | undefined): T[] {
+    return items.filter(item => {
+      const streamId = id(item);
+      if (!this.allowed(streamId)) return false;
+      this.assert(streamId);
+      return true;
+    });
+  }
+  visibleNames(names: string[]): string[] {
+    return this.select(names, name => this.policy.resolveName(name));
+  }
   assert(id: number | undefined): void {
     if (id === undefined || !this.allowed(id)) throw new Error('Read refused by subscribed-stream policy');
     this.reads.getStore()?.add(id);

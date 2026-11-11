@@ -3747,8 +3747,13 @@ test('subscription changes announce a newly deliverable private channel before a
     assert.deepEqual(status.effectiveSubscribedStreams, [{ id: 7, name: 'general' }, { id: 8, name: 'private' }]);
     plane.subscriptions.apply({ op: 'remove', subscriptions: [{ stream_id: 8, name: 'private' }] });
     assert.deepEqual((await call()).effectiveSubscribedStreams, [{ id: 7, name: 'general' }]);
-    // Retained descriptors are not retained permission, even after host open.
-    await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:private', type: 'zulip', address: {} });
+    // Retained descriptors are not retained read permission, even for host metadata.
+    const afterRemoval = await h.host.sendRequest(method.CHANNELS_LIST) as { channels: ChannelDescriptor[] };
+    assert.ok(!afterRemoval.channels.some(c => c.id === 'zulip:private'));
+    await assert.rejects(
+      h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:private', type: 'zulip', address: {} }),
+      /subscribed-stream policy/,
+    );
     h.adapter.emit!({ ...streamMsg(900), channelId: 'zulip:private' });
     await new Promise(r => setTimeout(r, 25));
     assert.equal(h.incoming.length, 0); assert.equal(h.pushed.length, 0);
