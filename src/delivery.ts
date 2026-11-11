@@ -282,6 +282,13 @@ export class DeliveryState {
 
   // ── missed tallies ──
 
+  /** Revocation forgets derived counts, not the cursors used for fresh recovery. */
+  purgeUnavailable(allows: (id: number | undefined) => boolean): void {
+    for (const [channelId, tally] of this.missed) {
+      if (!isDmChannelId(channelId) && !allows(tally.streamId)) this.missed.delete(channelId);
+    }
+  }
+
   tally(channelId: string): MissedTally | undefined {
     return this.missed.get(channelId);
   }

@@ -4,6 +4,7 @@
 import type { ZulipRawMessage } from './history.js';
 
 export interface WidgetSubmessage {
+  readEpoch?: number;
   id: number;
   message_id?: number;
   sender_id: number;

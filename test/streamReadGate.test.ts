@@ -493,3 +493,339 @@ test('unsubscribe purges queued cross-stream reply classifications and server fa
     server.channelManager.destroy();
   } finally { f.close(); }
 });
+
+function regrant(f: Awaited<ReturnType<typeof fixture>>, id = 12) {
+  f.plane.subscriptions.apply({ op: 'remove', stream_ids: [id] });
+  f.plane.subscriptions.apply({ op: 'add', subscriptions: streams.filter(s => s.stream_id === id) });
+}
+const edit = (over: Record<string, unknown> = {}) => ({
+  kind: 'edit', messageId: 999, messageIds: [999], actorId: 7, editedAt: 1700000001,
+  content: '[said](/#narrow/channel/12/near/888):\n```quote\noriginal\n```\nold edit',
+  origContent: 'original', topic: null, origTopic: null, propagateMode: null,
+  streamId: 12, newStreamId: null, flags: [], ...over,
+});
+
+test('edit-regrant-probe: cached 999 cannot return or emit after suspended quote GET', async () => {
+  const f = await fixture();
+  const d = deferred();
+  try {
+    const { normalizeMessage } = await import('../src/history.ts');
+    const adapter = f.adapter as any;
+    adapter.remember('zulip:general', normalizeMessage(raw(999)));
+    const old = adapter.seen.get(999);
+    f.client.messages.getById = () => d.wait();
+    const events: any[] = [];
+    const pending = adapter.onZulipChange(edit(), (e: any) => events.push(e));
+    await d.started;
+    regrant(f);
+    assert.equal(adapter.seen.has(999), false, 'remove must purge 999');
+    d.resolve({ result: 'success', message: { ...raw(888), sender_id: 790 } });
+    await pending;
+    assert.equal(adapter.seen.has(999), false, 'old edit must not restore purged 999');
+    assert.deepEqual(events, []);
+    assert.equal(adapter.failedQuoteLookups.has(888), false, 'old lookup must not restore negative cache');
+    adapter.setSeen(999, old);
+    assert.equal(adapter.seen.has(999), false, 'cache writer independently refuses an old epoch');
+    // A subsequent event can re-read, but never reuse the old row.
+    f.client.messages.getById = async () => ({ result: 'success', message: { ...raw(999), content: 'fresh' } });
+    assert.equal((await adapter.locate(999)).snippet, 'fresh');
+    adapter.setSeen(999, old);
+    assert.equal(adapter.seen.get(999).snippet, 'fresh', 'old write cannot clobber a fresh row');
+  } finally { f.close(); }
+});
+
+for (const kind of ['delete', 'move'] as const) {
+  test(`${kind} remove/add race discards the retained event and placement`, async () => {
+    const f = await fixture();
+    const d = deferred();
+    try {
+      const adapter = f.adapter as any;
+      if (kind === 'move') {
+        const { normalizeMessage } = await import('../src/history.ts');
+        adapter.remember('zulip:general', normalizeMessage(raw(999)));
+      }
+      f.client.streams.retrieve = () => d.wait();
+      const events: any[] = [];
+      const change = kind === 'delete'
+        ? { kind, messageIds: [999], messageType: 'stream', streamId: 12, topic: 'old topic' }
+        : edit({ content: null, origContent: null, topic: 'new topic', origTopic: 'old topic', newStreamId: 13 });
+      const pending = adapter.onZulipChange(change, (e: any) => events.push(e));
+      await d.started; regrant(f);
+      d.resolve({ result: 'success', streams });
+      await pending;
+      assert.deepEqual(events, []);
+      assert.equal(adapter.seen.has(999), false);
+      assert.equal(adapter.streamNamesById.has(12), false, 'stale refresh cannot restore a purged name');
+    } finally { f.close(); }
+  });
+}
+
+test('reaction remove/add race across real placement GET emits nothing, then a fresh reaction works', async t => {
+  const { ZulipEventLoop } = await import('../src/platforms/zulip-events.ts');
+  let reaction!: (ev: any) => void;
+  t.mock.method(ZulipEventLoop.prototype, 'start', async (_client, _message, _system, onReaction) => { reaction = onReaction!; });
+  const f = await fixture();
+  const d = deferred();
+  const events: any[] = [];
+  const ev = { message_id: 999, user_id: 7, op: 'add', emoji_name: 'eyes' };
+  try {
+    f.client.messages.getById = () => d.wait();
+    f.adapter.startEvents(() => {}, undefined, e => events.push(e));
+    reaction(ev);
+    await d.started; regrant(f);
+    d.resolve({ result: 'success', message: raw(999) });
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(events, []);
+    assert.equal((f.adapter as any).seen.has(999), false);
+    f.client.messages.getById = async () => ({ result: 'success', message: raw(999) });
+    reaction(ev);
+    await new Promise(r => setImmediate(r));
+    assert.equal(events.length, 1);
+  } finally { f.adapter.stopEvents(); f.close(); }
+});
+
+test('poll vote remove/add race drops the old GET, allowing only a new vote read', async () => {
+  const f = await fixture();
+  const d = deferred();
+  const events: any[] = [];
+  const vote = { id: 2, message_id: 999, sender_id: 7, msg_type: 'widget', content: JSON.stringify({ type: 'vote', key: 'canned,0', vote: 1 }) };
+  try {
+    f.client.messages.getById = () => d.wait();
+    const pending = (f.adapter as any).onPollSubmessage(vote, (e: any) => events.push(e));
+    await d.started; regrant(f);
+    d.resolve({ result: 'success', message: raw(999) });
+    await pending;
+    assert.deepEqual(events, []);
+    f.client.messages.getById = async () => ({ result: 'success', message: raw(999) });
+    await (f.adapter as any).onPollSubmessage({ ...vote, id: 3 }, (e: any) => events.push(e));
+    assert.equal(events.length, 1);
+  } finally { f.close(); }
+});
+
+for (const surface of ['poll-results', 'resource', 'discovery', 'topics', 'history'] as const) {
+  test(`${surface} remove/add race fences every earlier read across later awaits`, async () => {
+    const f = await fixture();
+    const d = deferred();
+    try {
+      let response: any;
+      let pending: Promise<any>;
+      if (surface === 'poll-results') {
+        f.client.users.retrieve = () => d.wait();
+        response = { result: 'success', members: [] };
+        pending = f.runtime.handleToolCall('get_poll_results', { message_id: 'acme:77' });
+      } else if (surface === 'resource') {
+        await f.runtime.handleToolCall('start_monitoring', { channels: ['general', 'second'] });
+        f.client.messages.retrieve = async p => p.narrow[0].operand === 13 ? d.wait() : { result: 'success', messages: [raw(99)], found_newest: true };
+        response = { result: 'success', messages: [raw(100, 13, 'second')], found_newest: true };
+        pending = f.runtime.readResource('zulip://unread/summary');
+      } else if (surface === 'discovery') {
+        f.client.messages.retrieve = () => d.wait();
+        response = { result: 'success', messages: [] };
+        pending = f.adapter.discoverChannels();
+      } else if (surface === 'topics') {
+        f.client.streams.topics.retrieve = () => d.wait();
+        response = { result: 'success', topics: [{ name: 'old topic', max_id: 77 }] };
+        pending = f.runtime.handleToolCall('get_stream_topics', { stream_id: 12 });
+      } else {
+        f.client.messages.retrieve = async () => ({ result: 'success', messages: [{ ...raw(), content: edit().content }], found_newest: true });
+        f.client.messages.getById = () => d.wait();
+        response = { result: 'success', message: raw(888) };
+        pending = f.adapter.fetchHistory('zulip:general', { limit: 5 });
+      }
+      await d.started; regrant(f); d.resolve(response);
+      await assert.rejects(pending, /subscribed-stream policy/);
+    } finally { f.close(); }
+  });
+}
+
+test('per-stream checkpoints survive unrelated changes and reject nested regrant laundering', async () => {
+  const f = await fixture();
+  try {
+    const gate = f.plane.streamReadGate!;
+    const epoch = gate.checkpoint();
+    regrant(f);
+    assert.equal(gate.fresh(12, epoch), false);
+    assert.equal(gate.fresh(13, epoch), true);
+    await assert.rejects(gate.run(async () => {
+      await gate.run(async () => { gate.assert(12); });
+      regrant(f);
+      await gate.run(async () => { gate.assert(12); });
+    }), /subscribed-stream policy/);
+  } finally { f.close(); }
+});
+
+test('in-flight batch retry and descriptor announcement cannot resurrect old snapshots after regrant', async () => {
+  const f = await fixture();
+  const d = deferred();
+  const server = f.server as any;
+  const manager = server.channelManager;
+  try {
+    server.grant.has = () => true; server.grant.isFeatureSetActive = () => true;
+    const message = (await f.adapter.fetchHistory('zulip:general', { limit: 1 })).messages[0];
+    manager.markOpen('zulip:general');
+    manager.host.sendIncoming = async () => { await d.wait(); throw new Error('simulated transport failure'); };
+    manager.onIncomingMessage('zulip:general', message);
+    const flushing = manager.flush();
+    await d.started; regrant(f); d.resolve(undefined);
+    await flushing;
+    assert.equal(manager.pendingCount(), 0, 'failed old batch must not requeue');
+    assert.equal(server.mayDeliver(message), false);
+    assert.equal(manager.noteConversation('zulip:general', message), false);
+    const a = deferred();
+    manager.host.channelsChanged = () => a.wait();
+    const [descriptor] = await f.adapter.describeChannels(['zulip:general']);
+    const pending = manager.registerAdditional([descriptor], { retryBacklog: true });
+    await a.started; regrant(f); a.resolve(undefined);
+    await pending;
+    assert.equal(manager.unannounced.has('zulip:general'), false, 'old announcement must not restore retry backlog');
+  } finally { manager.destroy(); f.close(); }
+});
+
+test('multi-await send cannot emit an earlier message link after remove/add during the next lookup', async () => {
+  const f = await fixture();
+  const d = deferred();
+  try {
+    f.client.messages.getById = async p => p.message_id === 78 ? d.wait() : { result: 'success', message: raw(77) };
+    const pending = f.runtime.handleToolCall('send_message', { type: 'stream', to: 'second', topic: 'T', content: '[[msg:acme:77]] [[msg:acme:78]]' });
+    await d.started; regrant(f);
+    d.resolve({ result: 'success', message: raw(78, 13, 'second') });
+    await assert.rejects(pending, /subscribed-stream policy/);
+    assert.equal(f.calls.some(c => c[0] === 'send'), false);
+  } finally { f.close(); }
+});
+
+test('live quoted message remove/add race drops retained content and cache snapshot', async t => {
+  const { ZulipEventLoop } = await import('../src/platforms/zulip-events.ts');
+  let receive!: (...args: any[]) => Promise<void>;
+  t.mock.method(ZulipEventLoop.prototype, 'start', async (_client, onMessage) => { receive = onMessage as typeof receive; });
+  const f = await fixture();
+  const d = deferred();
+  const events: any[] = [];
+  try {
+    f.client.messages.getById = () => d.wait();
+    f.adapter.startEvents(m => events.push(m));
+    const pending = receive('general', { ...raw(999), content: edit().content }, []);
+    await d.started; regrant(f);
+    d.resolve({ result: 'success', message: raw(888) });
+    await pending;
+    assert.deepEqual(events, []);
+    assert.equal((f.adapter as any).seen.has(999), false);
+  } finally { f.adapter.stopEvents(); f.close(); }
+});
+
+test('publish refuses retained routing hints after remove/add during upload', async () => {
+  const f = await fixture();
+  const d = deferred();
+  try {
+    const message = (await f.adapter.fetchHistory('zulip:general', { limit: 1 })).messages[0];
+    const adapter = new ZulipAdapter(f.client, 790, 'publish', {
+      filters: f.plane, activeTopics: 0,
+      uploader: { upload: () => d.wait() }, uploadPolicy: { roots: new Map(), maxCount: 2, maxBytes: 100, maxTotalBytes: 100 },
+    });
+    const pending = adapter.publish('zulip:general', undefined, [
+      { type: 'text', text: 'reply' }, { type: 'image', data: 'aGk=', mimeType: 'image/png' },
+    ] as any, { threadId: message.threadId, metadata: message.metadata });
+    await d.started; regrant(f); d.resolve({ url: '/user_uploads/test.png', name: 'test.png' });
+    await assert.rejects(pending, /subscribed-stream policy/);
+    assert.equal(f.calls.some(c => c[0] === 'send'), false);
+  } finally { f.close(); }
+});
+
+test('regrant does not restore monitoring resources or missed-count caches; fresh monitoring works', async () => {
+  const f = await fixture();
+  try {
+    await f.runtime.handleToolCall('start_monitoring', { channels: ['general'] });
+    const delivery = (f.server as any).delivery;
+    delivery.markOpen('zulip:general'); delivery.markClosed('zulip:general', 12);
+    delivery.countMissed('zulip:general', { id: 77, text: 'old content' });
+    regrant(f);
+    assert.equal(delivery.tally('zulip:general'), undefined);
+    assert.equal(f.runtime.listResources().some(r => r.uri === 'zulip://channel/general/unread'), false);
+    await assert.rejects(f.runtime.readResource('zulip://monitoring/status'), /subscribed-stream policy/);
+    await f.runtime.handleToolCall('start_monitoring', { channels: ['general'] });
+    assert.equal(f.runtime.listResources().some(r => r.uri === 'zulip://channel/general/unread'), true);
+  } finally { f.close(); }
+});
+
+test('wire return rejects old resource output even if membership was restored after the helper', async () => {
+  const f = await fixture();
+  const outputs: any[] = [];
+  try {
+    await f.runtime.handleToolCall('start_monitoring', { channels: ['general'] });
+    const original = f.runtime.readResource.bind(f.runtime);
+    f.runtime.readResource = async uri => {
+      const result = await original(uri);
+      regrant(f);
+      return result;
+    };
+    await (f.server as any).handleRequest({
+      sendResponse(_id: unknown, result: unknown) { outputs.push({ result }); },
+      sendError(_id: unknown, _code: unknown, error: unknown) { outputs.push({ error }); },
+    }, { id: 1, method: 'resources/read', params: { uri: 'zulip://monitoring/status' } });
+    assert.equal(outputs.length, 1);
+    assert.ok(outputs[0].error);
+    assert.ok(!JSON.stringify(outputs).includes('general'));
+  } finally { f.close(); }
+});
+
+test('typing stop/start remove/add race neither restores cached topic nor emits the old start', async () => {
+  const f = await fixture();
+  const d = deferred();
+  const calls: any[] = [];
+  const server = f.server as any;
+  const manager = server.channelManager;
+  try {
+    server.grant.has = () => true; server.grant.isFeatureSetActive = () => true;
+    const [descriptor] = await f.adapter.describeChannels(['zulip:general']);
+    manager.allChannels.set(descriptor.id, descriptor);
+    const message = (await f.adapter.fetchHistory('zulip:general', { limit: 1 })).messages[0];
+    manager.noteConversation('zulip:general', message);
+    manager.typingTopic.set('zulip:general', 'previous topic');
+    (f.adapter as any).zulipClient.typing = { send: async (p: any) => { calls.push(p); return p.op === 'stop' ? d.wait() : { result: 'success' }; } };
+    const pending = manager.sendTyping('zulip:general');
+    await d.started; regrant(f); d.resolve({ result: 'success' });
+    await pending;
+    assert.deepEqual(calls.map(p => p.op), ['stop']);
+    assert.equal(manager.typingTopic.has('zulip:general'), false);
+  } finally { manager.destroy(); f.close(); }
+});
+
+test('long-poll batch retains its original epoch while an earlier message handler awaits', async () => {
+  const f = await fixture();
+  const d = deferred();
+  const drained = deferred();
+  const events: any[] = [];
+  const adapter = f.adapter as any;
+  let polls = 0;
+  try {
+    f.client.messages.getById = () => d.wait();
+    adapter.zulipClient.queues = { register: async () => ({ queue_id: 'batch', last_event_id: -1 }) };
+    adapter.zulipClient.events = { retrieve: async () => ++polls > 1 ? drained.wait() : ({ result: 'success', events: [
+      { id: 1, type: 'message', message: { ...raw(999), content: edit().content }, flags: [] },
+      { id: 2, type: 'message', message: raw(1000), flags: [] },
+    ] }) };
+    f.adapter.startEvents(m => events.push(m));
+    await d.started; regrant(f); d.resolve({ result: 'success', message: raw(888) });
+    await drained.started;
+    assert.deepEqual(events, []);
+    assert.equal(adapter.seen.has(999), false);
+    assert.equal(adapter.seen.has(1000), false, 'later rows of an old batch cannot acquire a new epoch');
+  } finally { f.adapter.stopEvents(); f.close(); }
+});
+
+test('move destination regrant drops the retained source placement instead of leaving it routable', async () => {
+  const f = await fixture();
+  const d = deferred();
+  const events: any[] = [];
+  try {
+    const { normalizeMessage } = await import('../src/history.ts');
+    const adapter = f.adapter as any;
+    adapter.remember('zulip:general', normalizeMessage(raw(999)));
+    f.client.streams.retrieve = () => d.wait();
+    const pending = adapter.onZulipChange(edit({ content: null, origContent: null, origTopic: 'old', newStreamId: 13 }), (e: any) => events.push(e));
+    await d.started; regrant(f, 13); d.resolve({ result: 'success', streams });
+    await pending;
+    assert.deepEqual(events, []);
+    assert.equal(adapter.seen.has(999), false, 'source placement must not survive a discarded move snapshot');
+  } finally { f.close(); }
+});

@@ -19,6 +19,7 @@ export interface StreamReadPolicy {
   allows(id: number | undefined): boolean;
   resolveName(name: string): number | undefined;
   known(): boolean;
+  ids(): number[];
 }
 
 /**
@@ -28,10 +29,37 @@ export interface StreamReadPolicy {
  * launder an earlier authorized snapshot after unsubscribe.
  */
 export class StreamReadGate {
-  private readonly reads = new AsyncLocalStorage<Set<number>>();
-  constructor(private readonly policy: StreamReadPolicy) {}
+  private readonly reads = new AsyncLocalStorage<Map<number, number>>();
+  // A checkpoint is a compact cutoff for the per-ID revocation vector.
+  // Regrant never resets revoked[id]; unrelated stream changes stay valid.
+  private clock = 0;
+  private readonly revoked = new Map<number, number>();
+  constructor(private readonly policy: StreamReadPolicy) {
+    for (const id of policy.ids()) this.revoked.set(id, 0);
+  }
 
-  allowed(id: number | undefined): boolean { return this.policy.allows(id); }
+  /** Called synchronously on policy changes, before any purge or regrant. */
+  policyChanged(): void {
+    this.clock++;
+    for (const id of this.policy.ids()) if (!this.revoked.has(id)) this.revoked.set(id, 0);
+    for (const id of this.revoked.keys()) if (!this.policy.allows(id)) this.revoked.set(id, this.clock);
+  }
+  checkpoint(): number { return this.clock; }
+  unchanged(id: number | undefined, checkpoint = this.clock): boolean {
+    return id !== undefined && (this.revoked.get(id) ?? 0) <= checkpoint;
+  }
+  fresh(id: number | undefined, checkpoint = this.clock): boolean {
+    return this.allowed(id) && this.unchanged(id, checkpoint);
+  }
+  assertFresh(id: number | undefined, checkpoint: number): void {
+    if (!this.fresh(id, checkpoint)) throw new Error('Read refused by subscribed-stream policy: revoked snapshot');
+    this.assert(id);
+  }
+
+  allowed(id: number | undefined): boolean {
+    if (id !== undefined && !this.revoked.has(id)) this.revoked.set(id, 0);
+    return this.policy.allows(id);
+  }
   /** Synchronous output projection: retained state is not read authority. */
   select<T>(items: T[], id: (item: T) => number | undefined): T[] {
     return items.filter(item => {
@@ -46,7 +74,10 @@ export class StreamReadGate {
   }
   assert(id: number | undefined): void {
     if (id === undefined || !this.allowed(id)) throw new Error('Read refused by subscribed-stream policy');
-    this.reads.getStore()?.add(id);
+    const reads = this.reads.getStore();
+    const epoch = reads?.get(id) ?? this.clock;
+    if (!this.fresh(id, epoch)) throw new Error('Read refused by subscribed-stream policy: revoked snapshot');
+    reads?.set(id, epoch);
   }
   named(name: string): number {
     const id = this.policy.resolveName(name);
@@ -57,24 +88,24 @@ export class StreamReadGate {
     if (!this.policy.known()) throw new Error('Read refused by subscribed-stream policy: unknown state');
   }
   recheck(): void {
-    for (const id of this.reads.getStore() ?? []) this.assert(id);
+    for (const [id, epoch] of this.reads.getStore() ?? []) this.assertFresh(id, epoch);
   }
   async run<T>(read: () => Promise<T>): Promise<T> {
     const parent = this.reads.getStore();
-    return this.reads.run(new Set(), async () => {
+    return this.reads.run(new Map(parent), async () => {
       try {
         const result = await read();
         // No await between the last decision and returning the complete result.
-        for (const id of this.reads.getStore()!) this.assert(id);
+        for (const [id, epoch] of this.reads.getStore()!) this.assertFresh(id, epoch);
         return result;
       } catch (error) {
         // Errors can contain read metadata too.
-        for (const id of this.reads.getStore()!) this.assert(id);
+        for (const [id, epoch] of this.reads.getStore()!) this.assertFresh(id, epoch);
         throw error;
       } finally {
         // A server-owned scope must retain reads performed by nested runtime
         // and adapter calls until its own final return.
-        for (const id of this.reads.getStore()!) parent?.add(id);
+        for (const [id, epoch] of this.reads.getStore()!) parent?.set(id, Math.min(parent.get(id) ?? epoch, epoch));
       }
     });
   }
@@ -86,12 +117,17 @@ export class StreamReadGate {
     return { ...original,
       messages: { ...original.messages,
         getById: async (params: any) => {
+          const epoch = gate.checkpoint();
+          gate.recheck();
           gate.requireKnown(); // Placement is only knowable from a fresh response.
           const result = await original.messages.getById(params);
-          if (result?.message?.type !== 'private') gate.assert(result?.message?.stream_id);
+          if (result?.message?.type !== 'private') gate.assertFresh(result?.message?.stream_id, epoch);
+          gate.recheck();
           return result;
         },
         retrieve: async (params: any) => {
+          gate.recheck();
+          const epoch = gate.checkpoint();
           gate.requireKnown();
           const narrow = (params.narrow ?? []).map((item: any) => {
             const op = Array.isArray(item) ? item[0] : item.operator;
@@ -103,33 +139,44 @@ export class StreamReadGate {
             return { operator: op, operand: id };
           });
           const result = await original.messages.retrieve({ ...params, narrow });
+          gate.recheck();
           if (!Array.isArray(result?.messages)) return result;
           const messages = result.messages.filter(visible);
-          for (const m of messages) if (m.type === 'stream') gate.assert(m.stream_id);
+          for (const m of messages) if (m.type === 'stream') gate.assertFresh(m.stream_id, epoch);
+          gate.recheck();
           return { ...result, messages };
         },
       },
       streams: { ...original.streams,
         retrieve: async (params: any) => {
+          gate.recheck();
+          const epoch = gate.checkpoint();
           gate.requireKnown();
           const result = await original.streams.retrieve({ ...params, include_public: false, include_subscribed: true });
           const streams = (result?.streams ?? []).filter((s: any) => gate.allowed(s.stream_id));
-          for (const s of streams) gate.assert(s.stream_id);
+          for (const s of streams) gate.assertFresh(s.stream_id, epoch);
+          gate.recheck();
           return { ...result, streams };
         },
         getStreamId: async (params: any) => {
+          gate.recheck();
+          const epoch = gate.checkpoint();
           const id = gate.named(params.stream);
           const result = await original.streams.getStreamId(params);
-          gate.assert(id);
-          gate.assert(result?.stream_id);
+          gate.assertFresh(id, epoch);
+          gate.assertFresh(result?.stream_id, epoch);
           if (result.stream_id !== id) throw new Error('Read refused by subscribed-stream policy: address changed');
+          gate.recheck();
           return result;
         },
         topics: { ...original.streams?.topics,
           retrieve: async (params: any) => {
+            gate.recheck();
+            const epoch = gate.checkpoint();
             gate.assert(params.stream_id);
             const result = await original.streams.topics.retrieve(params);
-            gate.assert(params.stream_id);
+            gate.assertFresh(params.stream_id, epoch);
+            gate.recheck();
             return result;
           },
         },

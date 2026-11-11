@@ -92,6 +92,7 @@ export function stripSuppressedReactions<T extends { reactions?: unknown }>(mess
 }
 
 export interface ChannelState {
+  readEpoch?: number;
   streamId?: number;
   channelName: string;
   lastReadMessageId: number | string;
@@ -307,17 +308,21 @@ export class ZulipToolRuntime {
 
   setStreamReadPolicy(gate: StreamReadGate): void {
     this.streamGate = gate;
+    for (const state of this.monitoredChannels.values()) state.readEpoch = gate.checkpoint();
     this.zulipClient = this.streamGate.client(this.zulipClient);
   }
 
   private monitoredOperand(name: string, state: ChannelState): string | number {
     if (!this.streamGate) return name;
-    this.streamGate.assert(state.streamId);
+    this.streamGate.assertFresh(state.streamId, state.readEpoch ?? this.streamGate.checkpoint());
     return state.streamId!;
   }
 
   private checkMonitored(names: string[]): void {
-    for (const name of names) this.streamGate?.assert(this.monitoredChannels.get(name)?.streamId);
+    for (const name of names) {
+      const state = this.monitoredChannels.get(name);
+      if (this.streamGate) this.streamGate.assertFresh(state?.streamId, state?.readEpoch ?? this.streamGate.checkpoint());
+    }
   }
 
   /** Resolve and check a reply before uploading files or sending any chunks. */
@@ -392,7 +397,7 @@ export class ZulipToolRuntime {
 
       const state: SessionState = {
         sessionId: this.sessionId,
-        monitoredChannels: Object.fromEntries(this.monitoredChannels),
+        monitoredChannels: Object.fromEntries([...this.monitoredChannels].map(([name, { readEpoch: _epoch, ...state }]) => [name, state])),
       };
 
       writeFileSync(this.stateFile(), JSON.stringify(state, null, 2));
@@ -461,7 +466,9 @@ export class ZulipToolRuntime {
               ? messages.messages[0].id
               : 0;
 
+            this.streamGate?.recheck();
             monitoredChannels.set(channelName, {
+              readEpoch: this.streamGate?.checkpoint(),
               channelName,
               ...(streamId !== undefined ? { streamId } : {}),
               lastReadMessageId: lastMessageId,
@@ -817,8 +824,10 @@ export class ZulipToolRuntime {
           ? dmChannelIdFor(args.to as number[])
           : `zulip:${Array.isArray(args.to) ? args.to.join(",") : String(args.to ?? "")}`);
         for (const chunk of chunkMessage(content)) {
+          this.streamGate?.recheck();
           last = await zulipClient.messages.send({ type: args.type, to: args.to, topic: args.topic, content: chunk });
           if (last?.result === "error") throw new Error(last.msg ?? "Zulip refused the message");
+          this.streamGate?.recheck();
           ids.push(last.id);
           this.onSent?.({ messageId: String(last.id), channelId, content: chunk });
         }
@@ -934,12 +943,15 @@ export class ZulipToolRuntime {
           if (args[field] !== undefined) editFields.set(field, field === "content"
             ? normalizeMarkdownTables(await resolveMessageLinks(args.content, { ...this.session, client: zulipClient }, this.messageIds)) : String(args[field]));
         }
+        this.streamGate?.recheck();
         const response = await fetch(`${apiUrl}/messages/${encodeURIComponent(args.message_id)}`, {
           method: "PATCH",
           headers: { Authorization: this.session.authHeader },
           body: editFields,
         });
+        this.streamGate?.recheck();
         const body = await response.text();
+        this.streamGate?.recheck();
         let result: any = null;
         try {
           result = JSON.parse(body);
@@ -998,6 +1010,7 @@ export class ZulipToolRuntime {
             moveEpochs, messageId: args.message_id, source, propagateMode: args.propagate_mode ?? "change_one",
             newStreamId, destinationChannelId, topic: storedTopic, likelyTopic: args.topic,
           };
+          this.streamGate?.recheck();
           this.onMoved?.(confirmedMove);
           if (movedTo) {
             movedTo = { channelId: destinationChannelId, stream: destinationChannelId?.replace(/^zulip:/, "") ?? null, topic: storedTopic };
@@ -1328,7 +1341,8 @@ export class ZulipToolRuntime {
 
     // Add a resource for each monitored Zulip channel
     for (const channel of this.monitoredChannels.keys()) {
-      if (this.streamGate && !this.streamGate.allowed(this.monitoredChannels.get(channel)?.streamId)) continue;
+      const state = this.monitoredChannels.get(channel)!;
+      if (this.streamGate && !this.streamGate.fresh(state.streamId, state.readEpoch)) continue;
       resources.push({
         uri: `zulip://channel/${channel}/unread`,
         name: `Zulip #${channel} - Unread Messages`,
@@ -1404,7 +1418,7 @@ export class ZulipToolRuntime {
       const channelName = channelMatch[1];
       const state = monitoredChannels.get(channelName);
       if (this.streamGate) {
-        if (state) this.streamGate.assert(state.streamId);
+        if (state) this.streamGate.assertFresh(state.streamId, state.readEpoch ?? this.streamGate.checkpoint());
         else this.streamGate.named(channelName);
       }
 

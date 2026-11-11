@@ -182,7 +182,7 @@ export class ChannelManager {
       const accepted = this.acceptedIds(result, channels);
       for (const id of accepted) {
         const descriptor = discovered.get(id);
-        if (descriptor) this.allChannels.set(id, descriptor);
+        if (descriptor && (!this.hooks.visible || this.hooks.visible(descriptor))) this.allChannels.set(id, descriptor);
       }
       const rejected = channels.length - accepted.size;
       console.error(
@@ -268,6 +268,11 @@ export class ChannelManager {
       const announced: string[] = [];
       const local: string[] = [];
       for (const d of added) {
+        if (this.hooks.visible && !this.hooks.visible(d)) {
+          if (this.allChannels.get(d.id) === d) this.allChannels.delete(d.id);
+          if (this.unannounced.get(d.id) === d) this.unannounced.delete(d.id);
+          continue;
+        }
         const was = before.get(d.id) ?? 'new';
         switch (verdicts.get(d.id)) {
           case 'accepted':
@@ -312,6 +317,11 @@ export class ChannelManager {
       console.error(`Failed to announce ${added.length} channel(s) (${reason}); they stay usable here and are re-announced on the next refresh`);
       const local: string[] = [];
       for (const d of added) {
+        if (this.hooks.visible && !this.hooks.visible(d)) {
+          if (this.allChannels.get(d.id) === d) this.allChannels.delete(d.id);
+          if (this.unannounced.get(d.id) === d) this.unannounced.delete(d.id);
+          continue;
+        }
         if ((before.get(d.id) ?? 'new') === 'refused') {
           this.restoreRefusal(d.id);
           refusedNow.push(d.id);
@@ -522,6 +532,7 @@ export class ChannelManager {
    * whether the hints moved.
    */
   noteConversation(channelId: string, message: IncomingChannelMessage): boolean {
+    if (this.hooks.deliverable && !this.hooks.deliverable(message)) return false;
     const meta = isRecord(message.metadata) ? message.metadata : undefined;
     if (meta?.reaction === true || typeof meta?.change === 'string') return false;
     const id = Number(message.messageId);
@@ -782,6 +793,8 @@ export class ChannelManager {
     const adapter = this.adapterFor(channelId);
     if (!adapter?.sendTyping) return;
     const descriptor = this.allChannels.get(channelId);
+    const currentDescriptor = () => !descriptor || !this.hooks.visible || this.hooks.visible(descriptor);
+    if (!currentDescriptor()) return;
     if (this.lastIncoming.get(channelId)?.movedTo) {
       // Stop the original source run once; neither refreshes nor later stops
       // may start/fall back to another topic after the conversation left.
@@ -809,10 +822,12 @@ export class ChannelManager {
       // A channel-only stop cancels the run where it is; a named stop cancels
       // that topic too.
       if (running && (!named || started !== current)) await adapter.sendTyping(channelId, descriptor, at(started), 'stop');
+      if (!currentDescriptor()) return;
       if (named || !running) await adapter.sendTyping(channelId, descriptor, at(current), 'stop');
       return;
     }
     if (running && started !== current) await adapter.sendTyping(channelId, descriptor, at(started), 'stop');
+    if (!currentDescriptor()) return;
     this.typingTopic.set(channelId, current);
     await adapter.sendTyping(channelId, descriptor, at(current), 'start');
   }
@@ -1001,7 +1016,7 @@ export class ChannelManager {
     try {
       result = await this.host.sendIncoming(allMessages);
     } catch (error) {
-      const retry = queued.filter((q) => q.attempts + 1 < MAX_BATCH_ATTEMPTS);
+      const retry = queued.filter((q) => q.attempts + 1 < MAX_BATCH_ATTEMPTS && (!this.hooks.deliverable || this.hooks.deliverable(q.message)));
       const givenUp = queued.filter((q) => q.attempts + 1 >= MAX_BATCH_ATTEMPTS).map((q) => q.message);
       console.error(
         `Failed to send ${allMessages.length} incoming message(s) to host` +
@@ -1032,6 +1047,7 @@ export class ChannelManager {
     const byChannel = new Map<string, { accepted: IncomingChannelMessage[]; rejected: IncomingChannelMessage[] }>();
     let rejected = 0;
     for (const m of allMessages) {
+      if (this.hooks.deliverable && !this.hooks.deliverable(m)) continue;
       const entry = byChannel.get(m.channelId) ?? { accepted: [], rejected: [] };
       if (accepted.has(m.messageId)) entry.accepted.push(m);
       else {

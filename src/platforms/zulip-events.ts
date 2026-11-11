@@ -58,10 +58,11 @@ export interface ZulipEventMessage {
 /** `flags` are the receiving user's message flags from the event envelope
  * (e.g. 'mentioned', 'wildcard_mentioned') — computed server-side by Zulip.
  * `streamName` is null for direct messages. */
-export type OnZulipMessage = (streamName: string | null, message: ZulipEventMessage, flags: string[]) => void | Promise<void>;
+export type OnZulipMessage = (streamName: string | null, message: ZulipEventMessage, flags: string[], readEpoch?: number) => void | Promise<void>;
 
 /** A `reaction` event as the queue delivers it. */
 export interface ZulipReactionEvent {
+  readEpoch?: number;
   op: 'add' | 'remove';
   emoji_name: string;
   emoji_code: string;
@@ -116,6 +117,7 @@ export interface ZulipDeleteMessageEvent {
 export type ZulipMessageChange =
   | {
       kind: 'edit';
+      readEpoch?: number;
       messageId: number;
       messageIds: number[];
       actorId: number | null;
@@ -137,6 +139,7 @@ export type ZulipMessageChange =
     }
   | {
       kind: 'delete';
+      readEpoch?: number;
       messageIds: number[];
       messageType: 'stream' | 'private';
       streamId: number | null;
@@ -184,6 +187,8 @@ export interface ZulipEventClient {
 }
 
 export interface ZulipEventLoopOptions {
+  /** Snapshot cutoff for the entire long-poll batch, including awaited handlers. */
+  readEpoch?: () => number | undefined;
   messageIds?: MessageIds;
   streamsMode?: 'all' | 'subscribed';
   /** First retry delay after a poll failure. Default 2000ms. */
@@ -232,10 +237,12 @@ export class ZulipEventLoop {
 
   private readonly messageIds: MessageIds;
   private readonly streamsMode: 'all' | 'subscribed';
+  private readonly readEpoch?: () => number | undefined;
 
   constructor(options: ZulipEventLoopOptions = {}) {
     this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.streamsMode = options.streamsMode ?? 'all';
+    this.readEpoch = options.readEpoch;
     this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.degradedThreshold = options.degradedThreshold ?? DEFAULT_DEGRADED_THRESHOLD;
@@ -366,6 +373,8 @@ export class ZulipEventLoop {
 
     while (!this.stopped) {
       try {
+        const epoch = this.readEpoch?.();
+        const snapshot = epoch === undefined ? {} : { readEpoch: epoch };
         const response = await zulipClient.events.retrieve({
           queue_id: this.queueId,
           last_event_id: lastEventId,
@@ -415,7 +424,7 @@ export class ZulipEventLoop {
             if (onSubmessage && event.msg_type === 'widget') {
               try {
                 // Event id is a queue cursor, not the reducer's submessage id.
-                await onSubmessage({ id: event.submessage_id!, message_id: event.message_id,
+                await onSubmessage({ ...snapshot, id: event.submessage_id!, message_id: event.message_id,
                   sender_id: event.sender_id!, msg_type: event.msg_type, content: event.content! });
               }
               catch (error) { console.error('Zulip event loop: submessage handler failed:', error); }
@@ -426,6 +435,7 @@ export class ZulipEventLoop {
           if (event.type === 'reaction' && onReaction && typeof event.message_id === 'number') {
             try {
               onReaction({
+                ...snapshot,
                 op: event.op === 'remove' ? 'remove' : 'add',
                 emoji_name: String(event.emoji_name ?? ''),
                 emoji_code: String(event.emoji_code ?? ''),
@@ -451,6 +461,7 @@ export class ZulipEventLoop {
               if (contentChanged || topicChanged || streamChanged) {
                 try {
                   onChange({
+                    ...snapshot,
                     kind: 'edit',
                     propagateMode: typeof event.propagate_mode === 'string' ? event.propagate_mode : null,
                     messageId: event.message_id,
@@ -482,6 +493,7 @@ export class ZulipEventLoop {
             if (onChange && ids.length > 0) {
               try {
                 onChange({
+                  ...snapshot,
                   kind: 'delete',
                   messageIds: ids,
                   messageType: event.message_type === 'private' ? 'private' : 'stream',
@@ -516,7 +528,8 @@ export class ZulipEventLoop {
               // The event is already acked (lastEventId advanced); Zulip won't
               // redeliver it, so we log and move on (at-most-once).
               try {
-                await onMessage(isStream ? streamName : null, msg, event.flags ?? []);
+                if (epoch === undefined) await onMessage(isStream ? streamName : null, msg, event.flags ?? []);
+                else await onMessage(isStream ? streamName : null, msg, event.flags ?? [], epoch);
               } catch (handlerError) {
                 console.error('Zulip event loop: onMessage handler threw:', handlerError);
               }

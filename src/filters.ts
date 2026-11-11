@@ -266,7 +266,9 @@ export class FiltersPlane {
       allows: id => this.streamReadAllowed(id),
       resolveName: name => this.subscriptions.resolveName(name),
       known: () => this.subscriptions.status().known,
+      ids: () => this.subscriptions.status().streams.map(s => s.id),
     });
+    this.onChange(() => this.streamReadGate?.policyChanged());
     this.subscriptions.onChange(() => {
       for (const listener of this.listeners) listener(this.effective, this.effective);
     });
