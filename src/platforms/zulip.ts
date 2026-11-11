@@ -179,6 +179,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): P
 /** The live filters the adapter consults — the plane, or a stand-in. */
 export interface FilterView {
   streamAllowed(streamName: string): boolean;
+  streamMuted?(streamName: string): boolean;
   dmAllowed(sender: { id: number; email: string }): boolean;
 }
 
@@ -1141,6 +1142,26 @@ export class ZulipAdapter implements PlatformAdapter {
         this.activeTopics.invalidate(change.streamId);
         if (change.kind === 'edit' && change.newStreamId !== null) this.activeTopics.invalidate(change.newStreamId);
       }
+      if (change.kind === 'edit' && (change.topic !== null || change.newStreamId !== null)) {
+        const ids = this.polls.invalidatePlacement((id, record) => {
+          if (id === change.messageId || change.messageIds.includes(id)) return true;
+          if (change.propagateMode !== 'change_all' && change.propagateMode !== 'change_later') return false;
+          if (change.propagateMode === 'change_later' && id < change.messageId) return false;
+          const m = record.message;
+          return record.placementUnknown || !m || (m.type === 'stream' &&
+            (change.streamId === null || m.stream_id === change.streamId) &&
+            (change.origTopic === null || m.subject.toLowerCase() === change.origTopic.toLowerCase()));
+        });
+        for (const id of ids) {
+          // Explicit messages will be re-seated by the ordered change handler.
+          // Unlisted propagated messages (or no subscriber) need a fresh GET.
+          if (onMessageChange || this.onSelfChanged) {
+            if (id === change.messageId || change.messageIds.includes(id)) continue;
+          }
+          const at = this.seen.get(id);
+          if (at) this.seen.set(id, { ...at, placementUnknown: true });
+        }
+      }
       if (!onMessageChange && !this.onSelfChanged) return;
       changeChain = changeChain
         .then(() => {
@@ -1228,28 +1249,37 @@ export class ZulipAdapter implements PlatformAdapter {
     });
   }
 
+  private refreshPollPlacement(messageId: number, refresh = false): void {
+    void this.polls.locate(this.zulipClient, messageId, refresh).then(record => {
+      if (!record.message || record.placementUnknown) return;
+      const m = normalizeMessage(record.message);
+      this.remember(channelIdOf(m, this.identity.selfUserId), m);
+    }).catch(() => { countPollDrop('placement_refresh_failed'); });
+  }
+
   private async onPollSubmessage(s: WidgetSubmessage, emit: OnIncomingMessage): Promise<void> {
     if (!Number.isSafeInteger(s.message_id) || s.message_id! <= 0 || !Number.isSafeInteger(s.id) || s.id <= 0) return;
     const update = parsePollSubmessage(s);
     if (!update) return;
     const messageId = s.message_id!;
     const record = this.polls.entry(messageId);
-    if (!record.message) void this.polls.locate(this.zulipClient, messageId);
+    if (!record.message) this.refreshPollPlacement(messageId);
     void this.pollUsers.get(this.zulipClient);
     record.state = applyPollUpdate(record.state, update);
     if (update.type !== 'vote') return;
     if (!record.state || !record.message) { countPollDrop('unknown_poll'); return; }
-    if (!this.seen.has(s.message_id!)) {
-      const m = normalizeMessage(record.message);
-      this.remember(channelIdOf(m, this.identity.selfUserId), m);
-    }
     const option = record.state.options.get(update.key);
     if (!option) return;
-    // Use the same placement cache as reactions/edits, including move invalidation.
-    const where = this.seen.get(s.message_id!);
-    if (where?.placementUnknown) { countPollDrop('unknown_placement'); return; }
-    if (!where) return;
-    if (!where.isDm && !this.filters.streamAllowed(streamNameOf(where.channelId))) return;
+    const where = this.seen.get(messageId);
+    if (!where || where.placementUnknown) {
+      // A retained poll envelope is not proof of current location. Refresh
+      // under the poll lookup budget without holding up ordinary delivery.
+      this.refreshPollPlacement(messageId, true);
+      countPollDrop('unknown_placement');
+      return;
+    }
+    if (!where.isDm && (!this.filters.streamAllowed(streamNameOf(where.channelId)) ||
+        this.filters.streamMuted?.(streamNameOf(where.channelId)))) return;
     const users = this.pollUsers.peek();
     const voter = users.get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
     if (where.isDm && !this.filters.dmAllowed({ id: update.voterId, email: voter.email })) return;

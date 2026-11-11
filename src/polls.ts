@@ -102,7 +102,7 @@ export async function boundedPollRead<T>(read: Promise<T>, ms = 3000): Promise<T
   } finally { clearTimeout(timer); }
 }
 
-export interface PollRecord { message?: ZulipRawMessage; state: PollState | null }
+export interface PollRecord { message?: ZulipRawMessage; state: PollState | null; placementUnknown?: boolean; placementVersion?: number }
 export class PollCache {
   private records = new Map<number, PollRecord>();
   // Attempts survive record eviction. Token refill bounds all IDs, including cycles.
@@ -127,12 +127,26 @@ export class PollCache {
     // Ordinary messages must not evict useful polls.
     if (!message.submessages?.length) return;
     const entry = this.entry(message.id);
+    entry.placementUnknown = false;
+    entry.placementVersion = (entry.placementVersion ?? 0) + 1;
     entry.message = { ...message, submessages: undefined, content: message.content.slice(0, POLL_LIMITS.text) };
     entry.state = reconstructPoll(message.submessages) ?? entry.state;
   }
-  async locate(client: any, id: number): Promise<PollRecord> {
+  /** Retain poll contents, but never treat the original envelope as placement. */
+  invalidatePlacement(matches: (id: number, record: PollRecord) => boolean): number[] {
+    const ids: number[] = [];
+    for (const [id, entry] of this.records) if (matches(id, entry)) {
+      entry.placementUnknown = true;
+      entry.placementVersion = (entry.placementVersion ?? 0) + 1;
+      ids.push(id);
+    }
+    return ids;
+  }
+  async locate(client: any, id: number, refreshPlacement = false): Promise<PollRecord> {
     const entry = this.entry(id);
-    if (entry.message && entry.state) return entry;
+    if (refreshPlacement) entry.placementUnknown = true;
+    if (entry.message && entry.state && !entry.placementUnknown) return entry;
+    const version = entry.placementVersion;
     const now = this.now();
     for (const [key, expires] of this.attempts) if (expires <= now) this.attempts.delete(key);
     if (this.attempts.has(id)) { countPollDrop('negative_cached'); return entry; }
@@ -149,8 +163,11 @@ export class PollCache {
         .finally(() => { this.inFlight--; });
       const result = await boundedPollRead<any>(read);
       if (result?.result !== 'success' || result.message?.id !== id) return entry;
+      if (entry.placementVersion !== version) return entry; // A move overtook this GET.
+      entry.placementUnknown = false;
       entry.message = { ...result.message, submessages: undefined, content: String(result.message.content ?? '').slice(0, POLL_LIMITS.text) };
-      entry.state = reconstructPoll(result.message.submessages);
+      entry.state = refreshPlacement ? entry.state ?? reconstructPoll(result.message.submessages)
+        : reconstructPoll(result.message.submessages);
     } catch { /* Missing, inaccessible, malformed or timed out: no repeat GET storm. */ }
     return entry;
   }

@@ -64,7 +64,7 @@ test('poll reads have a timeout and negative lookups are fetched once with bound
   assert.equal(gets, 3, 'negative attempts survive record eviction');
 });
 
-async function eventFixture(events: any[], message = raw(), filters?: FilterView, ids?: MessageIds) {
+async function eventFixture(events: any[], message = raw(), filters?: FilterView, ids?: MessageIds, later: any[] = [], changes = true) {
   const incoming: IncomingChannelMessage[] = [];
   const registrations: any[] = [];
   let gets = 0, users = 0, reads = 0;
@@ -74,13 +74,18 @@ async function eventFixture(events: any[], message = raw(), filters?: FilterView
     queues: { async register(p: any) { registrations.push(p); return { queue_id: 'q', last_event_id: -1 }; } },
     events: { async retrieve() {
       if (reads++ === 0) return { events };
+      if (reads === 2 && later.length) {
+        await new Promise(resolve => setImmediate(resolve));
+        return { events: later };
+      }
       adapter.stopEvents(); finish(); return { events: [] };
     } },
     messages: { async getById(p: any) { gets++; assert.equal(p.message_id, 77); return { result: 'success', message }; } },
+    streams: { async retrieve() { return { streams: [{ stream_id: 12, name: 'general' }, { stream_id: 13, name: 'private' }] }; } },
     users: { async retrieve() { users++; return directory; } },
   };
   const adapter = new ZulipAdapter(client, 790, 'polls', { filters, messageIds: ids });
-  adapter.startEvents(m => { incoming.push(m); }, undefined, undefined, () => {});
+  adapter.startEvents(m => { incoming.push(m); }, undefined, undefined, changes ? () => {} : undefined);
   await done;
   return { incoming, gets, users, registrations };
 }
@@ -130,6 +135,65 @@ test('a poll vote waits for an earlier topic move and follows the current topic'
   assert.equal(result.incoming.length, 1);
   assert.equal(result.incoming[0].threadId, 'Decision');
   assert.equal((result.incoming[0].metadata as any).topic, 'Decision');
+});
+
+const evictionMessages = () => Array.from({ length: 2001 }, (_, i) => ({
+  id: 100 + i, type: 'message', message: raw({ id: 1000 + i, submessages: [] }),
+}));
+
+for (const scenario of ['disallowed', 'topic', 'muted'] as const) {
+  test(`evicted own poll refreshes current placement after a ${scenario} move`, async () => {
+    const crossStream = scenario !== 'topic';
+    const destination = raw({ subject: crossStream ? 'Release' : 'Decision', ...(crossStream ? { stream_id: 13, display_recipient: 'private' } : {}) });
+    const before = pollDrops.unknown_placement ?? 0;
+    const checked: string[] = [];
+    const filters: FilterView = {
+      streamAllowed: name => { checked.push(name); return scenario !== 'disallowed' || name === 'general'; },
+      streamMuted: name => scenario === 'muted' && name === 'private',
+      dmAllowed: () => true,
+    };
+    const result = await eventFixture([
+      { id: 0, type: 'message', message: raw() },
+      { id: 1, type: 'update_message', message_id: 77, user_id: 42, stream_id: 12,
+        orig_subject: 'Release', ...(crossStream ? { new_stream_id: 13 } : { subject: 'Decision' }) },
+      ...evictionMessages(), envelope(vote(2)),
+    ], destination, filters, undefined, [envelope(vote(3))]);
+    assert.equal(result.gets, 1, 'evicted placement requires a bounded background GET');
+    assert.equal(pollDrops.unknown_placement, before + 1, 'first vote is dropped, not guessed');
+    assert.equal(result.incoming.length, scenario === 'topic' ? 1 : 0);
+    if (scenario === 'topic') {
+      assert.equal(result.incoming[0].threadId, 'Decision');
+      assert.equal(result.incoming[0].channelId, 'zulip:general');
+    } else assert.equal(checked.at(-1), 'private', 'policy checks the verified destination');
+  });
+}
+
+for (const propagate of ['change_one', 'change_all', 'change_later']) {
+  test(`poll moves invalidate placement without a change subscriber (${propagate})`, async () => {
+    const anchor = propagate === 'change_one' ? 77 : 70;
+    const before = pollDrops.unknown_placement ?? 0;
+    const result = await eventFixture([
+      { id: 0, type: 'message', message: raw() },
+      { id: 1, type: 'update_message', message_id: anchor, user_id: 42, stream_id: 12,
+        orig_subject: 'Release', subject: 'Decision', propagate_mode: propagate },
+      envelope(vote(2)),
+    ], raw({ subject: 'Decision' }), undefined, undefined, [envelope(vote(3))], false);
+    assert.equal(result.gets, 1);
+    assert.equal(pollDrops.unknown_placement, before + 1);
+    assert.equal(result.incoming.length, 1);
+    assert.equal(result.incoming[0].threadId, 'Decision');
+  });
+}
+
+test('a move overtaking a poll placement GET prevents stale restoration', async () => {
+  const cache = new PollCache();
+  cache.remember(raw());
+  let release!: (value: unknown) => void;
+  const pending = cache.locate({ messages: { getById: () => new Promise(resolve => { release = resolve; }) } }, 77, true);
+  await Promise.resolve();
+  cache.invalidatePlacement(id => id === 77);
+  release({ result: 'success', message: raw() });
+  assert.equal((await pending).placementUnknown, true);
 });
 
 test('unknown live initialization starts a background read; premature votes are counted drops', async () => {
@@ -262,16 +326,17 @@ test('get_poll_results rejects non-polls and invalid legacy ids', async t => {
   assert.equal(result.incoming[0].messageId, 'poll:77:2');
  });
 
- test('an unresolved poll lookup never delays the next ordinary message', async () => {
+for (const cached of [false, true]) test(`an unresolved ${cached ? 'placement' : 'poll'} lookup never delays the next ordinary message`, async () => {
   let release!: (value: unknown) => void;
   const read = new Promise(resolve => { release = resolve; });
   let reads = 0;
   const incoming: IncomingChannelMessage[] = [];
-  const before = pollDrops.unknown_poll ?? 0;
+  const reason = cached ? 'unknown_placement' : 'unknown_poll';
+  const before = pollDrops[reason] ?? 0;
   const client = {
     queues: { async register() { return { queue_id: 'q', last_event_id: -1 }; } },
     events: { async retrieve() {
-      if (reads++ === 0) return { events: [envelope(vote(2)), { id: 99, type: 'message', message: raw({ id: 88, sender_id: 42, submessages: [] }) }] };
+      if (reads++ === 0) return { events: [...(cached ? [{ id: 0, type: 'message', message: raw() }, ...evictionMessages()] : []), envelope(vote(2)), { id: 99, type: 'message', message: raw({ id: 88, sender_id: 42, submessages: [] }) }] };
       adapter.stopEvents(); return { events: [] };
     } },
     messages: { getById() { return read; } },
@@ -283,7 +348,7 @@ test('get_poll_results rejects non-polls and invalid legacy ids', async t => {
     await boundedPollRead(delivered, 100);
     assert.equal(incoming.length, 1);
     assert.equal(incoming[0].messageId, '88');
-    assert.equal(pollDrops.unknown_poll, before + 1);
+    assert.equal(pollDrops[reason], before + 1);
   } finally { release({ result: 'error' }); adapter.stopEvents(); }
  });
 
