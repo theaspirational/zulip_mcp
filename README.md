@@ -222,6 +222,7 @@ are likely to touch:
 | `ZULIP_STATE_DIR` | `~/.zulip_mcp_state` | Where those files live |
 | `ZULIP_SUBSCRIBE` | — | Streams to subscribe the bot to on startup |
 | `ZULIP_FILTERS_FILE` | `<state dir>/<session>.filters.json` | The filters plane file (hot-reloaded) |
+| `ZULIP_STREAMS_MODE` | `all` | `subscribed` restricts stream delivery and reads to current bot subscriptions |
 | `ZULIP_STREAMS`, `ZULIP_DM_USERS`, `ZULIP_MUTED_STREAMS` | — | Seed for the filters file on first materialization |
 | `ZULIP_SUPPRESSED_REACTIONS_BASELINE` | `DISCORD_SUPPRESSED_REACTIONS_BASELINE` | Host-owned reaction markers withheld from the model; re-read every start, never persisted (connectome-host injects the `DISCORD_` name into every MCPL child) |
 | `ZULIP_CATCHUP_LIMIT` | 3000 | Per-channel ceiling for catch-up and gap recovery (max 10000). For an always-open desk channel a few hundred is plenty |
@@ -529,6 +530,36 @@ answered until that call returns. Timing out quickly keeps the channel
 usable, lets the host's own `channels/open` be served, and leaves the
 re-announcement to the next refresh; descriptors are recorded before the
 announcement goes out so that open succeeds when it lands.
+
+## Subscribed streams only
+
+Set `ZULIP_STREAMS_MODE=subscribed` to deliver only streams the **bot itself
+is currently subscribed to**, public or private. The default (`all`, or unset)
+retains the existing behavior. The queue still uses `all_public_streams=true`;
+an empty stream allowlist alone is **not** a subscription boundary.
+
+Invite/subscribe the bot to a private channel in Zulip: subscription events
+apply live, without restarting or editing filters. Unsubscribing stops delivery
+immediately. Explicit `ZULIP_STREAMS` (the initial seed) or filters-file `streams`
+still narrow membership; `mutedStreams` wins. DM rules are unchanged. The same
+policy gates messages, reactions, edits, deletes, poll votes (on their fresh
+message response), history/backscroll/context, and history/poll-result tools.
+Realm-tag message ID modes work unchanged.
+
+Subscriptions are loaded with `GET /users/me/subscriptions` at startup and
+reloaded after queue registration/replacement. Unknown state fails closed for
+**all** streams, including explicitly allowlisted streams. Reads time out after
+10 seconds; unknown state retries every 30 seconds (so recovery is attempted
+within 30 seconds of failure). Live changes cannot be overwritten by an older
+in-flight subscription snapshot. `filters_get` reports `streamsMode`, subscription
+state, and `effectiveSubscribedStreams` (membership intersected with lists/mutes).
+
+Newly deliverable streams use the existing channel discovery/registration path,
+so the host can open them even before the first message. **The host decides
+whether to open a registered channel**; this mode does not change host semantics
+or force channels open. Existing host descriptors are retained after removal,
+but no longer authorize delivery or history. Plain MCP has no live channel
+registration; its tools enforce the same read boundary.
 
 ## Filters plane
 

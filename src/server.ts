@@ -187,6 +187,9 @@ export class ZulipMcplServer {
     this.attributeDelivery = options.attributeDelivery !== false;
     this.announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
     this.filters = options.filters ?? null;
+    if (this.filters?.subscriptions.mode === 'subscribed') {
+      this.tools.setStreamReadPolicy((name) => this.filters!.streamAllowed(name));
+    }
     this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.messageIds);
     // A widened stream allowlist means channels the host has never seen:
     // make them known. A narrowed one is enforced on every delivery surface
@@ -196,7 +199,7 @@ export class ZulipMcplServer {
     this.filters?.onChange((next, prev) => {
       const before = new Set(prev.streams ?? []);
       const widened = !next.streams || (next.streams ?? []).some((name) => prev.streams && !before.has(name));
-      if (widened) void this.applyFilterChange();
+      if (widened || this.filters?.subscriptions.mode === 'subscribed') void this.applyFilterChange();
       void this.healUndelivered();
     });
 
@@ -1653,13 +1656,16 @@ export class ZulipMcplServer {
         const plane = this.requireFilters();
         const f = plane.current();
         return {
+          streamsMode: plane.subscriptions.mode,
+          subscriptions: plane.subscriptions.status(),
+          effectiveSubscribedStreams: plane.subscriptions.status().streams.filter(s => plane.streamAllowed(s.name)),
           streams: f.streams ?? null,
           dmUsers: f.dmUsers ?? null,
           mutedStreams: f.mutedStreams ?? [],
           reactionChannels: f.reactionChannels ?? [],
           plane: plane.planeStatus(),
           reactionSuppression: plane.suppressionStatus(),
-          note: 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ' +
+          note: 'null = no explicit allowlist; subscribed mode still requires current subscription. The host decides which registered channels to open. ' +
             'suppressedReactionEmojis is operator-owned and reported as a count/digest, never the entries.',
         };
       }

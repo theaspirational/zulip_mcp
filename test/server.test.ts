@@ -3721,3 +3721,36 @@ test('poll votes respect mutes and live allowlist changes, even addressed votes'
   h.adapter.emit!(pollVoteEvent(4));
   await until(() => h.incoming.length === 1, 'allowed unmuted poll vote');
 });
+
+test('subscription changes announce a newly deliverable private channel before any message; host still chooses open', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zulip-subscription-wire-'));
+  const plane = new FiltersPlane(join(dir, 'filters.json'), { ZULIP_STREAMS_MODE: 'subscribed', ZULIP_STREAMS: 'general,private' });
+  plane.start();
+  const client = { async callEndpoint() { return { result: 'success', subscriptions: [{ stream_id: 7, name: 'general' }] }; } };
+  await plane.subscriptions.connect(client, 790);
+  const tools = new ZulipToolRuntime({ client, selfUserId: 790, sessionId: 'subscriptions', realm: '', authHeader: '' }, dir);
+  const h = harness({ filters: plane, tools });
+  const privateDescriptor = { ...DESCRIPTOR, id: 'zulip:private', label: '#private', address: { stream_name: 'private', stream_id: 8 } };
+  h.adapter.visible.push(privateDescriptor);
+  h.adapter.discoverChannels = async () => h.adapter.visible.filter(c => plane.streamAllowed(c.id.slice('zulip:'.length)));
+  try {
+    await initialize(h, true);
+    await settled(h);
+    plane.subscriptions.apply({ op: 'add', subscriptions: [{ stream_id: 8, name: 'private' }] });
+    await until(() => h.hostSaw.some(r => r.method === method.CHANNELS_CHANGED && (r.params as any).added?.some((c: any) => c.id === 'zulip:private')), 'subscription announcement');
+    const listed = await h.host.sendRequest(method.CHANNELS_LIST) as { channels: ChannelDescriptor[] };
+    assert.ok(listed.channels.some(c => c.id === 'zulip:private'));
+    assert.deepEqual(h.adapter.subscribed, [], 'registration does not open/subscribe channels on behalf of the host');
+    const call = async () => JSON.parse(((await h.host.sendRequest('tools/call', { name: 'filters_get', arguments: {} })) as any).content[0].text);
+    const status = await call();
+    assert.equal(status.streamsMode, 'subscribed'); assert.equal(status.subscriptions.known, true);
+    assert.deepEqual(status.effectiveSubscribedStreams, [{ id: 7, name: 'general' }, { id: 8, name: 'private' }]);
+    plane.subscriptions.apply({ op: 'remove', subscriptions: [{ stream_id: 8, name: 'private' }] });
+    assert.deepEqual((await call()).effectiveSubscribedStreams, [{ id: 7, name: 'general' }]);
+    // Retained descriptors are not retained permission, even after host open.
+    await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:private', type: 'zulip', address: {} });
+    h.adapter.emit!({ ...streamMsg(900), channelId: 'zulip:private' });
+    await new Promise(r => setTimeout(r, 25));
+    assert.equal(h.incoming.length, 0); assert.equal(h.pushed.length, 0);
+  } finally { await h.close(); plane.stop(); rmSync(dir, { recursive: true, force: true }); }
+});

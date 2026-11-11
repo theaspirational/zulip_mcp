@@ -108,6 +108,7 @@ async function main(): Promise<void> {
   const stateDir = process.env.ZULIP_STATE_DIR || join(homedir(), '.zulip_mcp_state');
   const filters = new FiltersPlane(process.env.ZULIP_FILTERS_FILE || join(stateDir, `${session.sessionId}.filters.json`));
   filters.start();
+  await filters.subscriptions.connect(session.client, session.selfUserId);
   // Outbound uploads: a bad ZULIP_UPLOAD_ROOTS is a startup failure.
   const uploadPolicy = resolveUploadPolicy(process.env, session.maxUploadBytes);
   const uploader = session.realm ? createZulipUploader(session) : undefined;

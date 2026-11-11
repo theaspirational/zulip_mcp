@@ -14,6 +14,7 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
+import type { Subscriptions } from '../subscriptions.js';
 import { PollCache, PollLookups, PollUsers, countPollDrop, applyPollUpdate, parsePollSubmessage, reconstructPoll, type WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 
@@ -178,6 +179,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): P
 
 /** The live filters the adapter consults — the plane, or a stand-in. */
 export interface FilterView {
+  subscriptions?: Subscriptions;
   streamAllowed(streamName: string): boolean;
   streamMuted?(streamName: string): boolean;
   dmAllowed(sender: { id: number; email: string }): boolean;
@@ -305,6 +307,7 @@ export class ZulipAdapter implements PlatformAdapter {
         include_subscribed: true,
       });
       const streams = result.streams || [];
+      this.filters.subscriptions?.observe(streams);
       for (const stream of streams) {
         if (typeof stream.stream_id === 'number' && typeof stream.name === 'string') {
           this.streamNamesById.set(stream.stream_id, stream.name);
@@ -718,7 +721,7 @@ export class ZulipAdapter implements PlatformAdapter {
         this.onSelfChanged?.(event);
         return;
       }
-      if (this.changeAllowed(placed)) emit(event);
+      if (this.changeAllowed(placed) && (this.filters.subscriptions?.mode !== 'subscribed' || !crossStream || (movedToStream !== null && this.filters.streamAllowed(movedToStream)))) emit(event);
       return;
     }
 
@@ -989,6 +992,7 @@ export class ZulipAdapter implements PlatformAdapter {
    * pass (they are its own doing); callers decide whether to show them.
    */
   private allowed(m: ZulipMessage): boolean {
+    if (this.filters.subscriptions?.mode === 'subscribed' && !m.isDm && (m.streamName === null || !this.filters.streamAllowed(m.streamName))) return false;
     if (this.identity.selfUserId !== null && m.authorId === this.identity.selfUserId) return true;
     if (m.isDm) return this.filters.dmAllowed({ id: m.authorId, email: m.authorEmail });
     return m.streamName === null || this.filters.streamAllowed(m.streamName);
@@ -1203,7 +1207,7 @@ export class ZulipAdapter implements PlatformAdapter {
       }
       if (m.streamName !== null && !this.filters.streamAllowed(m.streamName)) return;
       m.replyToSelf = await this.classifyQuoteReply(m) === 'reply';
-      if (this.eventLoop !== loop) return;
+      if (this.eventLoop !== loop || (m.streamName !== null && !this.filters.streamAllowed(m.streamName))) return;
       const cached = this.seen.get(m.id);
       if (cached) cached.replyToSelf = m.replyToSelf;
       // A stream the bot joined after startup is unknown to the host; the
@@ -1219,12 +1223,18 @@ export class ZulipAdapter implements PlatformAdapter {
       if (m.streamName !== null && streamId !== undefined) this.streamNamesById.set(streamId, m.streamName);
       const descriptor = m.streamName !== null ? this.streamDescriptor(m.streamName, streamId) : undefined;
       onMessage(this.activeTopics.decorate(toIncoming(channelId, m, this.identity), streamId), descriptor);
-    }, onSystemEvent, reactionHandler, changeHandler, undefined, (submessage) => {
+    }, onSystemEvent, reactionHandler, changeHandler, async () => {
+      if (this.filters.subscriptions?.mode === 'subscribed') {
+        await this.filters.subscriptions.connect(this.zulipClient, this.identity.selfUserId, true);
+      }
+    }, (submessage) => {
       // Reduce in arrival order, but never hold ordinary delivery behind a GET
       // (or a move handler). Each notification has its own post-event read.
       void this.onPollSubmessage(submessage, (message, descriptor) => {
         if (this.eventLoop === loop) onMessage(message, descriptor);
       }).catch(() => { countPollDrop('notification_failed'); });
+    }, (event) => {
+      this.filters.subscriptions?.apply(event);
     }).catch(error => {
       console.error('Zulip event loop failed:', error);
     });

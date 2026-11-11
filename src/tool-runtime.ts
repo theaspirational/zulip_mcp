@@ -233,7 +233,7 @@ export function toToolCallResult(result: unknown): ToolCallResult {
 
 export class ZulipToolRuntime {
   readonly messageIds: MessageIds;
-  private readonly zulipClient: any;
+  private zulipClient: any;
   private readonly sessionId: string;
   private readonly monitoredChannels = new Map<string, ChannelState>();
 
@@ -297,6 +297,35 @@ export class ZulipToolRuntime {
   /** Reaction suppression for history rendering (the filters plane). */
   setReactionPolicy(policy: ReactionPolicy): void {
     this.reactionPolicy = policy;
+  }
+
+  /** Subscribed-mode read boundary, shared by tools and legacy resources.
+   * Named streams are refused before GET; id lookups and in-flight reads are
+   * checked on the fresh response, never on an old placement cache. DMs keep
+   * their existing semantics. No wrapper is installed in the default mode. */
+  setStreamReadPolicy(allowed: (stream: string) => boolean): void {
+    const original = this.zulipClient;
+    const messages = original.messages;
+    const check = (stream: unknown) => {
+      if (typeof stream !== "string" || !allowed(stream)) throw new Error("Stream history refused by subscribed-stream policy");
+    };
+    const visible = (m: any) => m?.type === "private" || (m?.type === "stream" && typeof m.display_recipient === "string" && allowed(m.display_recipient));
+    this.zulipClient = { ...original, messages: {
+      ...messages,
+      getById: async (params: any) => {
+        const result = await messages.getById(params);
+        if (result?.message && !visible(result.message)) throw new Error("Message read refused by subscribed-stream policy");
+        return result;
+      },
+      retrieve: async (params: any) => {
+        for (const item of params.narrow ?? []) {
+          const op = Array.isArray(item) ? item[0] : item.operator;
+          if (op === "stream" || op === "channel") check(Array.isArray(item) ? item[1] : item.operand);
+        }
+        const result = await messages.retrieve(params);
+        return Array.isArray(result?.messages) ? { ...result, messages: result.messages.filter(visible) } : result;
+      },
+    } };
   }
 
   /** Resolve and check a reply before uploading files or sending any chunks. */

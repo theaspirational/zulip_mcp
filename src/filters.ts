@@ -38,6 +38,8 @@
  * desired-vs-effective state so disk ≠ process is always witnessed.
  */
 
+import { Subscriptions } from './subscriptions.js';
+
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -241,6 +243,7 @@ export interface ReactionSuppressionStatus {
  * `onChange` to react to reloads.
  */
 export class FiltersPlane {
+  readonly subscriptions: Subscriptions;
   private effective: ZulipFilters;
   private digest: string | null = null;
   private loadedAt: string | null = null;
@@ -256,6 +259,10 @@ export class FiltersPlane {
     private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly options: { pollMs?: number } = {},
   ) {
+    this.subscriptions = new Subscriptions(env.ZULIP_STREAMS_MODE);
+    this.subscriptions.onChange(() => {
+      for (const listener of this.listeners) listener(this.effective, this.effective);
+    });
     this.effective = parseFiltersFromEnv(env);
     this.baseline = parseBaselineFromEnv(env);
   }
@@ -301,6 +308,7 @@ export class FiltersPlane {
   }
 
   stop(): void {
+    this.subscriptions.stop();
     if (this.poll) clearInterval(this.poll);
     this.poll = null;
   }
@@ -367,7 +375,8 @@ export class FiltersPlane {
 
   streamAllowed(streamName: string): boolean {
     const allow = this.effective.streams;
-    return !allow || allow.includes(streamName);
+    return (!allow || allow.includes(streamName)) && this.subscriptions.allows(streamName)
+      && (this.subscriptions.mode !== 'subscribed' || !this.streamMuted(streamName));
   }
 
   streamMuted(streamName: string): boolean {
