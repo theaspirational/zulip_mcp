@@ -1099,7 +1099,19 @@ test('a muted stream delivers nothing, and the filters tools read and write the 
     h.adapter.emit!(streamMsg(3));
     await until(() => h.incoming.length === 1, 'delivery after unmute');
 
-    const got = json(await call('filters_get', {}));
+    const filtersResponse = await call('filters_get', {});
+    const previous = {
+      streams: plane.current().streams ?? null,
+      dmUsers: plane.current().dmUsers ?? null,
+      mutedStreams: plane.current().mutedStreams ?? [],
+      reactionChannels: plane.current().reactionChannels ?? [],
+      plane: plane.planeStatus(),
+      reactionSuppression: plane.suppressionStatus(),
+      note: 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ' +
+        'suppressedReactionEmojis is operator-owned and reported as a count/digest, never the entries.',
+    };
+    assert.equal(filtersResponse.content[0].text, JSON.stringify(previous, null, 2), 'default filters_get stays byte-identical to 1f4f6f38');
+    const got = json(filtersResponse);
     assert.equal(got.streams, null);
     assert.equal(got.dmUsers, null);
     assert.deepEqual(got.mutedStreams, []);

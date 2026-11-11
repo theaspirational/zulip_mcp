@@ -185,6 +185,7 @@ export interface ZulipEventClient {
 
 export interface ZulipEventLoopOptions {
   messageIds?: MessageIds;
+  streamsMode?: 'all' | 'subscribed';
   /** First retry delay after a poll failure. Default 2000ms. */
   baseBackoffMs?: number;
   /** Upper bound for the exponential backoff. Default 60000ms. */
@@ -230,9 +231,11 @@ export class ZulipEventLoop {
   private readonly sleepFn: (ms: number) => Promise<void>;
 
   private readonly messageIds: MessageIds;
+  private readonly streamsMode: 'all' | 'subscribed';
 
   constructor(options: ZulipEventLoopOptions = {}) {
     this.messageIds = options.messageIds ?? LEGACY_IDS;
+    this.streamsMode = options.streamsMode ?? 'all';
     this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
     this.degradedThreshold = options.degradedThreshold ?? DEFAULT_DEGRADED_THRESHOLD;
@@ -303,9 +306,12 @@ export class ZulipEventLoop {
     // default (false): Zulip 12 validates client_capabilities as a whole
     // model and rejects the registration with "client_capabilities
     // [\"notification_settings_null\"] field is missing" when it is absent.
+    // Zulip updates live queues on subscription add/remove, including re-add.
+    // Omit all_public_streams in subscribed mode: filter at the source as well
+    // as at the adapter's ID-based read gate. No membership-driven re-register.
     const registration = await zulipClient.queues.register({
       event_types: ['message', 'reaction', 'update_message', 'delete_message', 'submessage', 'subscription', 'stream'],
-      all_public_streams: 'true',
+      ...(this.streamsMode === 'subscribed' ? {} : { all_public_streams: 'true' }),
       apply_markdown: 'false',
       client_capabilities: JSON.stringify({ notification_settings_null: false, bulk_message_deletion: true }),
     });

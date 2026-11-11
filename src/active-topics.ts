@@ -84,6 +84,11 @@ export class ActiveTopicsCache {
     }
   }
 
+  /** Revocation also drops display history; pending refreshes cannot resurrect it. */
+  purgeUnavailable(allows: (id: number) => boolean): void {
+    for (const id of this.streams.keys()) if (!allows(id)) this.streams.delete(id);
+  }
+
   private noteRateLimit(value: any): void {
     const response = value?.response;
     const body = response?.data ?? value;

@@ -156,7 +156,7 @@ export class ZulipMcplServer {
   /** Live-verified replies not yet accepted: history can fail closed under a
    *  tighter/shared lookup budget without erasing the verdict held for retry.
    *  Oldest-first eviction, capped per channel like the pre-live buffer. */
-  private pendingReplies = new Map<string, Set<number>>();
+  private pendingReplies = new Map<string, Map<number, number[]>>();
   /** Commit scan-only advancement after buffered live verdicts are reconciled. */
   private preLiveScanned = new Map<string, number>();
   /** Watermarks as they stood when the connection began: what the sweep
@@ -199,6 +199,15 @@ export class ZulipMcplServer {
     // never read authority. Either way, what is held for a channel that may
     // no longer reach the agent is let go.
     this.filters?.onChange((next, prev) => {
+      if (this.streamGate) {
+        // A cached reply verdict must never outlive authorization of its source.
+        this.pendingReplies.clear();
+        this.preLive = this.preLive.filter(({ message }) => this.mayDeliver(message));
+        this.channelManager.purgeUnavailable(hints => {
+          const ids = hints.metadata?.readStreamIds;
+          return !Array.isArray(ids) || ids.every(id => this.streamGate!.allowed(typeof id === 'number' ? id : undefined));
+        });
+      }
       const before = new Set(prev.streams ?? []);
       const widened = !next.streams || (next.streams ?? []).some((name) => prev.streams && !before.has(name));
       if (widened || this.filters?.subscriptions.mode === 'subscribed') void this.applyFilterChange().catch(() => { console.error('[zulip-mcp] channel refresh withheld by current policy'); });
@@ -473,7 +482,7 @@ export class ZulipMcplServer {
       // without acceptance (temporary policy disable or an early error).
       let through = scannedThrough;
       const held = new Set(this.delivery.heldIds(channelId));
-      for (const id of this.pendingReplies.get(channelId) ?? []) {
+      for (const id of this.pendingReplies.get(channelId)?.keys() ?? []) {
         if (!held.has(id)) through = Math.min(through, id - 1);
       }
       // A refused buffered reply must keep its hold below the scanned range.
@@ -1004,12 +1013,12 @@ export class ZulipMcplServer {
     if ((message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true && id !== null &&
         !this.isMuted(message.channelId) && this.isAllowed(message.channelId, message)) {
       let pending = this.pendingReplies.get(message.channelId);
-      if (!pending) this.pendingReplies.set(message.channelId, pending = new Set());
+      if (!pending) this.pendingReplies.set(message.channelId, pending = new Map());
       if (!pending.has(id) && pending.size >= PRE_LIVE_BUFFER_CAP) {
-        const oldest = pending.values().next().value;
+        const oldest = pending.keys().next().value;
         if (oldest !== undefined) pending.delete(oldest);
       }
-      pending.add(id);
+      pending.set(id, ((message.metadata as { readStreamIds?: number[] })?.readStreamIds ?? []));
     }
     if (!this.live) {
       if (this.preLive.length >= PRE_LIVE_BUFFER_CAP) {
@@ -1134,7 +1143,7 @@ export class ZulipMcplServer {
     try {
       for (const channelId of channels) {
         if (this.isMuted(channelId) || !this.isAllowed(channelId)) {
-          for (const id of this.pendingReplies.get(channelId) ?? []) this.forgetPendingReply(channelId, id);
+          for (const id of this.pendingReplies.get(channelId)?.keys() ?? []) this.forgetPendingReply(channelId, id);
           this.delivery.releaseAll(channelId);
           continue;
         }
@@ -1336,10 +1345,11 @@ export class ZulipMcplServer {
       }
       out.push(...page.messages.map((message) => {
         if (!this.pendingReplies.get(channelId)?.has(Number(message.messageId))) return message;
+        if (this.streamGate && !this.pendingReplies.get(channelId)!.get(Number(message.messageId))!.every(id => this.streamGate!.allowed(id))) return message;
         return {
           ...message,
           tags: [...new Set([...(message.tags ?? []).filter((tag) => tag !== CHAT_TAGS.ambient), CHAT_TAGS.reply])],
-          metadata: { ...(message.metadata as Record<string, unknown>), replyToSelf: true, isMention: true, isReplyToBot: true },
+          metadata: { ...(message.metadata as Record<string, unknown>), ...(this.streamGate ? { readStreamIds: this.pendingReplies.get(channelId)?.get(Number(message.messageId)) ?? [] } : {}), replyToSelf: true, isMention: true, isReplyToBot: true },
         };
       }));
       if (page.scannedThrough <= cursor) break;
@@ -1350,7 +1360,10 @@ export class ZulipMcplServer {
       }
     }
     if (this.streamGate && !isDmChannelId(channelId)) {
-      for (const message of out) this.streamGate.assert((message.metadata as { streamId?: number })?.streamId);
+      for (const message of out) {
+        this.streamGate.assert((message.metadata as { streamId?: number })?.streamId);
+        for (const id of (message.metadata as { readStreamIds?: number[] })?.readStreamIds ?? []) this.streamGate.assert(id);
+      }
     }
     // Not complete: the ceiling (or a bound) stopped the walk with more beyond the newest id scanned.
     return { messages: out, truncated: !complete, complete, scannedThrough: cursor > afterId ? cursor : null, unverifiedMessageIds: [...unverified].sort((a, b) => a - b) };
@@ -1464,7 +1477,7 @@ export class ZulipMcplServer {
           ...(addressedCount === 0 ? [CHAT_TAGS.ambient] : []),
         ]),
       ],
-      metadata: { ...(this.streamGate ? { streamId: (msgs[0]?.metadata as { streamId?: number })?.streamId } : {}), missed: true, topic: undefined, mentioned: mentionCount > 0, replyToSelf: replyCount > 0, isDM: isDmChannelId(channelId) },
+      metadata: { ...(this.streamGate ? { streamId: (msgs[0]?.metadata as { streamId?: number })?.streamId, readStreamIds: [...new Set(msgs.flatMap(m => (m.metadata as { readStreamIds?: number[] })?.readStreamIds ?? []))] } : {}), missed: true, topic: undefined, mentioned: mentionCount > 0, replyToSelf: replyCount > 0, isDM: isDmChannelId(channelId) },
     };
     const ok = await this.pushEvent(synthetic, `zulip_missed_${channelId}_${newestId}`, {
       missed: true,
@@ -1734,16 +1747,20 @@ export class ZulipMcplServer {
         } : status;
         for (const stream of subscriptions.streams) this.streamGate?.assert(stream.id);
         return {
-          streamsMode: plane.subscriptions.mode,
-          subscriptions,
-          effectiveSubscribedStreams: subscriptions.streams.filter(s => plane.streamReadAllowed(s.id)),
+          ...(this.streamGate ? {
+            streamsMode: plane.subscriptions.mode,
+            subscriptions,
+            effectiveSubscribedStreams: subscriptions.streams.filter(s => plane.streamReadAllowed(s.id)),
+          } : {}),
           streams: f.streams ? this.visibleStreamNames(f.streams) : null,
           dmUsers: f.dmUsers ?? null,
           mutedStreams: this.visibleStreamNames(f.mutedStreams ?? []),
           reactionChannels: this.visibleChannelIds(f.reactionChannels ?? []),
           plane: plane.planeStatus(),
           reactionSuppression: plane.suppressionStatus(),
-          note: 'null = no explicit allowlist; subscribed mode still requires current subscription. The host decides which registered channels to open. ' +
+          note: (this.streamGate
+            ? 'null = no explicit allowlist; subscribed mode still requires current subscription. The host decides which registered channels to open. '
+            : 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ') +
             'suppressedReactionEmojis is operator-owned and reported as a count/digest, never the entries.',
         };
       }
@@ -1935,7 +1952,7 @@ export class ZulipMcplServer {
    */
   private eventAllowed(ev: ReactionEvent | MessageChangeEvent): boolean {
     if (!this.streamGate || isDmChannelId(ev.channelId)) return this.isAllowed(ev.channelId);
-    return this.streamGate.allowed(ev.streamId) &&
+    return (ev.readStreamIds ?? []).every(id => this.streamGate!.allowed(id)) && this.streamGate.allowed(ev.streamId) &&
       (!('newStreamId' in ev) || ev.newStreamId == null || this.streamGate.allowed(ev.newStreamId));
   }
 
@@ -2063,7 +2080,7 @@ export class ZulipMcplServer {
       ],
       metadata: {
         change: ev.kind,
-        ...(this.streamGate ? { streamId: ev.streamId, readStreamIds: [ev.streamId, ...(ev.newStreamId == null ? [] : [ev.newStreamId])] } : {}),
+        ...(this.streamGate ? { streamId: ev.streamId, readStreamIds: [...(ev.readStreamIds ?? []), ev.streamId, ...(ev.newStreamId == null ? [] : [ev.newStreamId])] } : {}),
         targetMessageId: ev.messageId,
         targetMessageIds: ev.messageIds,
         ...(ev.actorId !== null ? { actorId: ev.actorId } : {}),
@@ -2092,7 +2109,7 @@ export class ZulipMcplServer {
     } else {
       await this.pushEvent(message, `zulip_${ev.kind}_${ev.messageId}_${stamp}`, {
         change: ev.kind,
-        ...(this.streamGate ? { streamId: ev.streamId, readStreamIds: [ev.streamId, ...(ev.newStreamId == null ? [] : [ev.newStreamId])] } : {}),
+        ...(this.streamGate ? { streamId: ev.streamId, readStreamIds: [...(ev.readStreamIds ?? []), ev.streamId, ...(ev.newStreamId == null ? [] : [ev.newStreamId])] } : {}),
         targetMessageId: ev.messageId,
       });
     }

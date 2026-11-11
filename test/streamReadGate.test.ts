@@ -419,3 +419,77 @@ test('wire boundary rechecks reads after an awaited resource helper has returned
     assert.ok(!JSON.stringify(outputs).includes('general'));
   } finally { f.close(); }
 });
+
+test('quote-wire-probe: reviewer cached forbidden quote metadata probe', async () => {
+ const f = await fixture();
+ try {
+  const { normalizeMessage } = await import('../src/history.ts');
+  // This cache is populated before stream authorization by the live callback.
+  (f.adapter as any).remember('zulip:public', normalizeMessage({...raw(88,14,'public'),sender_id:790}));
+  f.client.messages.retrieve = async () => ({result:'success', messages:[{...raw(), content:'[said](/#narrow/channel/14/near/88):\n```quote\noriginal\n```\nreply'}],found_newest:true});
+  const server=f.server as any;
+  server.mcplActive=true; server.grant.has=()=>true; server.grant.isFeatureSetActive=()=>true;
+  const outputs:any[]=[];
+  const conn={sendResponse(_id:any,result:any){outputs.push({result});},sendError(_id:any,code:any,error:any){outputs.push({code,error});},async sendRequest(){return {results:[]};}};
+  server.conn=conn;
+  (f.adapter as any).ensureSubscribed=async()=>{};
+  await server.channelManager.registerAdditional([{id:'zulip:general',type:'zulip',label:'#general',direction:'bidirectional',address:{stream_id:12,stream_name:'general'}}]);
+  await server.handleRequest(conn,{id:1,method:method.CHANNELS_OPEN,params:{channelId:'zulip:general',type:'zulip',address:{},history:{limit:10}}});
+  console.log('FORBIDDEN QUOTE WIRE OUTPUT',JSON.stringify(outputs));
+  assert.equal(outputs[0].result.history[0].metadata.replyToSelf, false, 'must not disclose the author classification of a forbidden-stream cached message');
+ } finally { f.close(); }
+});
+
+
+test('quote dependencies survive to final wire return; revocation after history helper refuses metadata', async () => {
+  const f = await fixture();
+  try {
+    const { normalizeMessage } = await import('../src/history.ts');
+    (f.adapter as any).remember('zulip:second', normalizeMessage({ ...raw(88, 13, 'second'), sender_id: 790 }));
+    f.client.messages.retrieve = async () => ({ result: 'success', messages: [{ ...raw(), content: '[said](/#narrow/channel/13/near/88):\n```quote\noriginal\n```\nreply' }], found_newest: true });
+    const server = f.server as any;
+    server.mcplActive = true; server.grant.has = () => true; server.grant.isFeatureSetActive = () => true;
+    const outputs: any[] = [];
+    const conn = { sendResponse(_id: any, result: any) { outputs.push({ result }); }, sendError(_id: any, code: any, error: any) { outputs.push({ code, error }); }, async sendRequest() { return { results: [] }; } };
+    server.conn = conn;
+    (f.adapter as any).ensureSubscribed = async () => {};
+    const fetch = f.adapter.fetchHistory.bind(f.adapter);
+    f.adapter.fetchHistory = async (...args) => {
+      const page = await fetch(...args);
+      assert.equal(page.messages[0].metadata?.replyToSelf, true);
+      f.plane.subscriptions.apply({ op: 'remove', stream_ids: [13] });
+      return page;
+    };
+    await server.channelManager.registerAdditional([{ id: 'zulip:general', type: 'zulip', label: '#general', direction: 'bidirectional', address: { stream_id: 12, stream_name: 'general' } }]);
+    await server.handleRequest(conn, { id: 1, method: method.CHANNELS_OPEN, params: { channelId: 'zulip:general', type: 'zulip', address: {}, history: { limit: 10 } } });
+    assert.equal(outputs.length, 1);
+    assert.ok(outputs[0].error);
+    assert.equal(outputs[0].result, undefined);
+    assert.ok(!JSON.stringify(outputs).includes('SECRET'));
+  } finally { f.close(); }
+});
+
+test('unsubscribe purges queued cross-stream reply classifications and server fallback verdicts', async () => {
+  const f = await fixture();
+  try {
+    const { normalizeMessage } = await import('../src/history.ts');
+    (f.adapter as any).remember('zulip:second', normalizeMessage({ ...raw(88, 13, 'second'), sender_id: 790 }));
+    f.client.messages.retrieve = async () => ({ result: 'success', messages: [{ ...raw(), content: '[said](/#narrow/channel/13/near/88):\n```quote\noriginal\n```\nreply' }], found_newest: true });
+    const message = (await f.adapter.fetchHistory('zulip:general', { limit: 10 })).messages[0];
+    assert.equal(message.metadata?.replyToSelf, true);
+    assert.deepEqual(message.metadata?.readStreamIds, [13]);
+    const server = f.server as any;
+    server.grant.has = () => true; server.grant.isFeatureSetActive = () => true;
+    await server.onIncoming(message); // Pre-live buffer + fallback verdict.
+    server.channelManager.markOpen('zulip:general');
+    server.channelManager.onIncomingMessage('zulip:general', message);
+    assert.equal(server.pendingReplies.get('zulip:general').has(77), true);
+    assert.equal(server.channelManager.pendingCount(), 1);
+    f.plane.subscriptions.apply({ op: 'remove', stream_ids: [13] });
+    assert.equal(server.pendingReplies.size, 0);
+    assert.equal(server.preLive.length, 0);
+    assert.equal(server.channelManager.pendingCount(), 0);
+    assert.equal(server.mayDeliver(message), false, 'even an already-taken retry is gated at emission');
+    server.channelManager.destroy();
+  } finally { f.close(); }
+});

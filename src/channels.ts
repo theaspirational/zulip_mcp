@@ -904,6 +904,25 @@ export class ChannelManager {
     this.announcing.clear();
   }
 
+  /** Retain descriptors only as unavailable addresses, never old content/hints. */
+  purgeUnavailable(hintsAvailable: (hints: RoutingHints) => boolean = () => true): void {
+    for (const [id, reference] of this.lastIncoming) if (!hintsAvailable(reference.hints)) this.lastIncoming.delete(id);
+    for (const [id, descriptor] of this.allChannels) {
+      if (this.hooks.visible?.(descriptor) !== false) continue;
+      this.lastIncoming.delete(id);
+      this.typingTopic.delete(id);
+      const withheld = this.batchBuffer.get(id);
+      this.batchBuffer.delete(id);
+      if (withheld?.length) this.report(this.hooks.onWithheld, id, withheld.map(q => q.message));
+    }
+    for (const [id, queued] of this.batchBuffer) {
+      const kept = queued.filter(q => this.hooks.deliverable?.(q.message) !== false);
+      const withheld = queued.filter(q => !kept.includes(q));
+      this.batchBuffer.set(id, kept);
+      if (withheld.length) this.report(this.hooks.onWithheld, id, withheld.map(q => q.message));
+    }
+  }
+
   // -- Private --
 
   private enqueue(channelId: string, message: IncomingChannelMessage, attempts = 0): void {

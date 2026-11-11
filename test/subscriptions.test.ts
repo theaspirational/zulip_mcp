@@ -8,6 +8,7 @@ import { FiltersPlane } from '../src/filters.ts';
 import { ZulipAdapter } from '../src/platforms/zulip.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { ZulipMcplServer } from '../src/server.ts';
+import { normalizeMessage } from '../src/history.ts';
 import { MessageIds } from '../src/message-ids.ts';
 
 const SELF = 790;
@@ -29,7 +30,7 @@ function planeFixture(env: NodeJS.ProcessEnv = {}) {
   return { dir, plane, close() { plane.stop(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
-async function eventFixture(env: NodeJS.ProcessEnv = { ZULIP_STREAMS_MODE: 'subscribed' }) {
+async function eventFixture(env: NodeJS.ProcessEnv = { ZULIP_STREAMS_MODE: 'subscribed' }, activeTopics = 0) {
   const f = planeFixture(env);
   const incoming: any[] = [], reactions: any[] = [], changes: any[] = [], registrations: any[] = [];
   let subscriptionReads = 0, messageReads = 0;
@@ -45,14 +46,14 @@ async function eventFixture(env: NodeJS.ProcessEnv = { ZULIP_STREAMS_MODE: 'subs
     },
     queues: { async register(params: any) { registrations.push(params); return { queue_id: 'q', last_event_id: -1 }; } },
     events: { retrieve() { ready(); return new Promise<any>(resolve => { send = resolve; }); } },
-    streams: { async retrieve() { return { streams: [general, privateStream, publicStream] }; } },
+    streams: { async retrieve() { return { streams: [general, privateStream, publicStream] }; }, topics: { async retrieve() { return { result: 'success', topics: [{ name: 'OLD SECRET TOPIC', max_id: 77 }] }; } } },
     users: { async retrieve() { return { result: 'success', members: [] }; } },
-    messages: { async getById(p: any) { messageReads++; return { result: 'success', message: messages.get(p.message_id) }; } },
+    messages: { async getById(p: any) { messageReads++; return { result: 'success', message: messages.get(p.message_id) }; }, async retrieve(_p: any) { return { result: 'success', messages: [...messages.values()], found_newest: true }; } },
   };
-  const adapter = new ZulipAdapter(client, SELF, 'subs', { filters: f.plane, activeTopics: 0 });
+  const adapter = new ZulipAdapter(client, SELF, 'subs', { filters: f.plane, activeTopics });
   adapter.startEvents(m => incoming.push(m), undefined, r => reactions.push(r), c => changes.push(c));
   await started;
-  return { ...f, adapter, incoming, reactions, changes, messages, registrations,
+  return { ...f, client, adapter, incoming, reactions, changes, messages, registrations,
     get subscriptionReads() { return subscriptionReads; }, get messageReads() { return messageReads; },
     async batch(events: any[]) { send({ events }); await drain(); },
     close() { adapter.stopEvents(); send({ events: [] }); f.close(); },
@@ -64,7 +65,7 @@ test('subscribed public only; private add then message; remove immediately block
   const f = await eventFixture();
   try {
     assert.equal(f.subscriptionReads, 1);
-    assert.equal(f.registrations[0].all_public_streams, 'true');
+    assert.equal(Object.hasOwn(f.registrations[0], 'all_public_streams'), false);
     assert.ok(f.registrations[0].event_types.includes('subscription'));
     await f.batch([
       { id: 1, type: 'message', message: raw(1) },
@@ -216,6 +217,7 @@ test('default mode still delivers unsubscribed public streams and makes no subsc
   try {
     await f.batch([{ id: 1, type: 'message', message: raw(1, 'public', 14) }]);
     assert.equal(f.subscriptionReads, 0); assert.equal(f.incoming.length, 1);
+    assert.equal(f.registrations[0].all_public_streams, 'true');
     assert.equal(f.plane.streamAllowed('public'), true);
     assert.equal(f.plane.subscriptions.mode, 'all');
   } finally { f.close(); }
@@ -240,5 +242,101 @@ test('queue requests and handles stream rename/create/delete without granting ol
     assert.deepEqual(f.incoming.map(m => m.messageId), ['4']);
     assert.equal(f.plane.subscriptions.allows(12), false);
     assert.equal(f.plane.subscriptions.allows(14), false);
+  } finally { f.close(); }
+});
+
+
+const quote = (id: number) => `[said](/#narrow/channel/14/near/${id}):\n\n\`\`\`quote\noriginal\n\`\`\`\nreply`;
+const vote = (id: number, message_id = 77) => ({ id, type: 'submessage', submessage_id: id, message_id, sender_id: 7, msg_type: 'widget', content: JSON.stringify({ type: 'vote', key: 'canned,0', vote: 1 }) });
+
+test('unauthorized live messages never enter placement, poll, topic or cursor caches; cached quote sources are authorized independently', async () => {
+  const f = await eventFixture(undefined, 3);
+  try {
+    const forbidden = { ...raw(88, 'public', 14), sender_id: SELF };
+    await f.batch([{ id: 1, type: 'message', message: forbidden }]);
+    const a = f.adapter as any;
+    assert.equal(a.seen.has(88), false);
+    assert.equal(a.highestMessageId, 0);
+    assert.equal(a.polls.records.size, 0);
+    assert.equal(a.activeTopics.streams.has(14), false);
+    a.remember('zulip:public', normalizeMessage(forbidden));
+    assert.equal(a.seen.has(88), false, 'history/GET cache admission has the same guard');
+    // Simulate a stale cache from before the fix: readers must not trust admission alone.
+    a.seen.set(88, { ...normalizeMessage(forbidden), channelId: 'zulip:public', quoteTargets: new Set(), replyToSelf: false });
+    await f.batch([{ id: 2, type: 'message', message: { ...raw(89), content: quote(88) } }]);
+    assert.equal(f.incoming[0].metadata.replyToSelf, false);
+    assert.equal(f.incoming[0].metadata.isReplyToBot, false);
+    assert.ok(!f.incoming[0].tags.includes('chat:reply'));
+    f.messages.set(90, { ...raw(90), content: quote(88) });
+    const history = await f.adapter.fetchHistory('zulip:general', { limit: 10 });
+    assert.equal(history.messages[0].metadata?.replyToSelf, false);
+  } finally { f.close(); }
+});
+
+for (const unknown of [false, true]) {
+  test(`${unknown ? 'unknown state' : 'unsubscribe'} purges messages and topic lists; quote/poll/history cannot reuse old data after resubscribe`, async () => {
+    const f = await eventFixture(undefined, 3);
+    try {
+      const init = { id: 1, msg_type: 'widget', sender_id: SELF, content: JSON.stringify({ widget_type: 'poll', extra_data: { question: 'OLD SECRET POLL?', options: ['Yes'] } }) };
+      await f.batch([
+        { id: 1, type: 'subscription', op: 'add', subscriptions: [publicStream] },
+        { id: 2, type: 'message', message: { ...raw(77, 'public', 14), submessages: [init] } },
+        { id: 3, type: 'message', message: { ...raw(88, 'public', 14), sender_id: SELF } },
+        { id: 4, type: 'message', message: { ...raw(89), content: quote(88) } },
+      ]);
+      const a = f.adapter as any;
+      assert.ok(a.seen.has(88));
+      assert.ok(a.activeTopics.streams.get(14).ready);
+      assert.equal(f.incoming.at(-1).metadata.replyToSelf, true);
+      assert.deepEqual(f.incoming.at(-1).metadata.readStreamIds, [14]);
+      if (unknown) {
+        f.client.callEndpoint = async () => ({ result: 'error' } as any);
+        await f.plane.subscriptions.refresh(true);
+      } else f.plane.subscriptions.apply({ op: 'remove', stream_ids: [14] });
+      assert.equal(a.seen.has(77), false);
+      assert.equal(a.seen.has(88), false);
+      assert.equal(a.activeTopics.streams.has(14), false);
+      assert.equal(a.streamNamesById.has(14), false);
+      assert.equal(a.polls.records.size, 0, 'subscribed polls retain no unscoped records');
+      if (!unknown) assert.equal(a.seen.get(89).replyToSelf, false, 'derived verdict revoked too');
+      assert.equal(await f.adapter.fetchContext('zulip:public', undefined, 10), null);
+      assert.deepEqual((await f.adapter.fetchHistory('zulip:public', { limit: 10 })).messages, []);
+      const before = f.incoming.length;
+      f.messages.set(77, { ...raw(77, 'public', 14), submessages: [init] });
+      await f.batch([vote(5)]);
+      assert.equal(f.incoming.length, before);
+      if (unknown) {
+        f.client.callEndpoint = async () => ({ result: 'success', subscriptions: [general, publicStream] });
+        await f.plane.subscriptions.refresh();
+      } else await f.batch([{ id: 6, type: 'subscription', op: 'add', subscriptions: [publicStream] }]);
+      // Old message/poll state must stay gone after regrant; only a fresh response counts.
+      f.messages.set(77, raw(77, 'public', 14));
+      await f.batch([vote(7)]);
+      assert.equal(f.incoming.length, before);
+      await f.batch([{ id: 8, type: 'message', message: { ...raw(90), content: quote(88) } }]);
+      assert.equal(f.incoming.at(-1).metadata.replyToSelf, false);
+      f.messages.clear(); f.messages.set(91, { ...raw(91), content: quote(88) });
+      assert.equal((await f.adapter.fetchHistory('zulip:general', { limit: 10 })).messages[0].metadata?.replyToSelf, false);
+      assert.equal(f.registrations.length, 1, 'Zulip updates subscriptions on a live queue, including re-add');
+    } finally { f.close(); }
+  });
+}
+
+test('revocation after quote classification but before live emission treats the dependency as absent', async () => {
+  const f = await eventFixture();
+  try {
+    await f.batch([
+      { id: 1, type: 'subscription', op: 'add', subscriptions: [publicStream] },
+      { id: 2, type: 'message', message: { ...raw(88, 'public', 14), sender_id: SELF } },
+    ]);
+    const a = f.adapter as any;
+    const classify = a.classifyQuoteReply.bind(a);
+    a.classifyQuoteReply = async (...args: any[]) => {
+      const verdict = await classify(...args);
+      f.plane.subscriptions.apply({ op: 'remove', stream_ids: [14] });
+      return verdict;
+    };
+    await f.batch([{ id: 3, type: 'message', message: { ...raw(90), content: quote(88) } }]);
+    assert.equal(f.incoming[0].metadata.replyToSelf, false);
   } finally { f.close(); }
 });

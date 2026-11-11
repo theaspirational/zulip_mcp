@@ -535,12 +535,17 @@ announcement goes out so that open succeeds when it lands.
 
 Set `ZULIP_STREAMS_MODE=subscribed` to deliver only streams the **bot itself
 is currently subscribed to**, public or private. The default (`all`, or unset)
-retains the existing behavior. The queue still uses `all_public_streams=true`;
-an empty stream allowlist alone is **not** a subscription boundary.
+retains the existing behavior, including `all_public_streams=true`. Subscribed
+mode omits `all_public_streams` when registering the queue, so Zulip does not
+send unrelated public-stream events. The immutable-ID `StreamReadGate` remains
+a second line of defence; an empty stream allowlist is not read authority.
 
 Invite/subscribe the bot to a private channel in Zulip: subscription events
 apply live, without restarting or editing filters. Unsubscribing stops delivery
-immediately. Explicit `ZULIP_STREAMS` (the initial seed) or filters-file `streams`
+immediately. Zulip updates the receiving user's existing event queues on
+subscription add/remove (including re-subscribe), so these changes do **not**
+require queue re-registration or create a delivery gap. Only queue expiry/error
+re-registers as before, with a fresh subscription snapshot. Explicit `ZULIP_STREAMS` (the initial seed) or filters-file `streams`
 still narrow membership; `mutedStreams` wins. DM rules are unchanged. The same
 policy gates messages, reactions, edits, deletes, poll votes (on their fresh
 message response), history/backscroll/context, and history/poll-result tools.
@@ -548,6 +553,13 @@ Realm-tag message ID modes work unchanged. Stream membership and read decisions
 use immutable stream IDs; rename/create/delete and subscription-property events
 update only the display/address index. Named history requests are pinned to IDs.
 All read results are rechecked after their final asynchronous operation.
+Unauthorized stream messages never enter the adapter's caches. Unsubscribe or
+unknown state synchronously purges unavailable messages, topic lists (including
+pending snapshots), and derived reply verdicts. Quote authors and fallback
+reply targets need current source-stream authorization; an unavailable target
+is treated as absent. Deferred delivery retains its dependency stream IDs for
+send-time checks. Subscribed-mode poll votes reconstruct data only from their
+fresh authorized message response, not unscoped cached poll records.
 `get_stream_topics` and `list_streams` obey this policy too. In subscribed mode,
 `fetch_attachment` also requires `message_id` for a currently readable message
 containing the attachment path; unscoped upload URLs are refused.

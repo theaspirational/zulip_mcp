@@ -128,6 +128,7 @@ export class PollCache {
     }
     return entry;
   }
+  clear(): void { this.records.clear(); }
   remember(message: ZulipRawMessage): void {
     if (!message.submessages?.length) return;
     const state = reconstructPoll(message.submessages);

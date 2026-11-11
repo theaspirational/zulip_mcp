@@ -64,3 +64,28 @@ errors; it also walks every registered tool. Separate probes cover retained
 backlogs/listing, all stop-monitoring variants, and revocation between a helper
 return and the actual wire response. Default-mode compatibility remains covered
 by the existing suite.
+
+
+## Queue and cached dependencies
+
+Subscribed queues omit `all_public_streams`; default queues retain the previous
+`'true'` string parameter. Zulip maintains the live queue's user subscriptions,
+including re-subscriptions; membership changes do not need queue refreshes.
+Queue replacement still reloads membership and fails closed while unknown.
+
+Cache admission and every cached quote/placement/fallback read check immutable
+source IDs. Revocation synchronously removes unavailable messages and topic
+lists, invalidates pending topic snapshots and clears derived reply state.
+History/placement reads spanning policy changes cannot repopulate those caches.
+Poll votes in subscribed mode retain no unscoped poll data: question/options and
+placement are rebuilt from the same fresh authorized message response. Data-only
+poll events do not populate a cache before source authorization.
+
+Reply classifications carry `readStreamIds` through history, batched delivery,
+changes and synthetic catch-up blocks; the final transport checks these alongside
+the message's own stream. Server reply-verdict fallbacks carry the same IDs and
+are cleared on policy changes. Unavailable routing hints and queued payloads are
+purged; retained descriptors/cursors are address bookkeeping only and remain
+unavailable behind the existing ID gate. Regrant does not restore old message,
+poll or topic snapshots. Default `filters_get` has its original schema, key order
+and note; subscription fields exist only in subscribed mode.

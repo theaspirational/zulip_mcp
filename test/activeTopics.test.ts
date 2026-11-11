@@ -250,3 +250,19 @@ test('invalidation retains display history but cannot resurrect pending snapshot
   f.cache.invalidate(null);
   assert.equal(hints(f.cache.decorate(message(), 7)), undefined);
 });
+
+
+test('authorization purge removes warm display history and cannot resurrect a pending topic snapshot', async () => {
+  const f = fixture();
+  f.cache.decorate(message(), 7); await turn();
+  assert.ok(hints(f.cache.decorate(message(31), 7)));
+  f.advance();
+  let release!: (value: any) => void;
+  f.setRetrieve(() => new Promise(resolve => { release = resolve; }));
+  f.cache.decorate(message(32), 7); await turn();
+  f.cache.purgeUnavailable(() => false);
+  release({ result: 'success', topics: [{ name: 'REVOKED SECRET', max_id: 100 }] });
+  await turn();
+  assert.equal((f.cache as any).streams.has(7), false);
+  assert.equal(hints(f.cache.decorate(message(33), 7)), undefined, 'regrant starts cold, without old shownList or topic data');
+});
