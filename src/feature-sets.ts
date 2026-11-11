@@ -73,6 +73,10 @@ export const ZULIP_TAG_ONTOLOGY: TagOntology = {
     'chat:has-image', 'chat:has-file',
   ],
   tags: {
+    'zulip:poll-vote': {
+      desc: 'A poll vote or unvote (data only); addressed on polls sent by this bot, otherwise ambient.',
+      facet: 'lifecycle',
+    },
     'zulip:moved': {
       desc: 'A message the agent has seen moved to another topic or stream (with chat:edited).',
       facet: 'lifecycle',
@@ -156,6 +160,7 @@ export function buildServerCapabilities(options: FeatureSetOptions): McplManifes
  */
 export function featureSetForTool(toolName: string): string | undefined {
   switch (toolName) {
+    case 'send_poll':
     case 'send_message':
     case 'send_dm':
     case 'upload_file':
@@ -175,6 +180,7 @@ export function featureSetForTool(toolName: string): string | undefined {
     case 'filters_update':
     case 'refresh_channels':
       return MESSAGING_FEATURE_SET;
+    case 'get_poll_results':
     case 'fetch_history':
     case 'fetch_around':
     case 'get_channel_history':

@@ -1,7 +1,7 @@
 /** Agent boundary only. API calls, routing cursors and disk state remain numeric. */
 export type IdMode = 'legacy' | 'compat' | 'strict';
 const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const ID_FIELDS = new Set(['message_id', 'messageId', 'targetMessageId', 'oldest_id', 'newest_id',
+const ID_FIELDS = new Set(['message_id', 'messageId', 'pollMessageId', 'targetMessageId', 'oldest_id', 'newest_id',
   'sinceMessageId', 'talliedThroughMessageId', 'last_message_id', 'latest_message_id', 'last_read_message_id', 'lastReadMessageId',
   'first_message_id_allowed_to_move', 'max_id']);
 const ID_ARRAYS = new Set(['message_ids', 'messageIds', 'targetMessageIds']);

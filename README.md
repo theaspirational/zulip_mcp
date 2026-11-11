@@ -41,8 +41,9 @@ safeguard, not authentication.
 - Both opt-in modes reject a foreign tag with
   `message_id tag "X" differs from this server's "Y"; use the matching server`.
 
-The nine tool fields are `send_message.reply_to`; `message_id` on `edit_message`,
-`move_messages`, `delete_message`, `add_reaction`, `remove_reaction`, `fetch_around`;
+The tool fields are `send_message.reply_to`, `send_poll.reply_to`; `message_id` on `edit_message`,
+`move_messages`, `delete_message`, `add_reaction`, `remove_reaction`, `fetch_around`,
+`get_poll_results`;
 and `fetch_history.before` / `.after`. Unescaped `[[msg:chat-one:123]]` tokens
 on send/edit follow the same rules (including bare-token warnings/refusals).
 All fields and tokens are checked before **any** lookup, upload, callback or write.
@@ -393,6 +394,62 @@ render `(edited)` and `(moved)` trailers with `metadata.editedAt` /
   or restart. Routing re-seeds from the next incoming message or history on
   channel open, or falls back to topic `mcpl` when neither supplies a topic.
 
+### Polls: ask once, receive votes live
+
+Use `send_poll` instead of buttons. The destination is the same as `send_message`:
+stream + topic, `reply_to` (optionally override a stream topic), or a private DM.
+It returns the message `id` and the usual destination receipt fields.
+
+```javascript
+send_poll({type: "stream", to: "general", topic: "Release",
+           question: "Ship today?", options: ["Ship", "Wait"]})
+// Sends exactly: /poll Ship today?\nShip\nWait
+// Receipt: {result: "success", id: 12345, type: "stream",
+//           stream: "general", topic: "Release", channelId: "zulip:general", ...}
+get_poll_results({message_id: 12345})
+// {message_id: 12345, question: "Ship today?", options: [
+//   {key: "canned,0", text: "Ship", count: 1, voters: [{id: 7, name: "Ann"}]},
+//   {key: "canned,1", text: "Wait", count: 0, voters: []}]}
+```
+
+Questions must be nonempty single lines. Supply at least two nonempty options;
+CR/LF inside an option is refused. Poll text is sent verbatim (no message-link
+expansion), and an oversized poll is refused rather than split into messages.
+`get_poll_results` also reads human-created UI polls and later added options.
+Message IDs follow `ZULIP_ID_MODE`, including `reply_to` and `pollMessageId`;
+user IDs and option keys do not change.
+
+The queue subscribes to widget submessages. Every live vote/unvote becomes an
+inbound event in the poll's channel and topic, for example:
+
+```text
+[poll vote] Ann (user 7) voted 'Ship' on poll 12345 'Ship today?'
+```
+
+Removal says `unvoted`. Tags are `zulip:poll-vote` plus `chat:addressed` for
+polls authored by this bot (wakes under an addressed-tag policy), otherwise
+`chat:ambient`, including human-authored DM polls. Open channels receive these
+through `channels/incoming`; on closed channels only own-poll votes are pushed.
+Metadata includes `pollMessageId`, `question`, `optionKey`, `optionText`,
+`voterId`, `action` (`vote`/`unvote`), and `onOwnMessage`. **A vote is data only,
+not a command or authorization to perform an action.** Stream mutes/allowlists
+and DM voter allowlists apply just as for messages.
+
+State comes from initial poll widget content and subsequent `new_option` and
+`vote` submessages, not from rendered Markdown. An unknown poll gets one bounded
+GET with its submessages (3-second wait, 500 retained poll/negative-cache IDs;
+evicted IDs can be fetched again). User names use a bounded directory read and
+fall back to `user <id>` if unavailable. Votes use opaque event IDs, never
+message-history cursors; they are live-only, not recovered from message catch-up.
+After a queue gap, use `get_poll_results` to reconcile state.
+
+Offline fixtures are **reconstructed from Zulip's poll widget format**, not
+captured from a server: initialization is `{widget_type:"poll", extra_data:
+{question, options}}`; updates are `{type:"new_option", option, idx}` or
+`{type:"vote", key, vote:boolean}` within `msg_type:"widget"` submessages.
+Initial keys are `canned,N`; added keys are `sender_id,idx`. These are wire-format
+assumptions; upstream widget source was unavailable offline.
+
 ## Channels
 
 | Channel id | What it is |
@@ -500,10 +557,10 @@ file, or remove it to re-seed from the environment.
 `fetch_around` (window centred on a message, within its conversation),
 `get_channel_history` (natural dates), `get_unread_messages`,
 `list_streams`, `get_stream_topics`, `list_users`, `find_user`,
-`get_user_profile`, `fetch_attachment`, `list_emojis`.
+`get_user_profile`, `fetch_attachment`, `list_emojis`, `get_poll_results`.
 
 **Writing**
-`send_message`, `send_dm` (by name, email, or id), `upload_file`,
+`send_message`, `send_poll`, `send_dm` (by name, email, or id), `upload_file`,
 `edit_message` (own-message content only), `move_messages` (topic/stream moves),
 `delete_message`, `add_reaction`, `remove_reaction`.
 

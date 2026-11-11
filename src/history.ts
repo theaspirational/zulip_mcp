@@ -17,6 +17,7 @@ import { cleanMarkdown, extractZulipAttachments, type AttachmentRef } from './co
 
 /** A Zulip message as `GET /messages` and the event queue both deliver it. */
 export interface ZulipRawMessage {
+  submessages?: import('./polls.js').WidgetSubmessage[];
   id: number;
   sender_id: number;
   sender_full_name: string;

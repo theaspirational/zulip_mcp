@@ -7,6 +7,8 @@
  * are the plain-MCP surface every client gets.
  */
 
+import { pollContent, reconstructPoll, pollResults, PollUsers, boundedPollRead } from "./polls.js";
+import { ZULIP_MAX_MESSAGE_LENGTH } from "./content.js";
 import { LOCATE_TIMEOUT_MS, withTimeout } from "./platforms/zulip.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -388,17 +390,17 @@ export class ZulipToolRuntime {
     const bare = () => { if (!warned) { warned = true; console.error(`[zulip-mcp] ${warning}`); } };
     try {
       args = { ...args };
-      const fields = name === "send_message" ? ["reply_to"] : name === "fetch_history" ? ["before", "after"]
-        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around"].includes(name) ? ["message_id"] : [];
+      const fields = ["send_message", "send_poll"].includes(name) ? ["reply_to"] : name === "fetch_history" ? ["before", "after"]
+        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around", "get_poll_results"].includes(name) ? ["message_id"] : [];
       for (const field of fields) {
-        // Only send_message has the historical strict-schema absent sentinels.
+        // The send destination contract has historical strict-schema absent sentinels.
         if (field === "reply_to" && [undefined, null, "", 0].includes(args[field])) continue;
         if (["before", "after"].includes(field) && args[field] === undefined) continue;
         args[field] = this.messageIds.parse(args[field], bare);
       }
       // Validate ALL tokens before resolving reply destinations, users, uploads or any other API call.
       if (["send_message", "edit_message"].includes(name) && typeof args.content === "string") validateMessageLinks(args.content, this.messageIds, bare);
-      const result = this.messageIds.project(await this.handleValidatedCall(name, args), ["send_message", "send_dm"].includes(name));
+      const result = this.messageIds.project(await this.handleValidatedCall(name, args), ["send_message", "send_dm", "send_poll"].includes(name));
       return warned ? { ...result, warnings: [warning] } : result;
     } catch (error) {
       if (warned && error instanceof Error) error.message += `\n${warning}`;
@@ -724,7 +726,25 @@ export class ZulipToolRuntime {
         };
       }
 
+      case "get_poll_results": {
+        const id = args.message_id;
+        if (!Number.isSafeInteger(id) || id <= 0) throw new Error("message_id must be a positive safe integer");
+        const result = await boundedPollRead<any>(zulipClient.messages.getById({ message_id: id, apply_markdown: false }));
+        assertApiSuccess(result, "reading poll");
+        if (result.message?.id !== id) throw new Error("response contained a different message id");
+        const state = reconstructPoll(result.message?.submessages);
+        if (!state) throw new Error("message has no supported poll widget");
+        return pollResults(id, state, await new PollUsers().get(zulipClient));
+      }
+
+      case "send_poll":
       case "send_message": {
+        const isPoll = name === "send_poll";
+        if (isPoll) {
+          const content = pollContent(args.question, args.options);
+          if (content.length > ZULIP_MAX_MESSAGE_LENGTH) throw new Error("poll exceeds the message length limit; polls cannot be split");
+          args = { type: args.type, to: args.to, topic: args.topic, reply_to: args.reply_to, content };
+        }
         // Strict-schema callers include unused fields as null, empty strings or reply_to: 0.
         // A standalone stream's explicitly empty topic is still invalid.
         const absent = (value: unknown) => value === "" ? undefined : value ?? undefined;
@@ -735,10 +755,13 @@ export class ZulipToolRuntime {
         }
         if (args.topic === "") args.topic = undefined;
         if (args.reply_to === undefined && (args.to === undefined || args.type === undefined)) throw new Error("type and to are required without reply_to");
+        if (isPoll && args.reply_to === undefined && ["stream", "channel"].includes(args.type) && !args.topic?.trim()) {
+          throw new Error("topic is required for a stream poll");
+        }
         const hasText = typeof args.content === "string" && args.content.trim() !== "";
         const hasFiles = Array.isArray(args.attachments) && args.attachments.length > 0;
         if (!hasText && !hasFiles) throw new Error("content is required (or at least one attachment)");
-        const resolvedContent = hasText ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session, this.messageIds)) : "";
+        const resolvedContent = isPoll ? args.content : hasText ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session, this.messageIds)) : "";
         const reply = args.reply_to !== undefined ? await this.replyDestination(args) : undefined;
         if (reply) args = { ...args, type: reply.type, to: reply.to, topic: reply.topic };
         const uploaded = await this.uploadFor(args);

@@ -35,6 +35,7 @@
  *     error object) also backs off rather than hot-spinning the poll.
  */
 
+import type { WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 import type { PlatformSystemEvent, OnSystemEvent } from './adapter.js';
 
@@ -50,6 +51,7 @@ export interface ZulipEventMessage {
   type: string;
   /** Present on stream messages; absent on direct messages. */
   stream_id?: number;
+  submessages?: WidgetSubmessage[];
 }
 
 /** `flags` are the receiving user's message flags from the event envelope
@@ -149,6 +151,7 @@ export type OnZulipMessageChange = (change: ZulipMessageChange) => void;
  */
 export interface ZulipRetrieveResponse {
   events?: ({ id: number; type: string; message?: ZulipEventMessage; flags?: string[] }
+    & { submessage?: WidgetSubmessage }
     & Partial<ZulipReactionEvent>
     & Partial<ZulipUpdateMessageEvent>
     & Partial<ZulipDeleteMessageEvent>)[];
@@ -252,10 +255,11 @@ export class ZulipEventLoop {
     onReaction?: OnZulipReaction,
     onChange?: OnZulipMessageChange,
     onQueueRegistered?: () => void,
+    onSubmessage?: (submessage: WidgetSubmessage) => void | Promise<void>,
   ): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.pollLoop(zulipClient, onMessage, onSystemEvent, onReaction, onChange, onQueueRegistered);
+        await this.pollLoop(zulipClient, onMessage, onSystemEvent, onReaction, onChange, onQueueRegistered, onSubmessage);
       } catch (error) {
         if (this.stopped) return;
         console.error('Zulip event loop error, restarting in 5s:', error);
@@ -278,6 +282,7 @@ export class ZulipEventLoop {
     onReaction?: OnZulipReaction,
     onChange?: OnZulipMessageChange,
     onQueueRegistered?: () => void,
+    onSubmessage?: (submessage: WidgetSubmessage) => void | Promise<void>,
   ): Promise<void> {
     // Register event queue.
     // Two zulip-js quirks to work around:
@@ -295,7 +300,7 @@ export class ZulipEventLoop {
     // model and rejects the registration with "client_capabilities
     // [\"notification_settings_null\"] field is missing" when it is absent.
     const registration = await zulipClient.queues.register({
-      event_types: ['message', 'reaction', 'update_message', 'delete_message'],
+      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'submessage'],
       all_public_streams: 'true',
       apply_markdown: 'false',
       client_capabilities: JSON.stringify({ notification_settings_null: false, bulk_message_deletion: true }),
@@ -390,6 +395,14 @@ export class ZulipEventLoop {
         for (const event of response.events) {
           if (this.stopped) return;
           lastEventId = event.id;
+
+          if (event.type === 'submessage') {
+            if (onSubmessage && event.submessage?.msg_type === 'widget') {
+              try { await onSubmessage(event.submessage); }
+              catch (error) { console.error('Zulip event loop: submessage handler failed:', error); }
+            }
+            continue;
+          }
 
           if (event.type === 'reaction' && onReaction && typeof event.message_id === 'number') {
             try {

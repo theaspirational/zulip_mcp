@@ -14,6 +14,7 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
+import { PollCache, PollUsers, applyPollUpdate, parsePollSubmessage, type WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 
 import type {
@@ -215,6 +216,8 @@ export class ZulipAdapter implements PlatformAdapter {
   highestMessageId = 0;
   onSelfChanged?: OnMessageChange;
 
+  private readonly polls = new PollCache();
+  private readonly pollUsers = new PollUsers();
   private eventLoop: ZulipEventLoop | null = null;
   private readonly messageIds: MessageIds;
   private readonly activeTopics: ActiveTopicsCache;
@@ -1178,6 +1181,7 @@ export class ZulipAdapter implements PlatformAdapter {
         }
       : undefined;
     loop.start(this.zulipClient, async (_streamName, msg, flags) => {
+      this.polls.remember(msg as ZulipRawMessage);
       const m = normalizeMessage({ ...(msg as ZulipRawMessage), flags });
       // Remember our own messages too: reactions to them are the ones that
       // matter most ("someone reacted to your message").
@@ -1213,9 +1217,58 @@ export class ZulipAdapter implements PlatformAdapter {
       if (m.streamName !== null && streamId !== undefined) this.streamNamesById.set(streamId, m.streamName);
       const descriptor = m.streamName !== null ? this.streamDescriptor(m.streamName, streamId) : undefined;
       onMessage(this.activeTopics.decorate(toIncoming(channelId, m, this.identity), streamId), descriptor);
-    }, onSystemEvent, reactionHandler, changeHandler).catch(error => {
+    }, onSystemEvent, reactionHandler, changeHandler, undefined, async (submessage) => {
+      await changeChain;
+      if (this.eventLoop !== loop) return;
+      await this.onPollSubmessage(submessage, (message, descriptor) => {
+        if (this.eventLoop === loop) onMessage(message, descriptor);
+      });
+    }).catch(error => {
       console.error('Zulip event loop failed:', error);
     });
+  }
+
+  private async onPollSubmessage(s: WidgetSubmessage, emit: OnIncomingMessage): Promise<void> {
+    if (!Number.isSafeInteger(s.message_id) || s.message_id! <= 0 || !Number.isSafeInteger(s.id) || s.id <= 0) return;
+    const update = parsePollSubmessage(s);
+    if (!update) return;
+    const messageId = s.message_id!;
+    const record = await this.polls.locate(this.zulipClient, messageId);
+    record.state = applyPollUpdate(record.state, update);
+    if (update.type !== 'vote' || !record.state || !record.message) return;
+    if (!this.seen.has(s.message_id!)) {
+      const m = normalizeMessage(record.message);
+      this.remember(channelIdOf(m, this.identity.selfUserId), m);
+    }
+    const option = record.state.options.get(update.key);
+    if (!option) return;
+    // Use the same placement cache as reactions/edits, including move invalidation.
+    const where = await this.locate(s.message_id!, 'a poll vote');
+    if (!where) return;
+    if (!where.isDm && !this.filters.streamAllowed(streamNameOf(where.channelId))) return;
+    const users = await this.pollUsers.get(this.zulipClient);
+    const voter = users.get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
+    if (where.isDm && !this.filters.dmAllowed({ id: update.voterId, email: voter.email })) return;
+    const own = this.identity.selfUserId !== null && where.authorId === this.identity.selfUserId;
+    const m = normalizeMessage(record.message);
+    const streamName = streamNameOf(where.channelId);
+    const streamId = [...this.streamNamesById].find(([, name]) => name === streamName)?.[0]
+      ?? (m.streamName === streamName ? record.message.stream_id : undefined);
+    const descriptor = where.isDm ? this.describeDm(m).descriptor : this.streamDescriptor(streamName, streamId);
+    emit({
+      channelId: where.channelId,
+      // Opaque event id: not a message cursor. Multiple votes on one old poll
+      // must not advance the history watermark or collide with one another.
+      messageId: `poll:${s.message_id}:${s.id}`,
+      threadId: where.topic || undefined,
+      author: { id: String(update.voterId), name: voter.name },
+      timestamp: new Date().toISOString(),
+      content: [{ type: 'text', text: `[poll vote] ${voter.name} (user ${update.voterId}) ${update.action === 'vote' ? 'voted' : 'unvoted'} '${option.text}' on poll ${this.messageIds.format(s.message_id!)} '${record.state.question}'` }],
+      tags: ['zulip:poll-vote', own ? 'chat:addressed' : 'chat:ambient'],
+      metadata: { pollVote: true, pollMessageId: s.message_id, optionKey: update.key, optionText: option.text,
+        voterId: update.voterId, action: update.action, question: record.state.question, onOwnMessage: own,
+        topic: where.topic, isDM: where.isDm, senderEmail: voter.email },
+    }, descriptor);
   }
 
   stopEvents(): void {

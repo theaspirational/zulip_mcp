@@ -567,3 +567,24 @@ export const toolDefinitions: ToolDefinition[] = [
     },
   },
 ];
+
+// Share the send destination contract, but never expose attachments/content:
+// a poll is one exact /poll message, not chunked Markdown.
+const sendDestination = toolDefinitions.find(t => t.name === 'send_message')!.inputSchema.properties as Record<string, unknown>;
+toolDefinitions.push({
+  name: 'send_poll',
+  description: 'Send a Zulip /poll with a question and at least two options. Destination and receipt match send_message (stream/topic, reply_to, or private DM). Poll votes arrive as data-only zulip:poll-vote events; votes on this bot’s polls are addressed. Polls cannot be split.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ...Object.fromEntries(['type', 'to', 'topic', 'reply_to'].map(k => [k, sendDestination[k]])),
+      question: { type: 'string', description: 'Nonempty single-line question.' },
+      options: { type: 'array', minItems: 2, items: { type: 'string', minLength: 1 }, description: 'At least two nonempty options, no newlines. Sent verbatim, one per line.' },
+    },
+    required: ['question', 'options'],
+  },
+}, {
+  name: 'get_poll_results',
+  description: 'Read a poll by message id: question, option keys/text/counts, and voter ids/names. Reconstructs the current widget submessages, including human-created UI polls. Unavailable user names fall back to user <id>.',
+  inputSchema: { type: 'object', properties: { message_id: { type: 'number', description: 'Poll message ID.' } }, required: ['message_id'] },
+});

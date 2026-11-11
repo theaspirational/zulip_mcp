@@ -3656,3 +3656,68 @@ for (const mode of ['compat', 'strict'] as const) {
     assert.ok(!readFileSync(join(dir, 'test.delivery.json'), 'utf8').includes('alpha:'), 'disk format remains numeric');
   });
 }
+
+function pollVoteEvent(id: number, own = true): IncomingChannelMessage {
+  return {
+    channelId: 'zulip:general', messageId: `poll:77:${id}`, threadId: 'Decision',
+    author: { id: '7', name: 'Ann' }, timestamp: new Date().toISOString(),
+    content: [{ type: 'text', text: "[poll vote] Ann (user 7) voted 'Ship' on poll alpha:77 'Release?'" }],
+    tags: ['zulip:poll-vote', own ? 'chat:addressed' : 'chat:ambient'],
+    metadata: { pollVote: true, pollMessageId: 77, optionKey: 'canned,0', optionText: 'Ship',
+      voterId: 7, action: 'vote', question: 'Release?', onOwnMessage: own, topic: 'Decision', isDM: false },
+  };
+}
+
+test('poll votes wake on own polls, carry tagged metadata, route replies and never change history cursors', async t => {
+  const h = harness({ messageIds: new MessageIds('alpha', 'strict') });
+  t.after(() => h.close());
+  await initialize(h, true); await settled(h);
+  const watermark = h.server.delivery.watermark('zulip:general');
+  h.adapter.emit!(pollVoteEvent(1));
+  h.adapter.emit!(pollVoteEvent(2));
+  await until(() => h.pushed.length === 2, 'two own poll pushes');
+  assert.notEqual(h.pushed[0].eventId, h.pushed[1].eventId);
+  assert.deepEqual(h.pushed[0].tags, ['zulip:poll-vote', 'chat:addressed']);
+  const origin = h.pushed[0].origin as any;
+  assert.equal(origin.pollMessageId, 'alpha:77');
+  assert.equal(origin.optionKey, 'canned,0'); assert.equal(origin.optionText, 'Ship');
+  assert.equal(origin.voterId, 7); assert.equal(origin.action, 'vote');
+  assert.equal(origin.mcplChannelId, 'zulip:general'); assert.equal(origin.topic, 'Decision');
+  await until(() => (h.server.channelManager as any).lastIncoming.get('zulip:general')?.hints?.threadId === 'Decision', 'poll push accepted and routing remembered');
+  await h.host.sendRequest(method.CHANNELS_PUBLISH, { channelId: 'zulip:general', content: [{ type: 'text', text: 'Acknowledged' }] });
+  assert.equal(h.adapter.published.at(-1)?.hints?.threadId, 'Decision');
+  assert.equal(h.server.delivery.watermark('zulip:general'), watermark);
+  assert.deepEqual(h.server.delivery.heldIds('zulip:general'), []);
+
+  h.adapter.emit!(pollVoteEvent(3, false));
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.pushed.length, 2, 'human poll votes are ambient on closed channels');
+  await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:general' });
+  h.adapter.emit!(pollVoteEvent(4, false));
+  await until(() => h.incoming.length === 1, 'ambient poll vote on open channel');
+  assert.deepEqual(h.incoming[0].tags, ['zulip:poll-vote', 'chat:ambient']);
+  assert.equal((h.incoming[0].metadata as any).pollMessageId, 'alpha:77');
+  assert.equal(h.server.delivery.watermark('zulip:general'), watermark);
+});
+
+test('poll votes respect mutes and live allowlist changes, even addressed votes', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'zulip-poll-filters-'));
+  const plane = new FiltersPlane(join(dir, 'filters.json'), {}, { pollMs: 60_000 });
+  plane.start();
+  const h = harness({ filters: plane });
+  t.after(async () => { await h.close(); plane.stop(); rmSync(dir, { recursive: true, force: true }); });
+  await initialize(h, true); await settled(h);
+  assert.equal(plane.update(f => ({ ...f, mutedStreams: ['general'] })).ok, true);
+  h.adapter.emit!(pollVoteEvent(1));
+  await h.host.sendRequest(method.CHANNELS_OPEN, { channelId: 'zulip:general' });
+  h.adapter.emit!(pollVoteEvent(2));
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.pushed.length + h.incoming.length, 0);
+  assert.equal(plane.update(f => ({ ...f, mutedStreams: [], streams: ['dev'] })).ok, true);
+  h.adapter.emit!(pollVoteEvent(3));
+  await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal(h.pushed.length + h.incoming.length, 0);
+  assert.equal(plane.update(f => ({ ...f, streams: ['general'] })).ok, true);
+  h.adapter.emit!(pollVoteEvent(4));
+  await until(() => h.incoming.length === 1, 'allowed unmuted poll vote');
+});

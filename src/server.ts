@@ -983,7 +983,8 @@ export class ZulipMcplServer {
     const channelId = message.channelId;
     const id = Number(message.messageId);
     const meta = (typeof message.metadata === 'object' && message.metadata !== null ? message.metadata : {}) as Record<string, unknown>;
-    const addressed = meta.mentioned === true || meta.isDM === true || meta.replyToSelf === true;
+    const addressed = meta.pollVote === true ? meta.onOwnMessage === true
+      : meta.mentioned === true || meta.isDM === true || meta.replyToSelf === true;
 
     // Muted stream, or outside the allowlist: nothing reaches the agent —
     // ambient AND mentions — and nothing is tallied, before any other
@@ -1032,6 +1033,15 @@ export class ZulipMcplServer {
 
     // The watermark moves in onDelivered, once the host has accepted it.
     if (this.deliverToOpen(channelId, message)) return;
+
+    // Widget events have opaque ids, not message-history cursors. Never
+    // hold/tally/replay them as messages or advance a poll's old watermark.
+    if (meta.pollVote === true) {
+      if (addressed && await this.pushEvent(message, `zulip_${message.messageId}`, meta)) {
+        this.channelManager.noteConversation(channelId, message);
+      }
+      return;
+    }
 
     if (addressed) {
       this.delivery.hold(channelId, id, 'queued');
