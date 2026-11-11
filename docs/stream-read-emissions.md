@@ -92,7 +92,7 @@ poll or topic snapshots. Default `filters_get` has its original schema, key orde
 and note; subscription fields exist only in subscribed mode.
 
 
-## System, notice and diagnostic audit (TASK-33Y14 fix round)
+## System, notice and diagnostic audit
 
 | Output | Subscribed-mode provenance / action |
 | --- | --- |
