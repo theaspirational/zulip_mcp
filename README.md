@@ -435,20 +435,45 @@ Metadata includes `pollMessageId`, `question`, `optionKey`, `optionText`,
 not a command or authorization to perform an action.** Stream mutes/allowlists
 and DM voter allowlists apply just as for messages.
 
-State comes from initial poll widget content and subsequent `new_option` and
-`vote` submessages, not from rendered Markdown. An unknown poll gets one bounded
-GET with its submessages (3-second wait, 500 retained poll/negative-cache IDs;
-evicted IDs can be fetched again). User names use a bounded directory read and
-fall back to `user <id>` if unavailable. Votes use opaque event IDs, never
-message-history cursors; they are live-only, not recovered from message catch-up.
-After a queue gap, use `get_poll_results` to reconcile state.
+State comes from initial poll widget content and subsequent `question`,
+`new_option` and `vote` submessages, not rendered Markdown. Question and option
+updates reduce data only; they do not themselves notify. Up to 500 poll states
+are retained, with bounded question/option text, option counts and voter sets.
+
+**Every vote/unvote notification requires its own fresh GET
+`/messages/{poll_id}` after the event arrives.** Only that response supplies the
+stream/topic or DM recipients, poll author (including the own-poll check), and
+the destination checked against stream allowlists/mutes or DM voter allowlists.
+Cached placement, history and event envelopes never route a vote. A vote arriving
+before a move can therefore notify in the new location when its GET returns the
+new location; it is dropped if that destination is muted or disallowed.
+
+Reads run in the background without blocking ordinary delivery. The adapter-wide
+budget is 20 GETs burst, refilling one token every 3 seconds, with at most 20
+outstanding requests and a 3-second wait per notification. A timeout cannot
+cancel Zulip's underlying GET, so it occupies a concurrency slot until settled;
+late responses never deliver. There is no placement or negative-lookup cache.
+Notifications are dropped, with counters in `pollDrops`, for `lookup_budget`,
+`lookup_in_flight`, `lookup_timeout`, `lookup_failed`, `message_unavailable`
+(deleted/invisible or unsuccessful response), `invalid_message` (malformed
+response), `unknown_poll`, `unknown_option`, `stream_disallowed`, `stream_muted`
+or `dm_disallowed`; unexpected processing failures count as `notification_failed`.
+A dropped notification does not undo the vote: `get_poll_results` reads the
+server's current submessages independently of the notification budget.
+
+User names use one bounded directory read and fall back to `user <id>` if
+unavailable. Votes use opaque event IDs, never message-history cursors; they are
+live-only, not recovered from message catch-up. After a queue gap, use
+`get_poll_results` to reconcile state.
 
 Offline fixtures are **reconstructed from Zulip's poll widget format**, not
-captured from a server: initialization is `{widget_type:"poll", extra_data:
-{question, options}}`; updates are `{type:"new_option", option, idx}` or
-`{type:"vote", key, vote:boolean}` within `msg_type:"widget"` submessages.
-Initial keys are `canned,N`; added keys are `sender_id,idx`. These are wire-format
-assumptions; upstream widget source was unavailable offline.
+captured from a server. Checked against offline Zulip 12.3 sources, including
+`validator.py`: initialization is `{widget_type:"poll", extra_data:
+{question, options}}`; updates are `{type:"question", question}`,
+`{type:"new_option", option, idx}` or `{type:"vote", key, vote:1}` (add) /
+`{type:"vote", key, vote:-1}` (remove), within `msg_type:"widget"` submessages.
+Votes are numeric **+1/-1, not booleans**. Initial keys are `canned,N`; added
+keys are `sender_id,idx`.
 
 ## Channels
 

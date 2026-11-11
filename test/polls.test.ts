@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyPollUpdate, boundedPollRead, parsePollSubmessage, PollCache, pollContent, reconstructPoll, POLL_LIMITS, pollDrops, PlacementVersions, type WidgetSubmessage } from '../src/polls.ts';
+import { applyPollUpdate, boundedPollRead, parsePollSubmessage, PollCache, pollContent, reconstructPoll, POLL_LIMITS, pollDrops, PollLookups, type WidgetSubmessage } from '../src/polls.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { ZulipAdapter, type FilterView } from '../src/platforms/zulip.ts';
 import { MessageIds } from '../src/message-ids.ts';
@@ -52,18 +52,6 @@ test('non-poll widgets, malformed JSON, invalid vote keys/types and absent initi
   assert.equal(state.options.size, 2, 'a missing key never becomes executable or an invented option');
 });
 
-test('poll reads have a timeout and negative lookups are fetched once with bounded retention', async () => {
-  await assert.rejects(boundedPollRead(new Promise(() => {}), 5), /timed out/);
-  let gets = 0;
-  const cache = new PollCache(2);
-  const client = { messages: { async getById() { gets++; throw new Error('unavailable'); } } };
-  await cache.locate(client, 1); await cache.locate(client, 1);
-  assert.equal(gets, 1);
-  await cache.locate(client, 2); await cache.locate(client, 3);
-  await cache.locate(client, 1);
-  assert.equal(gets, 3, 'negative attempts survive record eviction');
-});
-
 async function eventFixture(events: any[], message = raw(), filters?: FilterView, ids?: MessageIds, later: any[] = [], changes = true) {
   const incoming: IncomingChannelMessage[] = [];
   const registrations: any[] = [];
@@ -78,6 +66,7 @@ async function eventFixture(events: any[], message = raw(), filters?: FilterView
         await new Promise(resolve => setImmediate(resolve));
         return { events: later };
       }
+      await new Promise(resolve => setImmediate(resolve));
       adapter.stopEvents(); finish(); return { events: [] };
     } },
     messages: { async getById(p: any) { gets++; assert.equal(p.message_id, 77); return { result: 'success', message }; } },
@@ -91,14 +80,14 @@ async function eventFixture(events: any[], message = raw(), filters?: FilterView
 }
 const envelope = (s: WidgetSubmessage) => ({ ...s, id: s.id + 10, type: 'submessage', submessage_id: s.id });
 
-test('live widget events emit vote/unvote text and metadata; bot polls addressed, unique ids, no extra GET', async () => {
+test('live widget events emit vote/unvote text and metadata; bot polls addressed, unique ids, fresh GET per vote', async () => {
   const result = await eventFixture([
     { id: 0, type: 'message', message: raw() },
     envelope(added), envelope(vote(5, '42,0')), envelope(vote(6, '42,0', false)),
     envelope(sub(7, { type: 'vote', key: 'canned,1', vote: 1 }, 42)),
     envelope({ ...vote(8), msg_type: 'other' }),
   ], raw(), undefined, new MessageIds('acme', 'strict'));
-  assert.equal(result.gets, 0);
+  assert.equal(result.gets, 3);
   assert.equal(result.users, 1);
   assert.ok(result.registrations[0].event_types.includes('submessage'));
   assert.equal(result.incoming.length, 3, 'no init/new_option/other-widget messages');
@@ -118,90 +107,29 @@ test('live widget events emit vote/unvote text and metadata; bot polls addressed
 test('known human UI polls remain ambient', async () => {
   const ui = raw({ content: '', sender_id: 42, submessages: [init, added, vote(5, '42,0')] });
   const result = await eventFixture([{ id: 0, type: 'message', message: ui }, envelope(vote(5, '42,0')), envelope(vote(6, '42,0', false))], ui);
-  assert.equal(result.gets, 0);
+  assert.equal(result.gets, 2);
   assert.equal(result.incoming.length, 3);
   assert.deepEqual(result.incoming[1].tags, ['zulip:poll-vote', 'chat:ambient']);
   assert.match((result.incoming[1].content[0] as any).text, /'Review first'/);
-});
-
-test('a poll vote waits for an earlier topic move and follows the current topic', async () => {
-  const result = await eventFixture([
-    { id: 0, type: 'message', message: raw() },
-    { id: 1, type: 'update_message', message_id: 77, user_id: 42, stream_id: 12,
-      orig_subject: 'Release', subject: 'Decision', edit_timestamp: 1700000010 },
-    envelope(vote(2)),
-  ]);
-  assert.equal(result.gets, 0);
-  assert.equal(result.incoming.length, 1);
-  assert.equal(result.incoming[0].threadId, 'Decision');
-  assert.equal((result.incoming[0].metadata as any).topic, 'Decision');
 });
 
 const evictionMessages = () => Array.from({ length: 2001 }, (_, i) => ({
   id: 100 + i, type: 'message', message: raw({ id: 1000 + i, submessages: [] }),
 }));
 
-for (const scenario of ['disallowed', 'topic', 'muted'] as const) {
-  test(`evicted own poll refreshes current placement after a ${scenario} move`, async () => {
-    const crossStream = scenario !== 'topic';
-    const destination = raw({ subject: crossStream ? 'Release' : 'Decision', ...(crossStream ? { stream_id: 13, display_recipient: 'private' } : {}) });
-    const before = pollDrops.unknown_placement ?? 0;
-    const checked: string[] = [];
-    const filters: FilterView = {
-      streamAllowed: name => { checked.push(name); return scenario !== 'disallowed' || name === 'general'; },
-      streamMuted: name => scenario === 'muted' && name === 'private',
-      dmAllowed: () => true,
-    };
-    const result = await eventFixture([
-      { id: 0, type: 'message', message: raw() },
-      { id: 1, type: 'update_message', message_id: 77, user_id: 42, stream_id: 12,
-        orig_subject: 'Release', ...(crossStream ? { new_stream_id: 13 } : { subject: 'Decision' }) },
-      ...evictionMessages(), envelope(vote(2)),
-    ], destination, filters, undefined, [envelope(vote(3))]);
-    assert.equal(result.gets, 1, 'evicted placement requires a bounded background GET');
-    assert.equal(pollDrops.unknown_placement, before + 1, 'first vote is dropped, not guessed');
-    assert.equal(result.incoming.length, scenario === 'topic' ? 1 : 0);
-    if (scenario === 'topic') {
-      assert.equal(result.incoming[0].threadId, 'Decision');
-      assert.equal(result.incoming[0].channelId, 'zulip:general');
-    } else assert.equal(checked.at(-1), 'private', 'policy checks the verified destination');
-  });
-}
-
-for (const propagate of ['change_one', 'change_all', 'change_later']) {
-  test(`poll moves invalidate placement without a change subscriber (${propagate})`, async () => {
-    const anchor = propagate === 'change_one' ? 77 : 70;
-    const before = pollDrops.unknown_placement ?? 0;
-    const result = await eventFixture([
-      { id: 0, type: 'message', message: raw() },
-      { id: 1, type: 'update_message', message_id: anchor, user_id: 42, stream_id: 12,
-        orig_subject: 'Release', subject: 'Decision', propagate_mode: propagate },
-      envelope(vote(2)),
-    ], raw({ subject: 'Decision' }), undefined, undefined, [envelope(vote(3))], false);
-    assert.equal(result.gets, 1);
-    assert.equal(pollDrops.unknown_placement, before + 1);
-    assert.equal(result.incoming.length, 1);
-    assert.equal(result.incoming[0].threadId, 'Decision');
-  });
-}
-
-test('a move overtaking a poll placement GET prevents stale restoration', async () => {
-  const cache = new PollCache();
-  cache.remember(raw());
-  let release!: (value: unknown) => void;
-  const pending = cache.locate({ messages: { getById: () => new Promise(resolve => { release = resolve; }) } }, 77, true);
-  await Promise.resolve();
-  cache.invalidatePlacement(id => id === 77);
-  release({ result: 'success', message: raw() });
-  assert.equal((await pending).placementUnknown, true);
-});
-
-test('unknown live initialization starts a background read; premature votes are counted drops', async () => {
-  const before = pollDrops.unknown_poll ?? 0;
+test('unknown live initialization reduces data without GETs; its vote fetches a fresh route', async () => {
   const result = await eventFixture([envelope(init), envelope(added), envelope(vote(5, '42,0'))], raw({ sender_id: 42, submessages: [] }));
   assert.equal(result.gets, 1);
-  assert.equal(result.incoming.length, 0);
-  assert.equal(pollDrops.unknown_poll, before + 1);
+  assert.equal(result.incoming.length, 1);
+  assert.deepEqual(result.incoming[0].tags, ['zulip:poll-vote', 'chat:ambient']);
+});
+
+test('a previously unknown poll vote reconstructs data and routes only from its fresh response', async () => {
+  const result = await eventFixture([envelope(vote(2))], raw({ display_recipient: 'current', stream_id: 99, subject: 'Now' }));
+  assert.equal(result.gets, 1);
+  assert.equal(result.incoming.length, 1);
+  assert.equal(result.incoming[0].channelId, 'zulip:current');
+  assert.equal(result.incoming[0].threadId, 'Now');
 });
 
 test('stream and DM voter allowlists apply to poll events', async () => {
@@ -294,13 +222,19 @@ test('get_poll_results rejects non-polls and invalid legacy ids', async t => {
   assert.equal(gets.length, 1);
 });
 
- test('501 unknown IDs cycled four times share one budget independent of eviction', async () => {
+test('501 IDs cycled four times share one budget independent of state eviction', async () => {
   let gets = 0;
-  const cache = new PollCache(500, () => 0);
+  const cache = new PollCache(500);
+  const lookups = new PollLookups(() => 0);
   const client = { messages: { async getById() { gets++; return { result: 'error' }; } } };
-  for (let cycle = 0; cycle < 4; cycle++) for (let id = 1; id <= 501; id++) await cache.locate(client, id);
+  const before = pollDrops.lookup_budget ?? 0;
+  for (let cycle = 0; cycle < 4; cycle++) for (let id = 1; id <= 501; id++) {
+    cache.entry(id);
+    await lookups.fetch(client, id);
+  }
   assert.equal(gets, POLL_LIMITS.lookups);
- });
+  assert.equal(pollDrops.lookup_budget, before + 2004 - POLL_LIMITS.lookups);
+});
 
  test('100,000-option initialization and retained voters/text/polls are bounded', () => {
   const state = reconstructPoll([sub(1, { widget_type: 'poll', extra_data: {
@@ -331,8 +265,6 @@ for (const cached of [false, true]) test(`an unresolved ${cached ? 'placement' :
   const read = new Promise(resolve => { release = resolve; });
   let reads = 0;
   const incoming: IncomingChannelMessage[] = [];
-  const reason = cached ? 'unknown_placement' : 'unknown_poll';
-  const before = pollDrops[reason] ?? 0;
   const client = {
     queues: { async register() { return { queue_id: 'q', last_event_id: -1 }; } },
     events: { async retrieve() {
@@ -348,21 +280,20 @@ for (const cached of [false, true]) test(`an unresolved ${cached ? 'placement' :
     await boundedPollRead(delivered, 100);
     assert.equal(incoming.length, 1);
     assert.equal(incoming[0].messageId, '88');
-    assert.equal(pollDrops[reason], before + 1);
+
   } finally { release({ result: 'error' }); adapter.stopEvents(); }
  });
 
- test('negative TTL expires and the global lookup budget refills', async () => {
+test('every event gets a new lookup, including repeat failures; shared budget refills', async () => {
   let now = 0, gets = 0;
-  const cache = new PollCache(1, () => now);
+  const lookups = new PollLookups(() => now);
   const client = { messages: { async getById() { gets++; return { result: 'error' }; } } };
-  await cache.locate(client, 1); await cache.locate(client, 2); await cache.locate(client, 1);
-  assert.equal(gets, 2);
-  now = POLL_LIMITS.negativeTtlMs;
-  await cache.locate(client, 1);
-  assert.equal(gets, 3);
- });
-
+  for (let i = 0; i < 21; i++) await lookups.fetch(client, 77);
+  assert.equal(gets, 20);
+  now = 3000;
+  await lookups.fetch(client, 77);
+  assert.equal(gets, 21);
+});
 
 const emptyInit = sub(1, { widget_type: 'poll', extra_data: { question: '', options: [] } }, 790);
 const question = (id: number, text: unknown) => sub(id, { type: 'question', question: text }, 790);
@@ -388,173 +319,189 @@ test('live empty initialization then question updates change vote text and metad
     envelope(question(6, 'Revised?')), envelope(vote(7, '42,0', false)),
   ]);
   assert.equal(result.incoming.length, 2, 'question updates themselves do not notify');
+  assert.equal(result.gets, 2, 'data-only question/option updates do not fetch routes');
   assert.match((result.incoming[0].content[0] as any).text, /'Current\?'/);
   assert.equal(result.incoming[1].metadata?.question, 'Revised?');
 });
 
-function placementFixture(getById: () => Promise<any>, filters?: FilterView) {
+function routingFixture(getById: (...args: any[]) => Promise<any>, filters?: FilterView) {
   const adapter = new ZulipAdapter({ messages: { getById }, users: { async retrieve() { return directory; } } }, 790, 'race', { filters });
   const internal = adapter as any;
   internal.polls.remember(raw());
   internal.remember('zulip:general', normalizeMessage(raw()));
   const incoming: IncomingChannelMessage[] = [];
-  return { adapter, internal, incoming, vote: (id = 2) => internal.onPollSubmessage(vote(id), (m: IncomingChannelMessage) => incoming.push(m)) };
+  const descriptors: any[] = [];
+  return { adapter, internal, incoming, descriptors,
+    vote: (id = 2, yes = true) => internal.onPollSubmessage(vote(id, 'canned,0', yes), (m: IncomingChannelMessage, d: any) => { incoming.push(m); descriptors.push(d); }) };
 }
-const moved = (messageId = 77, propagateMode: 'change_one' | 'change_all' | 'change_later' = 'change_one') => ({
-  messageId, source: { channelId: 'zulip:general', topic: 'Release' }, propagateMode,
+const moved = () => ({
+  messageId: 77, source: { channelId: 'zulip:general', topic: 'Release' }, propagateMode: 'change_one' as const,
   newStreamId: 13, destinationChannelId: 'zulip:private', topic: 'Hidden',
 });
+const destination = () => raw({ stream_id: 13, display_recipient: 'private', subject: 'Hidden' });
 const settle = () => new Promise(resolve => setImmediate(resolve));
+function deferred<T = any>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(r => { resolve = r; });
+  return { promise, resolve };
+}
 
-test('confirmed move tool overtakes a placement GET: no stale restore or addressed vote', async t => {
-  let release!: (value: unknown) => void;
-  const read = new Promise(resolve => { release = resolve; });
-  const checked: string[] = [];
-  const f = placementFixture(() => read, {
-    streamAllowed: name => { checked.push(name); return name === 'general'; },
-    streamMuted: name => name === 'private', dmAllowed: () => true,
-  });
-  f.internal.refreshPollPlacement(77, true);
-  await Promise.resolve();
-  const { tools } = toolsFixture(t);
-  let stored = raw();
-  (tools as any).session.authHeader = 'Basic dGVzdDp0ZXN0';
-  (tools as any).session.client.messages.getById = async () => ({ result: 'success', message: stored });
-  t.mock.method(globalThis, 'fetch', async () => {
-    stored = raw({ stream_id: 13, display_recipient: 'private', subject: 'Hidden' });
-    return new Response(JSON.stringify({ result: 'success' }));
-  });
-  tools.onMoved = move => f.adapter.noteSelfMoved(move);
-  await tools.handleToolCall('move_messages', { message_id: 77, stream_id: 13, topic: 'Hidden' });
-  const version = f.internal.seen.get(77).placementVersion;
-  const before = pollDrops.unknown_placement ?? 0;
+for (const policy of ['allowed', 'muted', 'disallowed'] as const) {
+  for (const probe of ['in-transit envelope then confirmed self move', 'stale GET', 'server move', 'eviction'] as const) {
+    test(`pre-move vote, post-move GET: ${probe}, ${policy}; zero old-location deliveries`, async () => {
+      const read = deferred();
+      const stale = deferred();
+      let gets = 0;
+      const checked: string[] = [];
+      const f = routingFixture(async (p: any) => {
+        assert.equal(p.message_id, 77);
+        gets++;
+        return probe === 'stale GET' && gets === 1 ? stale.promise : read.promise;
+      }, {
+        streamAllowed: name => { checked.push(name); return policy !== 'disallowed' || name !== 'private'; },
+        streamMuted: name => policy === 'muted' && name === 'private', dmAllowed: () => true,
+      });
+      let oldRead: Promise<any> | undefined;
+      if (probe === 'stale GET') {
+        f.internal.seen.clear();
+        oldRead = f.internal.locate(77);
+      }
+      const reason = policy === 'muted' ? 'stream_muted' : 'stream_disallowed';
+      const before = pollDrops[reason] ?? 0;
+      const pending = f.vote(); // Arrives BEFORE the move; GET remains pending.
+      await settle();
+      assert.equal(gets, probe === 'stale GET' ? 2 : 1);
+      assert.deepEqual(f.incoming, []);
+      if (probe === 'server move') {
+        f.internal.streamNamesById.set(12, 'general');
+        f.internal.streamNamesById.set(13, 'private');
+        await f.internal.onZulipChange({
+          kind: 'edit', messageId: 77, messageIds: [77], actorId: 42, editedAt: 1700000010,
+          streamId: 12, newStreamId: 13, origTopic: 'Release', topic: 'Hidden',
+          propagateMode: 'change_one', content: null, origContent: null, flags: [],
+        }, () => {});
+      } else {
+        f.adapter.noteSelfMoved(moved());
+        if (probe === 'in-transit envelope then confirmed self move') {
+          // An old envelope can arrive on either side of the tool receipt.
+          f.internal.polls.remember(raw());
+          f.internal.remember('zulip:general', normalizeMessage(raw()));
+          f.adapter.noteSelfMoved(moved());
+        }
+      }
+      if (probe === 'eviction') {
+        for (let id = 1000; id < 3500; id++) {
+          f.internal.polls.entry(id);
+          f.internal.remember('zulip:general', normalizeMessage(raw({ id, submessages: [] })));
+        }
+      }
+      checked.length = 0; // Ignore the ordinary move handler's own policy checks.
+      // Response reflects the server's new placement, even though the vote
+      // and its request started in the old location.
+      read.resolve({ result: 'success', message: destination() });
+      await pending;
+      if (oldRead) {
+        stale.resolve({ result: 'success', message: raw() });
+        await oldRead; // Stale ordinary GET may not decide this or later votes.
+      }
+      await f.vote(3, false);
+      assert.equal(f.incoming.filter(m => m.channelId === 'zulip:general' || m.threadId === 'Release').length, 0);
+      assert.equal(f.incoming.length, policy === 'allowed' ? 2 : 0);
+      if (policy === 'allowed') for (const m of f.incoming) {
+        assert.equal(m.channelId, 'zulip:private');
+        assert.equal(m.threadId, 'Hidden');
+        assert.equal(m.metadata?.topic, 'Hidden');
+      }
+      else assert.equal(pollDrops[reason], before + 2);
+      assert.ok(checked.every(name => name === 'private'), 'only fresh GET destination is policy checked');
+      assert.equal(f.descriptors[0]?.address.stream_id, policy === 'allowed' ? 13 : undefined);
+    });
+  }
+}
+
+test('fresh GET alone decides DM participants, ownership and stream ID despite stale cache', async () => {
+  const dm = raw({ type: 'private', sender_id: 42, display_recipient: [
+    { id: 790, full_name: 'Bot', email: 'bot@example.invalid' },
+    { id: 42, full_name: 'Bo', email: 'bo@example.invalid' },
+  ] });
+  let fresh = dm, gets = 0;
+  const f = routingFixture(async () => { gets++; return { result: 'success', message: fresh }; });
   await f.vote();
-  assert.equal(pollDrops.unknown_placement, before + 1, 'pending placement vote counted');
-  release({ result: 'success', message: raw() });
+  assert.equal(f.incoming[0].channelId, 'zulip:dm:42');
+  assert.deepEqual(f.incoming[0].tags, ['zulip:poll-vote', 'chat:ambient']);
+  assert.equal(f.incoming[0].metadata?.onOwnMessage, false);
+  fresh = destination();
+  await f.vote(3, false);
+  assert.equal(gets, 2);
+  assert.equal(f.incoming[1].channelId, 'zulip:private');
+  assert.deepEqual(f.incoming[1].tags, ['zulip:poll-vote', 'chat:addressed']);
+  assert.equal(f.descriptors[1].address.stream_id, 13);
+});
+
+test('even a known, allowed poll drops failed, invisible, malformed and timed-out fresh GETs', async () => {
+  for (const [reason, get] of [
+    ['lookup_failed', async () => { throw new Error('offline'); }],
+    ['message_unavailable', async () => ({ result: 'error', msg: 'not visible' })],
+    ['message_unavailable', async () => ({ result: 'success' })],
+    ['invalid_message', async () => ({ result: 'success', message: raw({ id: 88 }) })],
+    ['invalid_message', async () => ({ result: 'success', message: raw({ type: 'private', display_recipient: [] }) })],
+    ['lookup_timeout', () => new Promise(() => {})],
+  ] as const) {
+    const before = pollDrops[reason] ?? 0;
+    const f = routingFixture(get);
+    f.internal.pollLookups = new PollLookups(() => 0, 5);
+    await f.vote();
+    assert.deepEqual(f.incoming, []);
+    assert.equal(pollDrops[reason], before + 1);
+    assert.ok(f.internal.polls.entry(77).state.options.get('canned,0').voters.has(7), 'failed delivery does not erase reduction');
+  }
+});
+
+test('timeout never releases an outstanding GET slot; late results never deliver', async () => {
+  let now = 0, gets = 0;
+  const read = deferred();
+  const f = routingFixture(() => { gets++; return read.promise; });
+  f.internal.pollLookups = new PollLookups(() => now, 5);
+  const before = pollDrops.lookup_timeout ?? 0;
+  await Promise.all(Array.from({ length: 20 }, (_, i) => f.vote(i + 2)));
+  assert.equal(gets, 20);
+  assert.equal(pollDrops.lookup_timeout, before + 20);
+  now = 60000; // Tokens refill, but actual unresolved requests still cap concurrency.
+  const capBefore = pollDrops.lookup_in_flight ?? 0;
+  await f.vote(30);
+  assert.equal(gets, 20);
+  assert.equal(pollDrops.lookup_in_flight, capBefore + 1);
+  read.resolve({ result: 'success', message: raw() });
   await settle();
-  assert.equal(f.internal.seen.get(77).channelId, 'zulip:private');
-  assert.equal(f.internal.seen.get(77).placementVersion, version, 'stale GET cannot write');
-  await f.vote(3);
-  assert.equal(checked.at(-1), 'private');
   assert.deepEqual(f.incoming, []);
+  await f.vote(31);
+  assert.equal(gets, 21);
+  assert.equal(f.incoming.length, 1);
 });
 
-for (const mode of ['change_all', 'change_later'] as const) test(`tool ${mode} invalidates poll-only and pending envelopes`, async () => {
-  let release!: (value: unknown) => void;
-  const f = placementFixture(() => new Promise(resolve => { release = resolve; }));
-  f.internal.seen.delete(77);
-  f.internal.refreshPollPlacement(77, true);
-  await Promise.resolve();
-  f.adapter.noteSelfMoved(moved(70, mode));
-  release({ result: 'success', message: raw() });
-  await settle();
-  await f.vote();
-  assert.deepEqual(f.incoming, []);
-  assert.equal(f.internal.seen.has(77), false);
+test('exhausted adapter-wide budget drops even a known poll; get_poll_results still shows votes', async t => {
+  let gets = 0;
+  const f = routingFixture(async () => { gets++; return { result: 'success', message: raw() }; });
+  f.internal.pollLookups = new PollLookups(() => 0);
+  for (let id = 2; id < 22; id++) await f.vote(id);
+  const before = pollDrops.lookup_budget ?? 0;
+  await f.vote(22);
+  assert.equal(gets, 20);
+  assert.equal(f.incoming.length, 20);
+  assert.equal(pollDrops.lookup_budget, before + 1);
+  const { tools } = toolsFixture(t, raw({ submessages: [init, vote(22)] }));
+  const result = await tools.handleToolCall('get_poll_results', { message_id: 77 });
+  assert.equal(result.options[0].count, 1);
+  assert.equal(result.options[0].voters[0].id, 7);
 });
 
-for (const reader of ['locate', 'fetchContext', 'fetchHistory'] as const) test(`ordinary ${reader} cannot restore a poll placement across a tool move`, async () => {
-  let release!: (value: unknown) => void;
-  const read = new Promise(resolve => { release = resolve; });
-  const f = placementFixture(() => read, { streamAllowed: name => name === 'general', dmAllowed: () => true });
-  f.internal.zulipClient.messages.retrieve = () => read;
-  if (reader === 'locate') f.internal.seen.delete(77);
-  const pending = reader === 'locate' ? f.internal.locate(77)
-    : reader === 'fetchContext' ? f.adapter.fetchContext('zulip:general', undefined, 10)
-    : f.adapter.fetchHistory('zulip:general', { limit: 10 });
-  f.adapter.noteSelfMoved(moved());
-  release({ result: 'success', message: raw(), messages: [raw()], found_newest: true, found_oldest: true });
-  await pending;
-  const at = f.internal.seen.get(77);
-  assert.ok(!at || at.channelId === 'zulip:private');
-  await f.vote();
-  assert.deepEqual(f.incoming, []);
-});
-
-test('placement CAS rejects stale cache restores, event writes and versions forgotten under churn', () => {
+test('data cache retains no placement or message envelope and stays bounded', () => {
   const cache = new PollCache(1);
-  const stamp = cache.placements.snapshot();
   cache.remember(raw());
-  const observed = cache.entry(77).placementVersion!;
-  cache.invalidatePlacement(id => id === 77);
-  cache.remember(raw(), observed);
-  assert.equal(cache.entry(77).placementUnknown, true);
-  const versions = new PlacementVersions();
-  versions.write(77, versions.snapshot());
-  for (let id = 100; id < 4200; id++) versions.write(id, versions.snapshot());
-  assert.equal(versions.write(77, stamp), null, 'eviction cannot reset a placement version');
-  assert.equal(versions.current(77, observed), false);
-});
-
-test('evicted in-flight poll records cannot replace a newer record or restore seen', async () => {
-  let release!: (value: unknown) => void;
-  const cache = new PollCache(1);
-  const pending = cache.locate({ messages: { getById: () => new Promise(resolve => { release = resolve; }) } }, 77);
-  await Promise.resolve();
-  cache.entry(88);
-  cache.remember(raw({ subject: 'New' }));
-  release({ result: 'success', message: raw() });
-  await pending;
-  assert.equal(cache.entry(77).message?.subject, 'New');
-});
-
-
-test('an asynchronous server move handler cannot overwrite a newer confirmed tool move', async () => {
-  let release!: (value: unknown) => void;
-  const f = placementFixture(async () => ({ result: 'success', message: raw() }));
-  f.internal.streamNamesById.set(12, 'general');
-  f.internal.zulipClient.streams = { retrieve: () => new Promise(resolve => { release = resolve; }) };
-  const pending = f.internal.onZulipChange({
-    kind: 'edit', messageId: 77, messageIds: [77], actorId: 42, editedAt: 1700000010,
-    streamId: 12, newStreamId: 14, origTopic: 'Release', topic: 'Older',
-    propagateMode: 'change_one', content: null, origContent: null, flags: [],
-  }, () => {});
-  await Promise.resolve();
-  f.adapter.noteSelfMoved(moved());
-  const version = f.internal.seen.get(77).placementVersion;
-  release({ result: 'success', streams: [{ stream_id: 14, name: 'other' }] });
-  await pending;
-  assert.equal(f.internal.seen.get(77).channelId, 'zulip:private');
-  assert.equal(f.internal.seen.get(77).topic, 'Hidden');
-  assert.equal(f.internal.seen.get(77).placementVersion, version);
-});
-
-
-for (const mode of ['change_all', 'change_later'] as const) test(`propagated ${mode} fences ordinary GETs with no cached envelope`, async () => {
-  let release!: (value: unknown) => void;
-  const f = placementFixture(() => new Promise(resolve => { release = resolve; }));
-  f.internal.seen.clear();
-  f.internal.polls.records.clear();
-  const pending = f.internal.locate(77);
-  f.adapter.noteSelfMoved(moved(70, mode));
-  release({ result: 'success', message: raw() });
-  assert.equal(await pending, null);
-  assert.equal(f.internal.seen.has(77), false);
-});
-
-
-test('a queued cache restore cannot overwrite a synchronous tool move', async () => {
-  const f = placementFixture(async () => { throw new Error('cache hit must not GET'); });
-  f.internal.seen.clear();
-  f.internal.polls.remember(raw()); // A genuinely current, synchronous cache hit.
-  f.internal.refreshPollPlacement(77);
-  f.adapter.noteSelfMoved(moved());
-  await settle();
-  assert.equal(f.internal.seen.has(77), false, 'old cached general/Release envelope stays historical');
-  await f.vote();
-  assert.deepEqual(f.incoming, []);
-});
-
-
-test('self deletion fences an already pending poll placement read', async () => {
-  let release!: (value: unknown) => void;
-  const f = placementFixture(() => new Promise(resolve => { release = resolve; }));
-  f.internal.refreshPollPlacement(77, true);
-  await Promise.resolve();
-  f.adapter.noteSelfDeleted(77);
-  release({ result: 'success', message: raw() });
-  await settle();
-  await f.vote();
-  assert.deepEqual(f.incoming, []);
-  assert.equal(f.internal.placed(77, f.internal.seen.get(77)), false);
+  assert.deepEqual(Object.keys(cache.entry(77)), ['state']);
+  const first = cache.entry(77);
+  cache.remember(raw({ id: 88, submessages: [] }));
+  assert.equal(cache.entry(77), first, 'ordinary messages do not evict polls');
+  cache.remember(raw({ id: 88 }));
+  assert.notEqual(cache.entry(77), first);
 });

@@ -14,7 +14,7 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
-import { PollCache, PollUsers, countPollDrop, applyPollUpdate, parsePollSubmessage, type WidgetSubmessage } from '../polls.js';
+import { PollCache, PollLookups, PollUsers, countPollDrop, applyPollUpdate, parsePollSubmessage, reconstructPoll, type WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 
 import type {
@@ -127,7 +127,6 @@ type QuoteVerdict = 'reply' | 'not-reply' | 'ineligible' | 'unverified' | 'budge
 /** A recently seen message, as the cache places reactions and changes. */
 interface SeenMessage {
   channelId: string;
-  placementVersion?: number;
   /** Historical placement, not yet confirmed after a move. Reactions/edits
    *  must GET again rather than route by this old channel/topic. */
   placementUnknown?: boolean;
@@ -219,8 +218,8 @@ export class ZulipAdapter implements PlatformAdapter {
   onSelfChanged?: OnMessageChange;
 
   private readonly polls = new PollCache();
+  private readonly pollLookups = new PollLookups();
   private readonly pollUsers = new PollUsers();
-  private readonly pendingPollPlacements = new Set<number>();
   private eventLoop: ZulipEventLoop | null = null;
   private readonly messageIds: MessageIds;
   private readonly activeTopics: ActiveTopicsCache;
@@ -401,26 +400,14 @@ export class ZulipAdapter implements PlatformAdapter {
     return [...this.knownDms.values()];
   }
 
-  private writeSeen(id: number, at: SeenMessage, observedAt: number): boolean {
-    const version = this.polls.placements.write(id, observedAt);
-    if (version === null) return false;
-    this.seen.set(id, { ...at, placementVersion: version });
-    return true;
-  }
-
-  private placed(id: number, at: SeenMessage | undefined): at is SeenMessage {
-    return !!at && !at.placementUnknown && this.polls.placements.current(id, at.placementVersion);
-  }
-
-  private remember(channelId: string, m: ZulipMessage, observedAt = this.polls.placements.snapshot()): boolean {
-    if (!this.polls.placements.canWrite(m.id, observedAt)) return false;
+  private remember(channelId: string, m: ZulipMessage): void {
     this.failedQuoteLookups.delete(m.id);
     this.highestMessageId = Math.max(this.highestMessageId, m.id);
     if (this.seen.size >= ZulipAdapter.SEEN_CAP) {
       const oldest = this.seen.keys().next().value;
       if (oldest !== undefined) this.seen.delete(oldest);
     }
-    return this.writeSeen(m.id, {
+    this.seen.set(m.id, {
       channelId,
       authorId: m.authorId,
       authorName: m.authorName,
@@ -431,7 +418,7 @@ export class ZulipAdapter implements PlatformAdapter {
       mentioned: m.mentioned,
       replyToSelf: m.replyToSelf,
       quoteTargets: quotedMessageIds(m.rawContent),
-    }, observedAt);
+    });
   }
 
   private quoteLookupFailed(messageId: number): boolean {
@@ -452,8 +439,7 @@ export class ZulipAdapter implements PlatformAdapter {
   /** Where a message lives — from the recent-messages cache, else one GET. */
   private async locate(messageId: number, purpose = 'a reaction', timeoutMs = LOCATE_TIMEOUT_MS, quoteLookup = false): Promise<SeenMessage | null> {
     const cached = this.seen.get(messageId);
-    if (this.placed(messageId, cached)) return cached;
-    const observedAt = this.polls.placements.snapshot();
+    if (cached && !cached.placementUnknown) return cached;
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await withTimeout<any>(
@@ -472,10 +458,7 @@ export class ZulipAdapter implements PlatformAdapter {
       if (!Number.isSafeInteger(raw.sender_id) || raw.sender_id <= 0) throw new Error('response contained no valid sender_id');
       const m = normalizeMessage(raw);
       const channelId = channelIdOf(m, this.identity.selfUserId);
-      if (!this.remember(channelId, m, observedAt)) {
-        const current = this.seen.get(messageId);
-        return this.placed(messageId, current) ? current : null;
-      }
+      this.remember(channelId, m);
       this.movedAway.delete(messageId);
       return this.seen.get(messageId) ?? null;
     } catch (err) {
@@ -535,8 +518,7 @@ export class ZulipAdapter implements PlatformAdapter {
 
   /** Self-move events only invalidate; they never confirm placement or start GETs. */
   private reportSelfMove(change: Extract<ZulipMessageChange, { kind: 'edit' }>, channelId: string,
-    ids = [...new Set([change.messageId, ...change.messageIds])],
-    observedAt = this.polls.placements.snapshot()): void {
+    ids = [...new Set([change.messageId, ...change.messageIds])]): void {
     if (change.newStreamId !== null && !this.streamNamesById.has(change.newStreamId)) {
       const now = Date.now();
       for (const [id, at] of this.movedAway) if (now - at > MOVED_AWAY_TTL_MS) this.movedAway.delete(id);
@@ -544,7 +526,7 @@ export class ZulipAdapter implements PlatformAdapter {
     }
     for (const id of ids) {
       const at = this.seen.get(id);
-      if (at) this.writeSeen(id, { ...at, placementUnknown: true }, observedAt);
+      if (at) this.seen.set(id, { ...at, placementUnknown: true });
     }
     this.emitSelfMove(change.messageId, ids, channelId, change.origTopic, null, null, true,
       { newStreamId: change.newStreamId, selfEcho: {
@@ -580,7 +562,7 @@ export class ZulipAdapter implements PlatformAdapter {
   noteSelfMoved(move: SelfMove): void {
     this.highestMessageId = Math.max(this.highestMessageId, move.messageId);
     const cached = this.seen.get(move.messageId);
-    let source = move.source ?? (cached && !cached.isDm && this.placed(move.messageId, cached)
+    let source = move.source ?? (cached && !cached.isDm && !cached.placementUnknown
       ? { channelId: cached.channelId, topic: cached.topic } : null);
     // A topic-only PATCH cannot cross streams: this cache entry is stale.
     if (move.source === null && move.newStreamId === null && move.destinationChannelId !== null &&
@@ -590,38 +572,15 @@ export class ZulipAdapter implements PlatformAdapter {
     if (move.newStreamId !== null && move.destinationChannelId !== null) {
       this.streamNamesById.set(move.newStreamId, streamNameOf(move.destinationChannelId));
     }
-    if (move.propagateMode !== 'change_one') this.polls.placements.barrier();
-    const affected = new Set<number>([move.messageId]);
-    for (const id of this.polls.invalidatePlacement((id, record) => {
-      if (id === move.messageId) return true;
-      if (move.propagateMode === 'change_one' ||
-          (move.propagateMode === 'change_later' && id < move.messageId)) return false;
-      const at = this.seen.get(id);
-      const m = record.message;
-      // Unknown envelopes may be in range: uncertainty is safer than routing.
-      return at ? !at.isDm && (!this.placed(id, at) || ((sourceChannel === null || at.channelId === sourceChannel) &&
-        (!source || at.topic.toLowerCase() === source.topic.toLowerCase())))
-        : record.placementUnknown || !m || (m.type === 'stream' &&
-          (sourceChannel === null || zulipChannelId(String(m.display_recipient)) === sourceChannel) &&
-          (!source || m.subject.toLowerCase() === source.topic.toLowerCase()));
-    })) affected.add(id);
     for (const [id, at] of this.seen) {
-      const inScope = !at.isDm && (!this.placed(id, at) || ((sourceChannel === null || at.channelId === sourceChannel) &&
-        (!source || at.topic.toLowerCase() === source.topic.toLowerCase())));
+      const inScope = !at.isDm && (sourceChannel === null || at.channelId === sourceChannel) &&
+        (!source || at.topic.toLowerCase() === source.topic.toLowerCase());
       const exact = id === move.messageId;
       if (!exact && !(inScope && (move.propagateMode === 'change_all' ||
           (move.propagateMode === 'change_later' && id >= move.messageId)))) continue;
-      affected.add(id);
-    }
-    // Bump even anchors absent from both caches (an ordinary GET may be pending).
-    for (const id of affected) {
-      const observedAt = this.polls.placements.snapshot();
-      this.polls.placements.write(id, observedAt);
-      const at = this.seen.get(id);
-      if (!at) continue;
-      const confirmed = id === move.messageId && move.destinationChannelId !== null && move.topic !== null;
-      this.writeSeen(id, { ...at, placementUnknown: !confirmed,
-        ...(confirmed ? { channelId: move.destinationChannelId!, topic: move.topic! } : {}) }, this.polls.placements.snapshot());
+      const confirmed = exact && move.destinationChannelId !== null && move.topic !== null;
+      this.seen.set(id, { ...at, placementUnknown: !confirmed,
+        ...(confirmed ? { channelId: move.destinationChannelId!, topic: move.topic! } : {}) });
     }
     this.emitSelfMove(move.messageId, [move.messageId], sourceChannel ?? 'zulip:unknown',
       source?.topic ?? null, move.destinationChannelId, move.topic, move.topic === null,
@@ -653,7 +612,7 @@ export class ZulipAdapter implements PlatformAdapter {
    * cache alone (the message is gone), falling back to the stream the event
    * names — a deleted DM the cache never saw cannot be placed and is dropped.
    */
-  private async onZulipChange(change: ZulipMessageChange, emit: OnMessageChange, observedAt = this.polls.placements.snapshot()): Promise<void> {
+  private async onZulipChange(change: ZulipMessageChange, emit: OnMessageChange): Promise<void> {
     this.highestMessageId = Math.max(this.highestMessageId, ...change.messageIds);
     const self = this.identity.selfUserId;
     if (change.kind === 'edit') {
@@ -662,7 +621,7 @@ export class ZulipAdapter implements PlatformAdapter {
         (change.topic !== null || change.newStreamId !== null);
       if (selfMove) {
         const fromName = change.streamId === null ? undefined : this.streamNamesById.get(change.streamId);
-        this.reportSelfMove(change, fromName ? zulipChannelId(fromName) : cached?.channelId ?? 'zulip:unknown', undefined, observedAt);
+        this.reportSelfMove(change, fromName ? zulipChannelId(fromName) : cached?.channelId ?? 'zulip:unknown');
         return;
       }
       const where = cached && !cached.placementUnknown ? cached : await this.locate(change.messageId, 'an edit');
@@ -698,7 +657,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // Keep the cache current: a later reaction or deletion reads the message
       // as it now is. A move re-seats every co-moved message, not only the one
       // acted on.
-      const updated: SeenMessage = {
+      this.seen.set(change.messageId, {
         ...where,
         topic,
         placementUnknown: crossStream && movedToChannelId === null,
@@ -707,23 +666,15 @@ export class ZulipAdapter implements PlatformAdapter {
         quoteTargets,
         ...(content !== null ? { snippet: snippetOf(content) } : {}),
         ...(movedToChannelId !== null ? { channelId: movedToChannelId } : {}),
-      };
-      if (change.topic !== null || change.newStreamId !== null) {
-        this.writeSeen(change.messageId, updated, observedAt);
-      } else if (this.seen.get(change.messageId) === where) {
-        // Content-only edits do not observe placement. Preserve its exact
-        // version/uncertainty, even when a later move is already pending.
-        this.seen.set(change.messageId, { ...updated,
-          placementVersion: where.placementVersion, placementUnknown: where.placementUnknown });
-      }
+      });
       if (change.topic !== null || movedToChannelId !== null) {
         for (const id of change.messageIds) {
           if (id === change.messageId) continue;
           const co = this.seen.get(id);
-          if (co) this.writeSeen(id, {
+          if (co) this.seen.set(id, {
             ...co, topic,
             ...(movedToChannelId !== null ? { channelId: movedToChannelId, placementUnknown: false } : {}),
-          }, observedAt);
+          });
         }
       }
       if (crossStream && movedToStream === null) {
@@ -732,7 +683,7 @@ export class ZulipAdapter implements PlatformAdapter {
         for (const id of change.messageIds) {
           this.movedAway.set(id, now);
           const historical = this.seen.get(id);
-          if (historical && this.placed(id, historical)) this.writeSeen(id, { ...historical, placementUnknown: true }, historical.placementVersion!);
+          if (historical) this.seen.set(id, { ...historical, placementUnknown: true });
         }
       } else if (movedToChannelId !== null) {
         for (const id of change.messageIds) this.movedAway.delete(id);
@@ -771,8 +722,6 @@ export class ZulipAdapter implements PlatformAdapter {
       return;
     }
 
-    this.polls.invalidatePlacement(id => change.messageIds.includes(id));
-    for (const id of change.messageIds) this.polls.placements.write(id, this.polls.placements.snapshot());
     // Own deletions remain silent, but must leave the placement cache before
     // the self-filter: otherwise a later deletion sees a phantom topic-mate.
     const selfDeleted = new Set(change.messageIds.filter((id) => this.wasSelfDeleted(id)));
@@ -937,8 +886,6 @@ export class ZulipAdapter implements PlatformAdapter {
    *  delete event is the bot's own doing and must not surface. */
   noteSelfDeleted(messageId: number): void {
     if (!Number.isFinite(messageId)) return;
-    this.polls.invalidatePlacement(id => id === messageId);
-    this.polls.placements.write(messageId, this.polls.placements.snapshot());
     const now = Date.now();
     for (const [id, at] of this.selfDeleted) {
       if (now - at > SELF_DELETE_TTL_MS) this.selfDeleted.delete(id);
@@ -1054,11 +1001,10 @@ export class ZulipAdapter implements PlatformAdapter {
   ): Promise<ContextInjection | null> {
     const dmIds = parseDmChannelId(channelId);
     if (!dmIds && !this.filters.streamAllowed(streamNameOf(channelId))) return null;
-    const observedAt = this.polls.placements.snapshot();
     const page = await fetchHistory(this.zulipClient, dmIds
       ? { dmUserIds: dmIds, limit: historySize }
       : { streamName: streamNameOf(channelId), limit: historySize });
-    for (const m of page.messages) this.remember(channelId, m, observedAt);
+    for (const m of page.messages) this.remember(channelId, m);
     const messages = page.messages.filter((m) => this.allowed(m));
     if (messages.length === 0) return null;
 
@@ -1096,7 +1042,6 @@ export class ZulipAdapter implements PlatformAdapter {
     if (!dmIds && !this.filters.streamAllowed(streamNameOf(channelId))) {
       return { messages: [], scannedThrough: null, reachedNewest: true };
     }
-    const observedAt = this.polls.placements.snapshot();
     const page = await fetchHistory(this.zulipClient, {
       ...(dmIds ? { dmUserIds: dmIds } : { streamName: streamNameOf(channelId) }),
       limit: query.limit,
@@ -1133,7 +1078,7 @@ export class ZulipAdapter implements PlatformAdapter {
       m.replyToSelf = this.replyToSelfForVerdict(verdict, quotedMessageIds(m.rawContent), this.seen.get(m.id));
       if (verdict === 'budget-skipped') unverifiedMessageIds.push(String(m.id));
     }
-    for (const m of page.messages) this.remember(channelId, m, observedAt);
+    for (const m of page.messages) this.remember(channelId, m);
     const messages = page.messages
       .filter((m) => this.identity.selfUserId === null || m.authorId !== this.identity.selfUserId)
       .filter((m) => this.allowed(m))
@@ -1198,48 +1143,13 @@ export class ZulipAdapter implements PlatformAdapter {
         this.activeTopics.invalidate(change.streamId);
         if (change.kind === 'edit' && change.newStreamId !== null) this.activeTopics.invalidate(change.newStreamId);
       }
-      if (change.kind === 'delete' && !onMessageChange && !this.onSelfChanged) {
-        this.polls.invalidatePlacement(id => change.messageIds.includes(id));
-        for (const id of change.messageIds) this.polls.placements.write(id, this.polls.placements.snapshot());
-      }
-      if (change.kind === 'edit' && (change.topic !== null || change.newStreamId !== null)) {
-        if (change.propagateMode === 'change_all' || change.propagateMode === 'change_later') this.polls.placements.barrier();
-        const explicit = new Set([change.messageId, ...change.messageIds]);
-        for (const [id, at] of this.seen) {
-          if ((change.propagateMode === 'change_all' ||
-              (change.propagateMode === 'change_later' && id >= change.messageId)) &&
-              !at.isDm && (change.streamId === null || !this.streamNamesById.has(change.streamId) ||
-                at.channelId === zulipChannelId(this.streamNamesById.get(change.streamId)!)) &&
-              (change.origTopic === null || at.topic.toLowerCase() === change.origTopic.toLowerCase())) explicit.add(id);
-        }
-        const ids = this.polls.invalidatePlacement((id, record) => {
-          if (id === change.messageId || change.messageIds.includes(id)) return true;
-          if (change.propagateMode !== 'change_all' && change.propagateMode !== 'change_later') return false;
-          if (change.propagateMode === 'change_later' && id < change.messageId) return false;
-          const m = record.message;
-          return record.placementUnknown || !m || (m.type === 'stream' &&
-            (change.streamId === null || m.stream_id === change.streamId) &&
-            (change.origTopic === null || m.subject.toLowerCase() === change.origTopic.toLowerCase()));
-        });
-        for (const id of new Set([...ids, ...explicit])) {
-          this.polls.placements.write(id, this.polls.placements.snapshot());
-          // Explicit messages will be re-seated by the ordered change handler.
-          // Unlisted propagated messages (or no subscriber) need a fresh GET.
-          if (onMessageChange || this.onSelfChanged) {
-            if (id === change.messageId || change.messageIds.includes(id)) continue;
-          }
-          const at = this.seen.get(id);
-          if (at) this.writeSeen(id, { ...at, placementUnknown: true }, this.polls.placements.snapshot());
-        }
-      }
       if (!onMessageChange && !this.onSelfChanged) return;
-      const observedAt = this.polls.placements.snapshot();
       changeChain = changeChain
         .then(() => {
           if (this.eventLoop !== loop) return;
           return this.onZulipChange(change, (event) => {
             if (this.eventLoop === loop) onMessageChange?.(event);
-          }, observedAt);
+          });
         })
         .catch((err) => {
           console.error('[zulip-mcp] message change handling failed:', (err as Error).message);
@@ -1309,27 +1219,15 @@ export class ZulipAdapter implements PlatformAdapter {
       if (m.streamName !== null && streamId !== undefined) this.streamNamesById.set(streamId, m.streamName);
       const descriptor = m.streamName !== null ? this.streamDescriptor(m.streamName, streamId) : undefined;
       onMessage(this.activeTopics.decorate(toIncoming(channelId, m, this.identity), streamId), descriptor);
-    }, onSystemEvent, reactionHandler, changeHandler, undefined, async (submessage) => {
-      await changeChain;
-      if (this.eventLoop !== loop) return;
-      await this.onPollSubmessage(submessage, (message, descriptor) => {
+    }, onSystemEvent, reactionHandler, changeHandler, undefined, (submessage) => {
+      // Reduce in arrival order, but never hold ordinary delivery behind a GET
+      // (or a move handler). Each notification has its own post-event read.
+      void this.onPollSubmessage(submessage, (message, descriptor) => {
         if (this.eventLoop === loop) onMessage(message, descriptor);
-      });
+      }).catch(() => { countPollDrop('notification_failed'); });
     }).catch(error => {
       console.error('Zulip event loop failed:', error);
     });
-  }
-
-  private refreshPollPlacement(messageId: number, refresh = false): void {
-    if (this.pendingPollPlacements.has(messageId)) return;
-    this.pendingPollPlacements.add(messageId);
-    void this.polls.locate(this.zulipClient, messageId, refresh).then(record => {
-      if (!record.message || record.placementUnknown ||
-          !this.polls.placements.current(messageId, record.placementVersion)) return;
-      const m = normalizeMessage(record.message);
-      this.remember(channelIdOf(m, this.identity.selfUserId), m, record.placementVersion);
-    }).catch(() => { countPollDrop('placement_refresh_failed'); })
-      .finally(() => { this.pendingPollPlacements.delete(messageId); });
   }
 
   private async onPollSubmessage(s: WidgetSubmessage, emit: OnIncomingMessage): Promise<void> {
@@ -1338,45 +1236,47 @@ export class ZulipAdapter implements PlatformAdapter {
     if (!update) return;
     const messageId = s.message_id!;
     const record = this.polls.entry(messageId);
-    if (!record.message) this.refreshPollPlacement(messageId);
-    void this.pollUsers.get(this.zulipClient);
     record.state = applyPollUpdate(record.state, update);
+    // Question/new_option updates are data only; they do not notify.
     if (update.type !== 'vote') return;
-    if (!record.state || !record.message) { countPollDrop('unknown_poll'); return; }
-    const option = record.state.options.get(update.key);
-    if (!option) return;
-    const where = this.seen.get(messageId);
-    if (this.pendingPollPlacements.has(messageId) || !this.placed(messageId, where)) {
-      // A retained poll envelope is not proof of current location. Refresh
-      // under the poll lookup budget without holding up ordinary delivery.
-      this.refreshPollPlacement(messageId, true);
-      countPollDrop('unknown_placement');
-      return;
+    // Snapshot display data before later live updates; never retain placement.
+    let question = record.state?.question;
+    let optionText = record.state?.options.get(update.key)?.text;
+    void this.pollUsers.get(this.zulipClient);
+    const message = await this.pollLookups.fetch(this.zulipClient, messageId);
+    if (!message) return; // Failure/budget reasons are counted by the reader.
+    if (!record.state) record.state = applyPollUpdate(reconstructPoll(message.submessages), update);
+    question ??= record.state?.question;
+    optionText ??= record.state?.options.get(update.key)?.text;
+    if (question === undefined) { countPollDrop('unknown_poll'); return; }
+    if (optionText === undefined) { countPollDrop('unknown_option'); return; }
+    // ONLY this response decides route, policy and ownership. Do not consult
+    // seen, history, event envelopes, move receipts or any placement cache.
+    const m = normalizeMessage(message);
+    if (!m.isDm) {
+      if (!this.filters.streamAllowed(m.streamName!)) { countPollDrop('stream_disallowed'); return; }
+      if (this.filters.streamMuted?.(m.streamName!)) { countPollDrop('stream_muted'); return; }
     }
-    if (!where.isDm && (!this.filters.streamAllowed(streamNameOf(where.channelId)) ||
-        this.filters.streamMuted?.(streamNameOf(where.channelId)))) return;
-    const users = this.pollUsers.peek();
-    const voter = users.get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
-    if (where.isDm && !this.filters.dmAllowed({ id: update.voterId, email: voter.email })) return;
-    const own = this.identity.selfUserId !== null && where.authorId === this.identity.selfUserId;
-    const m = normalizeMessage(record.message);
-    const streamName = streamNameOf(where.channelId);
-    const streamId = [...this.streamNamesById].find(([, name]) => name === streamName)?.[0]
-      ?? (m.streamName === streamName ? record.message.stream_id : undefined);
-    const descriptor = where.isDm ? this.describeDm(m).descriptor : this.streamDescriptor(streamName, streamId);
+    const voter = this.pollUsers.peek().get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
+    if (m.isDm && !this.filters.dmAllowed({ id: update.voterId, email: voter.email })) {
+      countPollDrop('dm_disallowed'); return;
+    }
+    const own = this.identity.selfUserId !== null && m.authorId === this.identity.selfUserId;
+    const channelId = channelIdOf(m, this.identity.selfUserId);
+    const descriptor = m.isDm ? this.describeDm(m).descriptor : this.streamDescriptor(m.streamName!, message.stream_id);
     emit({
-      channelId: where.channelId,
+      channelId,
       // Opaque event id: not a message cursor. Multiple votes on one old poll
       // must not advance the history watermark or collide with one another.
       messageId: `poll:${s.message_id}:${s.id}`,
-      threadId: where.topic || undefined,
+      threadId: m.topic || undefined,
       author: { id: String(update.voterId), name: voter.name },
       timestamp: new Date().toISOString(),
-      content: [{ type: 'text', text: `[poll vote] ${voter.name} (user ${update.voterId}) ${update.action === 'vote' ? 'voted' : 'unvoted'} '${option.text}' on poll ${this.messageIds.format(s.message_id!)} '${record.state.question}'` }],
+      content: [{ type: 'text', text: `[poll vote] ${voter.name} (user ${update.voterId}) ${update.action === 'vote' ? 'voted' : 'unvoted'} '${optionText}' on poll ${this.messageIds.format(s.message_id!)} '${question}'` }],
       tags: ['zulip:poll-vote', own ? 'chat:addressed' : 'chat:ambient'],
-      metadata: { pollVote: true, pollMessageId: s.message_id, optionKey: update.key, optionText: option.text,
-        voterId: update.voterId, action: update.action, question: record.state.question, onOwnMessage: own,
-        topic: where.topic, isDM: where.isDm, senderEmail: voter.email },
+      metadata: { pollVote: true, pollMessageId: s.message_id, optionKey: update.key, optionText,
+        voterId: update.voterId, action: update.action, question, onOwnMessage: own,
+        topic: m.topic, isDM: m.isDm, senderEmail: voter.email },
     }, descriptor);
   }
 

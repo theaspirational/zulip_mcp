@@ -19,7 +19,7 @@ export type PollUpdate =
   | { type: 'vote'; key: string; voterId: number; action: 'vote' | 'unvote' };
 
 export const POLL_LIMITS = { options: 100, text: 2000, polls: 500, voters: 1000,
-  content: 1_000_000, lookups: 20, negativeTtlMs: 60_000 } as const;
+  content: 1_000_000, lookups: 20 } as const;
 export const pollDrops: Record<string, number> = Object.create(null);
 export function countPollDrop(reason: string): void { pollDrops[reason] = (pollDrops[reason] ?? 0) + 1; }
 function textLimit(text: string): string {
@@ -100,62 +100,24 @@ export function pollContent(question: unknown, options: unknown): string {
   return `/poll ${question}\n${options.join('\n')}`;
 }
 
+export class PollLookupTimeout extends Error {}
+
 /** Bounds waits. zulip-js cannot cancel an underlying GET. */
 export async function boundedPollRead<T>(read: Promise<T>, ms = 3000): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([read, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('poll lookup timed out')), ms);
+      timer = setTimeout(() => reject(new PollLookupTimeout('poll lookup timed out')), ms);
     })]);
   } finally { clearTimeout(timer); }
 }
 
-/** Shared by ALL placement writers, including ordinary history/quote GETs.
- * A stamp is taken BEFORE observing/awaiting data; writes are CAS operations.
- * Eviction advances a conservative floor, so forgetting a version can never
- * resurrect an old observation. Versions never reset when either cache evicts.
- */
-export class PlacementVersions {
-  private sequence = 0;
-  private floor = 0;
-  private versions = new Map<number, number>();
-  snapshot(): number { return this.sequence; }
-  current(id: number, version: number | undefined): boolean {
-    return version !== undefined && this.versions.get(id) === version;
-  }
-  /** A propagated move may include an uncached, in-flight GET target whose
-   * source is not known yet. Fence all older observations conservatively. */
-  barrier(): void { this.floor = ++this.sequence; }
-  canWrite(id: number, observedAt: number): boolean {
-    return observedAt >= Math.max(this.versions.get(id) ?? 0, this.floor);
-  }
-  write(id: number, observedAt: number): number | null {
-    if (!this.canWrite(id, observedAt)) return null;
-    this.versions.delete(id);
-    const version = ++this.sequence;
-    this.versions.set(id, version);
-    if (this.versions.size > 4000) {
-      const oldest = this.versions.keys().next().value!;
-      this.floor = Math.max(this.floor, this.versions.get(oldest)!);
-      this.versions.delete(oldest);
-    }
-    return version;
-  }
-}
-
-/** placementVersion is the envelope observation, not a second generation. */
-export interface PollRecord { message?: ZulipRawMessage; state: PollState | null; placementUnknown?: boolean; placementVersion?: number }
+/** Bounded poll data only: never retains a message envelope or route. */
+export interface PollRecord { state: PollState | null }
 export class PollCache {
   private records = new Map<number, PollRecord>();
-  // Attempts survive record eviction. Token refill bounds all IDs, including cycles.
-  private attempts = new Map<number, number>();
-  private inFlight = 0;
-  private tokens: number = POLL_LIMITS.lookups;
-  private refilled: number;
-  constructor(private cap = POLL_LIMITS.polls as number, private now = Date.now,
-    readonly placements = new PlacementVersions()) {
+  constructor(private cap = POLL_LIMITS.polls as number) {
     this.cap = Math.max(1, Math.min(cap, POLL_LIMITS.polls));
-    this.refilled = now();
   }
   entry(id: number): PollRecord {
     let entry = this.records.get(id);
@@ -166,59 +128,51 @@ export class PollCache {
     }
     return entry;
   }
-  remember(message: ZulipRawMessage, observedAt = this.placements.snapshot()): void {
-    // Ordinary messages must not evict useful polls.
+  remember(message: ZulipRawMessage): void {
     if (!message.submessages?.length) return;
-    const entry = this.entry(message.id);
-    const version = this.placements.write(message.id, observedAt);
-    if (version === null) return;
-    entry.placementUnknown = false;
-    entry.placementVersion = version;
-    entry.message = { ...message, submessages: undefined, content: message.content.slice(0, POLL_LIMITS.text) };
-    entry.state = reconstructPoll(message.submessages) ?? entry.state;
+    const state = reconstructPoll(message.submessages);
+    if (state) this.entry(message.id).state ??= state;
   }
-  /** Retain poll contents, but never treat the original envelope as placement. */
-  invalidatePlacement(matches: (id: number, record: PollRecord) => boolean): number[] {
-    const ids: number[] = [];
-    for (const [id, entry] of this.records) if (matches(id, entry)) {
-      entry.placementUnknown = true;
-      this.placements.write(id, this.placements.snapshot());
-      ids.push(id);
-    }
-    return ids;
-  }
-  async locate(client: any, id: number, refreshPlacement = false): Promise<PollRecord> {
-    const entry = this.entry(id);
-    if (refreshPlacement) entry.placementUnknown = true;
-    if (entry.message && entry.state && !entry.placementUnknown &&
-        this.placements.current(id, entry.placementVersion)) return entry;
-    entry.placementUnknown = true;
-    const observedAt = this.placements.snapshot();
+}
+
+/** Adapter-wide burst/refill budget and actual outstanding-request cap.
+ * No cache hits, coalescing or negative cache: every notification needs its
+ * own GET started after its event. Timed-out GETs still occupy a slot until
+ * the underlying request settles (zulip-js does not support cancellation).
+ */
+export class PollLookups {
+  private inFlight = 0;
+  private tokens: number = POLL_LIMITS.lookups;
+  private refilled: number;
+  constructor(private now = Date.now, private timeoutMs = 3000) { this.refilled = now(); }
+  async fetch(client: any, id: number): Promise<ZulipRawMessage | null> {
     const now = this.now();
-    for (const [key, expires] of this.attempts) if (expires <= now) this.attempts.delete(key);
-    if (this.attempts.has(id)) { countPollDrop('negative_cached'); return entry; }
     this.tokens = Math.min(POLL_LIMITS.lookups, this.tokens + Math.max(0, now - this.refilled) / 3000);
     this.refilled = now;
-    if (this.inFlight >= POLL_LIMITS.lookups) { countPollDrop('lookup_in_flight'); return entry; }
-    if (this.tokens < 1) { countPollDrop('lookup_budget'); return entry; }
+    if (this.inFlight >= POLL_LIMITS.lookups) { countPollDrop('lookup_in_flight'); return null; }
+    if (this.tokens < 1) { countPollDrop('lookup_budget'); return null; }
     this.tokens--;
-    // At most 40 attempts fit in the TTL (20 burst + 20 refill).
-    this.attempts.set(id, now + POLL_LIMITS.negativeTtlMs);
+    this.inFlight++;
     try {
-      this.inFlight++;
       const read = Promise.resolve().then(() => client.messages.getById({ message_id: id, apply_markdown: false }))
         .finally(() => { this.inFlight--; });
-      const result = await boundedPollRead<any>(read);
-      if (result?.result !== 'success' || result.message?.id !== id) return entry;
-      if (this.records.get(id) !== entry) return entry; // Evicted while awaiting GET.
-      const version = this.placements.write(id, observedAt);
-      if (version === null) return entry; // A newer placement overtook this GET.
-      entry.placementVersion = version;
-      entry.placementUnknown = false;
-      entry.message = { ...result.message, submessages: undefined, content: String(result.message.content ?? '').slice(0, POLL_LIMITS.text) };
-      entry.state ??= reconstructPoll(result.message.submessages);
-    } catch { /* Missing, inaccessible, malformed or timed out: no repeat GET storm. */ }
-    return entry;
+      const result = await boundedPollRead<any>(read, this.timeoutMs);
+      if (result?.result !== 'success' || !result.message) {
+        countPollDrop('message_unavailable'); return null;
+      }
+      const m = result.message;
+      if (m.id !== id || !positiveId(m.sender_id) ||
+          (m.type !== 'stream' && m.type !== 'private') ||
+          (m.type === 'stream' && (typeof m.display_recipient !== 'string' || !m.display_recipient || typeof m.subject !== 'string')) ||
+          (m.type === 'private' && (!Array.isArray(m.display_recipient) || !m.display_recipient.length ||
+            !m.display_recipient.every((r: any) => r && positiveId(r.id))))) {
+        countPollDrop('invalid_message'); return null;
+      }
+      return m;
+    } catch (error) {
+      countPollDrop(error instanceof PollLookupTimeout ? 'lookup_timeout' : 'lookup_failed');
+      return null;
+    }
   }
 }
 
