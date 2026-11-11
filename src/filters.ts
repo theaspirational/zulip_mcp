@@ -38,6 +38,7 @@
  * desired-vs-effective state so disk ≠ process is always witnessed.
  */
 
+import { StreamReadGate } from './stream-read-gate.js';
 import { Subscriptions } from './subscriptions.js';
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
@@ -244,6 +245,7 @@ export interface ReactionSuppressionStatus {
  */
 export class FiltersPlane {
   readonly subscriptions: Subscriptions;
+  readonly streamReadGate?: StreamReadGate;
   private effective: ZulipFilters;
   private digest: string | null = null;
   private loadedAt: string | null = null;
@@ -260,6 +262,11 @@ export class FiltersPlane {
     private readonly options: { pollMs?: number } = {},
   ) {
     this.subscriptions = new Subscriptions(env.ZULIP_STREAMS_MODE);
+    if (this.subscriptions.mode === 'subscribed') this.streamReadGate = new StreamReadGate({
+      allows: id => this.streamReadAllowed(id),
+      resolveName: name => this.subscriptions.resolveName(name),
+      known: () => this.subscriptions.status().known,
+    });
     this.subscriptions.onChange(() => {
       for (const listener of this.listeners) listener(this.effective, this.effective);
     });
@@ -373,10 +380,18 @@ export class FiltersPlane {
 
   // ── queries ──
 
-  streamAllowed(streamName: string): boolean {
+  /** The single stream-read decision: immutable ID in, live policy out. */
+  streamReadAllowed(streamId: number | undefined): boolean {
+    const name = streamId === undefined ? undefined : this.subscriptions.name(streamId);
+    return this.subscriptions.allows(streamId) && name !== undefined
+      && (!this.effective.streams || this.effective.streams.includes(name)) && !this.streamMuted(name);
+  }
+
+  streamAllowed(streamName: string, streamId?: number): boolean {
     const allow = this.effective.streams;
-    return (!allow || allow.includes(streamName)) && this.subscriptions.allows(streamName)
-      && (this.subscriptions.mode !== 'subscribed' || !this.streamMuted(streamName));
+    if (this.subscriptions.mode === 'subscribed')
+      return this.streamReadAllowed(streamId ?? this.subscriptions.resolveName(streamName));
+    return !allow || allow.includes(streamName);
   }
 
   streamMuted(streamName: string): boolean {

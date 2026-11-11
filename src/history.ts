@@ -90,6 +90,7 @@ export interface ZulipRecipient {
 export interface ZulipMessage {
   id: number;
   streamName: string | null;
+  streamId?: number;
   topic: string;
   isDm: boolean;
   /** Every party to a DM (the bot included); empty for stream messages. */
@@ -222,6 +223,7 @@ export function normalizeMessage(raw: ZulipRawMessage): ZulipMessage {
     : [];
   return {
     id: raw.id,
+    streamId: raw.stream_id,
     streamName: !isDm && typeof raw.display_recipient === 'string' ? raw.display_recipient : null,
     topic: raw.subject ?? '',
     isDm,

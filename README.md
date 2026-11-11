@@ -544,15 +544,21 @@ immediately. Explicit `ZULIP_STREAMS` (the initial seed) or filters-file `stream
 still narrow membership; `mutedStreams` wins. DM rules are unchanged. The same
 policy gates messages, reactions, edits, deletes, poll votes (on their fresh
 message response), history/backscroll/context, and history/poll-result tools.
-Realm-tag message ID modes work unchanged.
+Realm-tag message ID modes work unchanged. Stream membership and read decisions
+use immutable stream IDs; rename/create/delete and subscription-property events
+update only the display/address index. Named history requests are pinned to IDs.
+All read results are rechecked after their final asynchronous operation.
+`get_stream_topics` and `list_streams` obey this policy too. In subscribed mode,
+`fetch_attachment` also requires `message_id` for a currently readable message
+containing the attachment path; unscoped upload URLs are refused.
 
 Subscriptions are loaded with `GET /users/me/subscriptions` at startup and
 reloaded after queue registration/replacement. Unknown state fails closed for
 **all** streams, including explicitly allowlisted streams. Reads time out after
 10 seconds; unknown state retries every 30 seconds (so recovery is attempted
 within 30 seconds of failure). Live changes cannot be overwritten by an older
-in-flight subscription snapshot. `filters_get` reports `streamsMode`, subscription
-state, and `effectiveSubscribedStreams` (membership intersected with lists/mutes).
+in-flight subscription snapshot. `filters_get` reports `streamsMode`, authorized subscription
+state (refusing unknown state), and `effectiveSubscribedStreams` (membership intersected with lists/mutes).
 
 Newly deliverable streams use the existing channel discovery/registration path,
 so the host can open them even before the first message. **The host decides

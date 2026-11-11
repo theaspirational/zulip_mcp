@@ -125,3 +125,29 @@ test('the hook answers even when the host sends no user message (§10.1)', async
   assert.deepEqual(withText, withoutText);
   manager.destroy();
 });
+
+test('a later context await cannot return an earlier stream after authorization is revoked', async () => {
+  let allowed = true;
+  let resolve!: (value: any) => void;
+  let started!: () => void;
+  const pendingRead = new Promise<any>(r => { resolve = r; });
+  const startedRead = new Promise<void>(r => { started = r; });
+  const adapter = {
+    type: 'zulip',
+    async fetchContext(id: string) {
+      if (id === 'zulip:second') { started(); return pendingRead; }
+      return { namespace: id, position: 'beforeUser', content: 'SECRET' };
+    },
+  };
+  const manager = {
+    getOpenChannels: () => ['zulip:general', 'zulip:second'],
+    adapterFor: () => adapter, getChannel: () => undefined, firstAdapterType: () => 'zulip',
+  };
+  const grant = { has: () => true, isFeatureSetActive: () => true };
+  const provider = new ContextProvider(manager as any, grant as any, 5, {
+    excludeChannel: id => id === 'zulip:general' && !allowed,
+  });
+  const pending = provider.handleBeforeInference({} as any);
+  await startedRead; allowed = false; resolve(null);
+  assert.deepEqual((await pending).contextInjections, []);
+});

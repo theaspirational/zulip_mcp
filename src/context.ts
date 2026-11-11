@@ -26,10 +26,12 @@ const POSITION_CAPABILITY: Record<ContextInjection['position'], string> = {
 export interface ContextProviderOptions {
   /** Open channels for which nothing is injected (a muted stream). */
   excludeChannel?: (channelId: string) => boolean;
+  captureAuthorization?: (channelId: string) => () => boolean;
 }
 
 export class ContextProvider {
   private historySize: number;
+  private readonly captureAuthorization: (channelId: string) => () => boolean;
   private readonly excludeChannel: (channelId: string) => boolean;
 
   constructor(
@@ -40,6 +42,7 @@ export class ContextProvider {
   ) {
     this.historySize = historySize ?? DEFAULT_HISTORY_SIZE;
     this.excludeChannel = options.excludeChannel ?? (() => false);
+    this.captureAuthorization = options.captureAuthorization ?? (id => () => !this.excludeChannel(id));
   }
 
   /**
@@ -55,6 +58,7 @@ export class ContextProvider {
    */
   async handleBeforeInference(_params: ContextBeforeInferenceParams): Promise<ContextBeforeInferenceResult> {
     const injections: ContextInjection[] = [];
+    const authorization = new Map<ContextInjection, () => boolean>();
     const contributingTypes = new Set<string>();
     const openChannels = this.channelManager.getOpenChannels();
 
@@ -69,6 +73,7 @@ export class ContextProvider {
       // each injection again at response-receipt (§5.4).
       if (!this.grant.isFeatureSetActive(`${adapter.type}.context`)) continue;
       try {
+        const stillAuthorized = this.captureAuthorization(channelId);
         const injection = await adapter.fetchContext(
           channelId,
           this.channelManager.getChannel(channelId),
@@ -83,6 +88,7 @@ export class ContextProvider {
             continue;
           }
           injections.push(injection);
+          authorization.set(injection, stillAuthorized);
           contributingTypes.add(adapter.type);
         }
       } catch (error) {
@@ -98,7 +104,9 @@ export class ContextProvider {
 
     return {
       featureSet: `${type}.context`,
-      contextInjections: injections,
+      // A later channel lookup may have yielded while an earlier stream
+      // was removed. Recheck the entire response at the final return.
+      contextInjections: injections.filter(i => authorization.get(i)!()),
     };
   }
 }

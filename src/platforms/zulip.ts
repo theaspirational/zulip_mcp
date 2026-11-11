@@ -14,6 +14,8 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
+import { StreamReadGate } from '../stream-read-gate.js';
+
 import type { Subscriptions } from '../subscriptions.js';
 import { PollCache, PollLookups, PollUsers, countPollDrop, applyPollUpdate, parsePollSubmessage, reconstructPoll, type WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
@@ -127,6 +129,7 @@ type QuoteVerdict = 'reply' | 'not-reply' | 'ineligible' | 'unverified' | 'budge
 
 /** A recently seen message, as the cache places reactions and changes. */
 interface SeenMessage {
+  streamId?: number;
   channelId: string;
   /** Historical placement, not yet confirmed after a move. Reactions/edits
    *  must GET again rather than route by this old channel/topic. */
@@ -180,7 +183,8 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, what: string): P
 /** The live filters the adapter consults — the plane, or a stand-in. */
 export interface FilterView {
   subscriptions?: Subscriptions;
-  streamAllowed(streamName: string): boolean;
+  streamReadGate?: StreamReadGate;
+  streamAllowed(streamName: string, streamId?: number): boolean;
   streamMuted?(streamName: string): boolean;
   dmAllowed(sender: { id: number; email: string }): boolean;
 }
@@ -268,6 +272,7 @@ export class ZulipAdapter implements PlatformAdapter {
   private streamsRefreshedAt = 0;
   /** Messages just moved to a stream the bot cannot see, by id → when: the
    *  delete event Zulip sends for lost visibility is a vanishing, not a deletion. */
+  private streamGate: StreamReadGate | undefined;
   private movedAway = new Map<number, number>();
 
   constructor(
@@ -280,14 +285,27 @@ export class ZulipAdapter implements PlatformAdapter {
     this.backscrollDefault = options.backscrollDefault ?? DEFAULT_BACKSCROLL;
     this.backscrollLimits = options.backscrollLimits ?? new Map();
     this.messageIds = options.messageIds ?? LEGACY_IDS;
-    this.activeTopics = new ActiveTopicsCache(zulipClient, options.activeTopics, Date.now, options.activeTopicsTtlMs);
     this.filters = options.filters ?? ALLOW_ALL;
+    const subscriptions = this.filters.subscriptions;
+    if (subscriptions?.mode === 'subscribed') {
+      this.streamGate = this.filters.streamReadGate ?? new StreamReadGate({
+        allows: (id) => id !== undefined && this.filters.streamAllowed(subscriptions.name(id) ?? '', id),
+        resolveName: (name) => subscriptions.resolveName(name),
+        known: () => subscriptions.status().known,
+      });
+      this.zulipClient = this.streamGate.client(zulipClient);
+    }
+    this.activeTopics = new ActiveTopicsCache(this.zulipClient, options.activeTopics, Date.now, options.activeTopicsTtlMs);
     this.dmDiscoveryLimit = options.dmDiscoveryLimit ?? DEFAULT_DM_DISCOVERY_LIMIT;
     this.maxMessageLength = options.maxMessageLength;
     this.uploader = options.uploader ?? null;
     this.uploadPolicy = options.uploadPolicy ?? null;
     this.formatTime = options.formatTime ?? agentLineTimeFormatter();
     if (this.uploader && !this.uploadPolicy) throw new Error('ZulipAdapter: uploader needs an uploadPolicy');
+  }
+
+  private streamAllowedById(name: string, id: number | null | undefined): boolean {
+    return this.streamGate ? this.streamGate.allowed(id ?? undefined) : this.filters.streamAllowed(name);
   }
 
   /** The history cap for a stream (descriptor `capabilities.history.maxMessages`). */
@@ -300,6 +318,11 @@ export class ZulipAdapter implements PlatformAdapter {
   }
 
   async discoverChannels(): Promise<ChannelDescriptor[]> {
+    const read = () => this.discoverChannelsGated();
+    return this.streamGate ? this.streamGate.run(read) : read();
+  }
+
+  private async discoverChannelsGated(): Promise<ChannelDescriptor[]> {
     const channels: ChannelDescriptor[] = [];
     try {
       const result = await this.zulipClient.streams.retrieve({
@@ -312,7 +335,7 @@ export class ZulipAdapter implements PlatformAdapter {
         if (typeof stream.stream_id === 'number' && typeof stream.name === 'string') {
           this.streamNamesById.set(stream.stream_id, stream.name);
         }
-        if (!this.filters.streamAllowed(stream.name)) continue;
+        if (!this.streamAllowedById(stream.name, stream.stream_id)) continue;
         channels.push(this.streamDescriptor(stream.name, stream.stream_id, {
           subscriber_count: stream.subscriber_count,
           is_public: !stream.invite_only,
@@ -357,6 +380,11 @@ export class ZulipAdapter implements PlatformAdapter {
    * outside the allowlist is never described.
    */
   async describeChannels(channelIds: string[]): Promise<ChannelDescriptor[]> {
+    const read = () => this.describeChannelsGated(channelIds);
+    return this.streamGate ? this.streamGate.run(read) : read();
+  }
+
+  private async describeChannelsGated(channelIds: string[]): Promise<ChannelDescriptor[]> {
     const out: ChannelDescriptor[] = [];
     for (const channelId of channelIds) {
       if (isDmChannelIdLocal(channelId)) continue;
@@ -369,6 +397,7 @@ export class ZulipAdapter implements PlatformAdapter {
       } catch (error) {
         console.error(`[zulip-mcp] could not resolve the stream id for #${name}:`, (error as Error).message);
       }
+      if (!this.streamAllowedById(name, streamId)) continue;
       out.push(this.streamDescriptor(name, streamId));
     }
     return out;
@@ -411,6 +440,7 @@ export class ZulipAdapter implements PlatformAdapter {
       if (oldest !== undefined) this.seen.delete(oldest);
     }
     this.seen.set(m.id, {
+      streamId: m.streamId,
       channelId,
       authorId: m.authorId,
       authorName: m.authorName,
@@ -583,7 +613,7 @@ export class ZulipAdapter implements PlatformAdapter {
           (move.propagateMode === 'change_later' && id >= move.messageId)))) continue;
       const confirmed = exact && move.destinationChannelId !== null && move.topic !== null;
       this.seen.set(id, { ...at, placementUnknown: !confirmed,
-        ...(confirmed ? { channelId: move.destinationChannelId!, topic: move.topic! } : {}) });
+        ...(confirmed ? { channelId: move.destinationChannelId!, topic: move.topic!, streamId: move.newStreamId ?? at.streamId } : {}) });
     }
     this.emitSelfMove(move.messageId, [move.messageId], sourceChannel ?? 'zulip:unknown',
       source?.topic ?? null, move.destinationChannelId, move.topic, move.topic === null,
@@ -605,7 +635,7 @@ export class ZulipAdapter implements PlatformAdapter {
       }
       return this.filters.dmAllowed({ id: where.authorId, email: where.authorEmail });
     }
-    return this.filters.streamAllowed(streamNameOf(where.channelId));
+    return this.streamAllowedById(streamNameOf(where.channelId), where.streamId);
   }
 
   /**
@@ -640,7 +670,7 @@ export class ZulipAdapter implements PlatformAdapter {
         return;
       }
       const fromChannelId = fromStream !== null ? zulipChannelId(fromStream) : where.channelId;
-      const placed: SeenMessage = { ...where, channelId: fromChannelId };
+      const placed: SeenMessage = { ...where, channelId: fromChannelId, streamId: change.streamId ?? where.streamId };
       const content = change.content !== null ? cleanMarkdown(change.content) : null;
       const previousContent = change.origContent !== null ? cleanMarkdown(change.origContent) : null;
       const topic = change.topic ?? (crossStream ? change.origTopic : null) ?? where.topic;
@@ -662,6 +692,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // acted on.
       this.seen.set(change.messageId, {
         ...where,
+        streamId: change.newStreamId ?? where.streamId,
         topic,
         placementUnknown: crossStream && movedToChannelId === null,
         mentioned,
@@ -675,7 +706,7 @@ export class ZulipAdapter implements PlatformAdapter {
           if (id === change.messageId) continue;
           const co = this.seen.get(id);
           if (co) this.seen.set(id, {
-            ...co, topic,
+            ...co, topic, streamId: change.newStreamId ?? co.streamId,
             ...(movedToChannelId !== null ? { channelId: movedToChannelId, placementUnknown: false } : {}),
           });
         }
@@ -694,6 +725,7 @@ export class ZulipAdapter implements PlatformAdapter {
       const event: MessageChangeEvent = {
         kind: content !== null ? 'edit' : 'move',
         channelId: fromChannelId,
+        ...(this.streamGate ? { streamId: placed.streamId } : {}),
         messageId: String(change.messageId),
         messageIds: change.messageIds.map(String),
         authorId: String(where.authorId),
@@ -721,7 +753,7 @@ export class ZulipAdapter implements PlatformAdapter {
         this.onSelfChanged?.(event);
         return;
       }
-      if (this.changeAllowed(placed) && (this.filters.subscriptions?.mode !== 'subscribed' || !crossStream || (movedToStream !== null && this.filters.streamAllowed(movedToStream)))) emit(event);
+      if (this.changeAllowed(placed) && (this.filters.subscriptions?.mode !== 'subscribed' || !crossStream || (movedToStream !== null && this.streamAllowedById(movedToStream, change.newStreamId ?? undefined)))) emit(event);
       return;
     }
 
@@ -742,7 +774,7 @@ export class ZulipAdapter implements PlatformAdapter {
     });
     if (cached?.placementUnknown && !vanished) {
       const name = change.streamId === null ? undefined : this.streamNamesById.get(change.streamId);
-      cached = { ...cached, channelId: name ? zulipChannelId(name) : cached.channelId, topic: change.topic ?? '' };
+      cached = { ...cached, streamId: change.streamId ?? cached.streamId, channelId: name ? zulipChannelId(name) : cached.channelId, topic: change.topic ?? '' };
     }
     for (const id of ids) { this.seen.delete(id); this.movedAway.delete(id); }
     let event: MessageChangeEvent | null = null;
@@ -750,6 +782,7 @@ export class ZulipAdapter implements PlatformAdapter {
       if (!this.changeAllowed(cached)) return;
       event = {
         kind: 'delete',
+        ...(this.streamGate ? { streamId: cached.streamId } : {}),
         channelId: cached.channelId,
         messageId: String(placedId),
         messageIds: ids.map(String),
@@ -774,9 +807,10 @@ export class ZulipAdapter implements PlatformAdapter {
       };
     } else if (change.messageType === 'stream' && change.streamId !== null) {
       const streamName = await this.streamNameById(change.streamId);
-      if (streamName === null || !this.filters.streamAllowed(streamName)) return;
+      if (streamName === null || !this.streamAllowedById(streamName, change.streamId)) return;
       event = {
         kind: 'delete',
+        ...(this.streamGate ? { streamId: change.streamId } : {}),
         channelId: zulipChannelId(streamName),
         messageId: String(placedId),
         messageIds: ids.map(String),
@@ -992,13 +1026,18 @@ export class ZulipAdapter implements PlatformAdapter {
    * pass (they are its own doing); callers decide whether to show them.
    */
   private allowed(m: ZulipMessage): boolean {
-    if (this.filters.subscriptions?.mode === 'subscribed' && !m.isDm && (m.streamName === null || !this.filters.streamAllowed(m.streamName))) return false;
+    if (this.filters.subscriptions?.mode === 'subscribed' && !m.isDm && (m.streamName === null || !this.streamAllowedById(m.streamName, m.streamId))) return false;
     if (this.identity.selfUserId !== null && m.authorId === this.identity.selfUserId) return true;
     if (m.isDm) return this.filters.dmAllowed({ id: m.authorId, email: m.authorEmail });
-    return m.streamName === null || this.filters.streamAllowed(m.streamName);
+    return m.streamName === null || this.streamAllowedById(m.streamName, m.streamId);
   }
 
-  async fetchContext(
+  async fetchContext(channelId: string, _descriptor: ChannelDescriptor | undefined, historySize: number): Promise<ContextInjection | null> {
+    const read = () => this.fetchContextGated(channelId, _descriptor, historySize);
+    return this.streamGate ? this.streamGate.run(read) : read();
+  }
+
+  private async fetchContextGated(
     channelId: string,
     _descriptor: ChannelDescriptor | undefined,
     historySize: number,
@@ -1042,6 +1081,11 @@ export class ZulipAdapter implements PlatformAdapter {
    * a page of nothing but the bot's own messages for the end of history.
    */
   async fetchHistory(channelId: string, query: ChannelHistoryQuery): Promise<ChannelHistoryPage> {
+    const read = () => this.fetchHistoryGated(channelId, query);
+    return this.streamGate ? this.streamGate.run(read) : read();
+  }
+
+  private async fetchHistoryGated(channelId: string, query: ChannelHistoryQuery): Promise<ChannelHistoryPage> {
     const dmIds = parseDmChannelId(channelId);
     if (!dmIds && !this.filters.streamAllowed(streamNameOf(channelId))) {
       return { messages: [], scannedThrough: null, reachedNewest: true };
@@ -1086,7 +1130,7 @@ export class ZulipAdapter implements PlatformAdapter {
     const messages = page.messages
       .filter((m) => this.identity.selfUserId === null || m.authorId !== this.identity.selfUserId)
       .filter((m) => this.allowed(m))
-      .map((m) => toIncoming(channelId, m, this.identity, { backscroll: true }));
+      .map((m) => toIncoming(channelId, m, this.identity, { backscroll: true, ...(this.streamGate ? { streamId: m.streamId } : {}) }));
     return {
       messages,
       scannedThrough: page.messages.length > 0 ? page.messages[page.messages.length - 1].id : null,
@@ -1167,9 +1211,10 @@ export class ZulipAdapter implements PlatformAdapter {
           void tail.then(async () => {
             const where = await this.locate(ev.message_id);
             if (!where || this.eventLoop !== loop) return;
-            if (!isDmChannelIdLocal(where.channelId) && !this.filters.streamAllowed(streamNameOf(where.channelId))) return;
+            if (!isDmChannelIdLocal(where.channelId) && !this.streamAllowedById(streamNameOf(where.channelId), where.streamId)) return;
             onReaction({
               action: ev.op,
+              ...(this.streamGate ? { streamId: where.streamId } : {}),
               channelId: where.channelId,
               messageId: String(ev.message_id),
               emoji: ev.emoji_name,
@@ -1189,10 +1234,12 @@ export class ZulipAdapter implements PlatformAdapter {
     loop.start(this.zulipClient, async (_streamName, msg, flags) => {
       this.polls.remember(msg as ZulipRawMessage);
       const m = normalizeMessage({ ...(msg as ZulipRawMessage), flags });
+      if (m.streamId !== undefined && m.streamName !== null)
+        this.filters.subscriptions?.observe([{ stream_id: m.streamId, name: m.streamName }]);
       // Remember our own messages too: reactions to them are the ones that
       // matter most ("someone reacted to your message").
       this.remember(m.isDm ? dmDescriptor(dmCounterparts(m.recipients, this.identity.selfUserId), 0).id : channelIdOf(m, this.identity.selfUserId), m);
-      if (!m.isDm && typeof msg.stream_id === 'number' && m.streamName !== null && this.filters.streamAllowed(m.streamName)) {
+      if (!m.isDm && typeof msg.stream_id === 'number' && m.streamName !== null && this.streamAllowedById(m.streamName, m.streamId)) {
         this.activeTopics.observe(msg.stream_id, m.topic, m.id, m.timestamp.toISOString());
       }
       if (this.identity.selfUserId !== null && msg.sender_id === this.identity.selfUserId) return;
@@ -1202,12 +1249,12 @@ export class ZulipAdapter implements PlatformAdapter {
           return;
         }
         const { descriptor, isNew } = this.describeDm(m);
-        onMessage(toIncoming(descriptor.id, m, this.identity), isNew ? descriptor : undefined);
+        onMessage(toIncoming(descriptor.id, m, this.identity, this.streamGate ? { streamId: m.streamId } : {}), isNew ? descriptor : undefined);
         return;
       }
-      if (m.streamName !== null && !this.filters.streamAllowed(m.streamName)) return;
+      if (m.streamName !== null && !this.streamAllowedById(m.streamName, m.streamId)) return;
       m.replyToSelf = await this.classifyQuoteReply(m) === 'reply';
-      if (this.eventLoop !== loop || (m.streamName !== null && !this.filters.streamAllowed(m.streamName))) return;
+      if (this.eventLoop !== loop || (m.streamName !== null && !this.streamAllowedById(m.streamName, m.streamId))) return;
       const cached = this.seen.get(m.id);
       if (cached) cached.replyToSelf = m.replyToSelf;
       // A stream the bot joined after startup is unknown to the host; the
@@ -1222,7 +1269,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // Remembered so a later reaction or edit on this stream can be placed.
       if (m.streamName !== null && streamId !== undefined) this.streamNamesById.set(streamId, m.streamName);
       const descriptor = m.streamName !== null ? this.streamDescriptor(m.streamName, streamId) : undefined;
-      onMessage(this.activeTopics.decorate(toIncoming(channelId, m, this.identity), streamId), descriptor);
+      onMessage(this.activeTopics.decorate(toIncoming(channelId, m, this.identity, this.streamGate ? { streamId: m.streamId } : {}), streamId), descriptor);
     }, onSystemEvent, reactionHandler, changeHandler, async () => {
       if (this.filters.subscriptions?.mode === 'subscribed') {
         await this.filters.subscriptions.connect(this.zulipClient, this.identity.selfUserId, true);
@@ -1235,6 +1282,12 @@ export class ZulipAdapter implements PlatformAdapter {
       }).catch(() => { countPollDrop('notification_failed'); });
     }, (event) => {
       this.filters.subscriptions?.apply(event);
+      if (event.type === 'stream') {
+        if (event.op === 'delete') for (const stream of event.streams ?? []) this.streamNamesById.delete(stream.stream_id);
+        if (event.op === 'create') for (const stream of event.streams ?? []) this.streamNamesById.set(stream.stream_id, stream.name);
+        if (event.op === 'update' && event.property === 'name' && event.stream_id !== undefined && typeof event.value === 'string')
+          this.streamNamesById.set(event.stream_id, event.value);
+      }
     }).catch(error => {
       console.error('Zulip event loop failed:', error);
     });
@@ -1264,7 +1317,7 @@ export class ZulipAdapter implements PlatformAdapter {
     // seen, history, event envelopes, move receipts or any placement cache.
     const m = normalizeMessage(message);
     if (!m.isDm) {
-      if (!this.filters.streamAllowed(m.streamName!)) { countPollDrop('stream_disallowed'); return; }
+      if (!this.streamAllowedById(m.streamName!, m.streamId)) { countPollDrop('stream_disallowed'); return; }
       if (this.filters.streamMuted?.(m.streamName!)) { countPollDrop('stream_muted'); return; }
     }
     const voter = this.pollUsers.peek().get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
@@ -1286,7 +1339,7 @@ export class ZulipAdapter implements PlatformAdapter {
       tags: ['zulip:poll-vote', own ? 'chat:addressed' : 'chat:ambient'],
       metadata: { pollVote: true, pollMessageId: s.message_id, optionKey: update.key, optionText,
         voterId: update.voterId, action: update.action, question, onOwnMessage: own,
-        topic: m.topic, isDM: m.isDm, senderEmail: voter.email },
+        topic: m.topic, ...(this.streamGate ? { streamId: m.streamId } : {}), isDM: m.isDm, senderEmail: voter.email },
     }, descriptor);
   }
 

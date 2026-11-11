@@ -304,7 +304,7 @@ export class ZulipEventLoop {
     // model and rejects the registration with "client_capabilities
     // [\"notification_settings_null\"] field is missing" when it is absent.
     const registration = await zulipClient.queues.register({
-      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'submessage', 'subscription'],
+      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'submessage', 'subscription', 'stream'],
       all_public_streams: 'true',
       apply_markdown: 'false',
       client_capabilities: JSON.stringify({ notification_settings_null: false, bulk_message_deletion: true }),
@@ -400,7 +400,7 @@ export class ZulipEventLoop {
           if (this.stopped) return;
           lastEventId = event.id;
 
-          if (event.type === 'subscription') {
+          if (event.type === 'subscription' || event.type === 'stream') {
             onSubscription?.({ ...event, op: event.op ?? '' });
             continue;
           }

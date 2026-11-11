@@ -71,6 +71,7 @@ export type OnSystemEvent = (event: PlatformSystemEvent) => void;
 
 /** A reaction added to or removed from a message, resolved to its channel. */
 export interface ReactionEvent {
+  streamId?: number;
   action: 'add' | 'remove';
   channelId: string;
   messageId: string;
@@ -126,6 +127,7 @@ export interface SelfMove {
  * someone else made to the bot's message is news (`onOwnMessage`).
  */
 export interface MessageChangeEvent {
+  streamId?: number;
   kind: 'edit' | 'move' | 'delete';
   channelId: string;
   /** The changed message; a move or bulk delete names the one acted on and

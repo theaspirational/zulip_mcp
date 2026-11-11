@@ -7,6 +7,8 @@
  * are the plain-MCP surface every client gets.
  */
 
+import { StreamReadGate, STREAM_READ_TOOLS, CONDITIONAL_STREAM_READ_TOOLS } from './stream-read-gate.js';
+
 import { pollContent, reconstructPoll, pollResults, PollUsers, boundedPollRead } from "./polls.js";
 import { ZULIP_MAX_MESSAGE_LENGTH } from "./content.js";
 import { LOCATE_TIMEOUT_MS, withTimeout } from "./platforms/zulip.js";
@@ -16,6 +18,7 @@ import { homedir } from "node:os";
 import type { ContentBlock } from "@animalabs/mcpl-core";
 import {
   cleanContent,
+  extractZulipAttachments,
   fetchAttachmentBytes,
   parseZulipAttachmentUrl,
   toFetchResult,
@@ -89,6 +92,7 @@ export function stripSuppressedReactions<T extends { reactions?: unknown }>(mess
 }
 
 export interface ChannelState {
+  streamId?: number;
   channelName: string;
   lastReadMessageId: number | string;
   subscribed: boolean;
@@ -299,33 +303,21 @@ export class ZulipToolRuntime {
     this.reactionPolicy = policy;
   }
 
-  /** Subscribed-mode read boundary, shared by tools and legacy resources.
-   * Named streams are refused before GET; id lookups and in-flight reads are
-   * checked on the fresh response, never on an old placement cache. DMs keep
-   * their existing semantics. No wrapper is installed in the default mode. */
-  setStreamReadPolicy(allowed: (stream: string) => boolean): void {
-    const original = this.zulipClient;
-    const messages = original.messages;
-    const check = (stream: unknown) => {
-      if (typeof stream !== "string" || !allowed(stream)) throw new Error("Stream history refused by subscribed-stream policy");
-    };
-    const visible = (m: any) => m?.type === "private" || (m?.type === "stream" && typeof m.display_recipient === "string" && allowed(m.display_recipient));
-    this.zulipClient = { ...original, messages: {
-      ...messages,
-      getById: async (params: any) => {
-        const result = await messages.getById(params);
-        if (result?.message && !visible(result.message)) throw new Error("Message read refused by subscribed-stream policy");
-        return result;
-      },
-      retrieve: async (params: any) => {
-        for (const item of params.narrow ?? []) {
-          const op = Array.isArray(item) ? item[0] : item.operator;
-          if (op === "stream" || op === "channel") check(Array.isArray(item) ? item[1] : item.operand);
-        }
-        const result = await messages.retrieve(params);
-        return Array.isArray(result?.messages) ? { ...result, messages: result.messages.filter(visible) } : result;
-      },
-    } };
+  private streamGate: StreamReadGate | undefined;
+
+  setStreamReadPolicy(gate: StreamReadGate): void {
+    this.streamGate = gate;
+    this.zulipClient = this.streamGate.client(this.zulipClient);
+  }
+
+  private monitoredOperand(name: string, state: ChannelState): string | number {
+    if (!this.streamGate) return name;
+    this.streamGate.assert(state.streamId);
+    return state.streamId!;
+  }
+
+  private checkMonitored(names: string[]): void {
+    for (const name of names) this.streamGate?.assert(this.monitoredChannels.get(name)?.streamId);
   }
 
   /** Resolve and check a reply before uploading files or sending any chunks. */
@@ -413,6 +405,12 @@ export class ZulipToolRuntime {
 
   /** Execute a tool. Returns the raw handler result; see toToolCallResult. */
   async handleToolCall(name: string, args: any): Promise<any> {
+    const call = () => this.handleParsedCall(name, args);
+    return this.streamGate ? this.streamGate.run(call) : call();
+  }
+
+  private async handleParsedCall(name: string, args: any): Promise<any> {
+    if (STREAM_READ_TOOLS.has(name) && !CONDITIONAL_STREAM_READ_TOOLS.has(name)) this.streamGate?.requireKnown();
     if (this.messageIds.mode === "legacy") return this.handleValidatedCall(name, args);
     let warned = false;
     const warning = `Warning: bare message_id accepted by ${this.messageIds.tag}; use ${this.messageIds.tag}:<n>.`;
@@ -420,11 +418,11 @@ export class ZulipToolRuntime {
     try {
       args = { ...args };
       const fields = ["send_message", "send_poll"].includes(name) ? ["reply_to"] : name === "fetch_history" ? ["before", "after"]
-        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around", "get_poll_results"].includes(name) ? ["message_id"] : [];
+        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around", "get_poll_results", "fetch_attachment"].includes(name) ? ["message_id"] : [];
       for (const field of fields) {
         // The send destination contract has historical strict-schema absent sentinels.
         if (field === "reply_to" && [undefined, null, "", 0].includes(args[field])) continue;
-        if (["before", "after"].includes(field) && args[field] === undefined) continue;
+        if ((["before", "after"].includes(field) || name === "fetch_attachment") && args[field] === undefined) continue;
         args[field] = this.messageIds.parse(args[field], bare);
       }
       // Validate ALL tokens before resolving reply destinations, users, uploads or any other API call.
@@ -449,12 +447,13 @@ export class ZulipToolRuntime {
 
         for (const channelName of channels) {
           try {
+            const streamId = this.streamGate?.named(channelName);
             // Get latest message to establish baseline
             const messages = await zulipClient.messages.retrieve({
               anchor: "newest",
               num_before: 1,
               num_after: 0,
-              narrow: [["stream", channelName]],
+              narrow: [["stream", streamId ?? channelName]],
             });
             for (const message of messages.messages ?? []) this.onMessageObserved?.(message.id);
 
@@ -464,6 +463,7 @@ export class ZulipToolRuntime {
 
             monitoredChannels.set(channelName, {
               channelName,
+              ...(streamId !== undefined ? { streamId } : {}),
               lastReadMessageId: lastMessageId,
               subscribed: true,
             });
@@ -587,6 +587,7 @@ export class ZulipToolRuntime {
       }
 
       case "get_monitored_channels": {
+        this.checkMonitored([...monitoredChannels.keys()]);
         const channels = Array.from(monitoredChannels.values());
         return {
           monitored_count: channels.length,
@@ -609,6 +610,7 @@ export class ZulipToolRuntime {
         const startTimestamp = Math.floor(startDate.getTime() / 1000);
         const endTimestamp = Math.floor(endDate.getTime() / 1000);
 
+        const streamId = this.streamGate?.named(args.channel);
         // Build narrow filters
         const narrow: any[] = [["stream", args.channel]];
         if (args.topic) {
@@ -640,6 +642,7 @@ export class ZulipToolRuntime {
           if (!monitoredChannels.has(args.channel)) {
             monitoredChannels.set(args.channel, {
               channelName: args.channel,
+              ...(streamId !== undefined ? { streamId } : {}),
               lastReadMessageId: latestMessageId,
               subscribed: true,
             });
@@ -649,6 +652,7 @@ export class ZulipToolRuntime {
             // Update last read
             const state = monitoredChannels.get(args.channel)!;
             state.lastReadMessageId = latestMessageId;
+            if (streamId !== undefined) state.streamId = streamId;
             monitoringStatus = "updated_read_position";
             this.saveState();
           }
@@ -703,7 +707,7 @@ export class ZulipToolRuntime {
               anchor: "newest",
               num_before: 200,
               num_after: 0,
-              narrow: [["stream", channelName]],
+              narrow: [["stream", this.monitoredOperand(channelName, state)]],
             });
             for (const message of result.messages ?? []) this.onMessageObserved?.(message.id);
 
@@ -790,7 +794,7 @@ export class ZulipToolRuntime {
         const hasText = typeof args.content === "string" && args.content.trim() !== "";
         const hasFiles = Array.isArray(args.attachments) && args.attachments.length > 0;
         if (!hasText && !hasFiles) throw new Error("content is required (or at least one attachment)");
-        const resolvedContent = isPoll ? args.content : hasText ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session, this.messageIds)) : "";
+        const resolvedContent = isPoll ? args.content : hasText ? normalizeMarkdownTables(await resolveMessageLinks(args.content, { ...this.session, client: zulipClient }, this.messageIds)) : "";
         const reply = args.reply_to !== undefined ? await this.replyDestination(args) : undefined;
         if (reply) args = { ...args, type: reply.type, to: reply.to, topic: reply.topic };
         const uploaded = await this.uploadFor(args);
@@ -911,7 +915,7 @@ export class ZulipToolRuntime {
         const editFields = new URLSearchParams();
         for (const field of moving ? ["topic", "propagate_mode", "stream_id"] : ["content"]) {
           if (args[field] !== undefined) editFields.set(field, field === "content"
-            ? normalizeMarkdownTables(await resolveMessageLinks(args.content, this.session, this.messageIds)) : String(args[field]));
+            ? normalizeMarkdownTables(await resolveMessageLinks(args.content, { ...this.session, client: zulipClient }, this.messageIds)) : String(args[field]));
         }
         const response = await fetch(`${apiUrl}/messages/${encodeURIComponent(args.message_id)}`, {
           method: "PATCH",
@@ -1195,8 +1199,24 @@ export class ZulipToolRuntime {
         // Validation (realm host + /user_uploads/ prefix, with the URL
         // dot-segment normalization invariant) lives in parseZulipAttachmentUrl.
         const url = parseZulipAttachmentUrl(String(args.path || ""), this.session.realm);
+        if (this.streamGate) {
+          if (!Number.isSafeInteger(args.message_id) || args.message_id <= 0)
+            throw new Error("Attachment read refused by subscribed-stream policy: message_id provenance required");
+          const result = await zulipClient.messages.getById({ message_id: args.message_id, apply_markdown: false });
+          assertApiSuccess(result, "attachment provenance");
+          if (result.message?.id !== args.message_id ||
+              !extractZulipAttachments(result.message?.content ?? '').some(ref => {
+                try { return parseZulipAttachmentUrl(ref.path, this.session.realm).href === url.href; } catch { return false; }
+              })) throw new Error("Attachment read refused by subscribed-stream policy: attachment not in message");
+        }
 
         const headers: Record<string, string> = {};
+        // The source may have been removed while getById was resolving to us.
+        // The outer scope checks again after downloading/decoding the bytes.
+        if (this.streamGate && args.message_id !== undefined) {
+          // The source ID was recorded by getById in the current read scope.
+          this.streamGate.recheck();
+        }
         if (this.session.authHeader) headers["Authorization"] = this.session.authHeader;
         const name = decodeURIComponent(url.pathname.split("/").pop() || "attachment");
         return toFetchResult(await fetchAttachmentBytes(url.toString(), name, { headers }));
@@ -1291,6 +1311,7 @@ export class ZulipToolRuntime {
 
     // Add a resource for each monitored Zulip channel
     for (const channel of this.monitoredChannels.keys()) {
+      if (this.streamGate && !this.streamGate.allowed(this.monitoredChannels.get(channel)?.streamId)) continue;
       resources.push({
         uri: `zulip://channel/${channel}/unread`,
         name: `Zulip #${channel} - Unread Messages`,
@@ -1303,6 +1324,12 @@ export class ZulipToolRuntime {
   }
 
   async readResource(uri: string): Promise<ResourceContents> {
+    const read = () => this.readGatedResource(uri);
+    return this.streamGate ? this.streamGate.run(read) : read();
+  }
+
+  private async readGatedResource(uri: string): Promise<ResourceContents> {
+    this.streamGate?.requireKnown();
     const zulipClient = this.zulipClient;
     const monitoredChannels = this.monitoredChannels;
 
@@ -1317,7 +1344,7 @@ export class ZulipToolRuntime {
             anchor: "newest",
             num_before: 50,
             num_after: 0,
-            narrow: [["stream", channelName]],
+            narrow: [["stream", this.monitoredOperand(channelName, state)]],
           });
           for (const message of result.messages ?? []) this.onMessageObserved?.(message.id);
 
@@ -1341,6 +1368,7 @@ export class ZulipToolRuntime {
 
     // Handle monitoring status
     if (uri === "zulip://monitoring/status") {
+      this.checkMonitored([...monitoredChannels.keys()]);
       const status = {
         session_id: this.sessionId,
         monitored_count: monitoredChannels.size,
@@ -1368,7 +1396,7 @@ export class ZulipToolRuntime {
           anchor: "newest",
           num_before: 50,
           num_after: 0,
-          narrow: [["stream", channelName]],
+          narrow: [["stream", this.monitoredOperand(channelName, state)]],
         });
         for (const message of result.messages ?? []) this.onMessageObserved?.(message.id);
 

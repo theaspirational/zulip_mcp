@@ -1,6 +1,11 @@
 /** Subscription authorization state. Never infer membership from public-stream visibility. */
 export interface SubscriptionEvent {
   op: string;
+  type?: string;
+  stream_id?: number;
+  streams?: { stream_id: number; name: string }[];
+  property?: string;
+  value?: unknown;
   subscriptions?: { stream_id: number; name?: string }[];
   stream_ids?: number[];
   user_id?: number;
@@ -24,12 +29,24 @@ export class Subscriptions {
     this.mode = mode === 'subscribed' ? 'subscribed' : 'all';
   }
 
-  allows(name: string): boolean {
-    return this.mode === 'all' || (this.known && [...this.streams.values()].includes(name));
+  allows(id: number | undefined): boolean {
+    return this.mode === 'all' || (this.known && id !== undefined && this.streams.has(id));
   }
 
+  resolveName(name: string): number | undefined {
+    // Names are an address/display index only, never membership.
+    return [...this.names].find(([, current]) => current === name)?.[0];
+  }
+
+  name(id: number): string | undefined { return this.names.get(id); }
+
   observe(streams: { stream_id: number; name: string }[]): void {
-    for (const s of streams) this.names.set(s.stream_id, s.name);
+    for (const s of streams) {
+      // A newly created stream may reuse a renamed/deleted stream's name.
+      for (const [id, name] of this.names) if (name === s.name && id !== s.stream_id) this.names.delete(id);
+      this.names.set(s.stream_id, s.name);
+      if (this.streams.has(s.stream_id)) this.streams.set(s.stream_id, s.name);
+    }
   }
 
   status() {
@@ -88,6 +105,24 @@ export class Subscriptions {
 
   apply(event: SubscriptionEvent): void {
     if (this.mode !== 'subscribed') return;
+    if (event.type === 'stream') {
+      this.revision++;
+      if (event.op === 'delete') {
+        for (const s of event.streams ?? []) { this.streams.delete(s.stream_id); this.names.delete(s.stream_id); }
+      } else if (event.op === 'update' && event.property === 'name' && event.stream_id !== undefined && typeof event.value === 'string') {
+        this.observe([{ stream_id: event.stream_id, name: event.value }]);
+      } else if (event.op === 'create') this.observe(event.streams ?? []);
+      this.changed();
+      return;
+    }
+    // Subscription property updates do not grant membership; reconcile display names.
+    if (event.op === 'update') {
+      this.revision++;
+      if (event.property === 'name' && event.stream_id !== undefined && typeof event.value === 'string')
+        this.observe([{ stream_id: event.stream_id, name: event.value }]);
+      this.changed();
+      return;
+    }
     // add/remove are for the receiving user; peer_* explicitly name affected users.
     const users = event.user_ids ?? (event.user_id === undefined ? undefined : [event.user_id]);
     if (users && (this.selfId === null || !users.includes(this.selfId))) return;
@@ -97,17 +132,12 @@ export class Subscriptions {
     if (event.op === 'remove' || event.op === 'peer_remove') {
       for (const id of event.stream_ids ?? event.subscriptions?.map(s => s.stream_id) ?? []) this.streams.delete(id);
     } else if (event.subscriptions) {
-      for (const s of event.subscriptions) if (typeof s.name === 'string') { this.streams.set(s.stream_id, s.name); this.names.set(s.stream_id, s.name); }
-    } else {
-      // peer_add carries ids only. Known names are applied synchronously;
-      // an unknown private stream needs a bounded subscription read first.
-      let missing = false;
-      for (const id of event.stream_ids ?? []) {
-        const name = this.names.get(id);
-        if (name === undefined) missing = true;
-        else this.streams.set(id, name);
+      for (const s of event.subscriptions) {
+        this.streams.set(s.stream_id, s.name ?? this.names.get(s.stream_id) ?? '');
+        if (typeof s.name === 'string') this.observe([{ stream_id: s.stream_id, name: s.name }]);
       }
-      if (missing) { this.known = false; void this.refresh(); }
+    } else {
+      for (const id of event.stream_ids ?? []) this.streams.set(id, this.names.get(id) ?? '');
     }
     this.changed();
   }

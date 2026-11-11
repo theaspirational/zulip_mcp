@@ -32,6 +32,7 @@ import { isDmChannelId } from './history.js';
 import { messageLineHead } from './message-line.js';
 
 export interface MissedTally {
+  streamId?: number;
   /** Watermark at the moment the channel was closed (0 = none known). */
   anchorId: number;
   /** Highest id counted so far; the reconnect backfill resumes from here. */
@@ -103,6 +104,7 @@ export class DeliveryState {
       }
       for (const [chan, t] of Object.entries(parsed.missed ?? {})) {
         this.missed.set(chan, {
+          ...(typeof t.streamId === "number" ? { streamId: t.streamId } : {}),
           anchorId: num(t.anchorId),
           talliedThrough: num(t.talliedThrough ?? t.anchorId),
           messages: num(t.messages),
@@ -272,10 +274,10 @@ export class DeliveryState {
   }
 
   /** Host closed the channel: start counting what it no longer sees. */
-  markClosed(channelId: string): void {
+  markClosed(channelId: string, streamId?: number): void {
     if (!this.lastOpen.delete(channelId)) return;
     const anchor = this.watermarks.get(channelId) ?? 0;
-    this.missed.set(channelId, { anchorId: anchor, talliedThrough: anchor, messages: 0, characters: 0 });
+    this.missed.set(channelId, { ...(streamId !== undefined ? { streamId } : {}), anchorId: anchor, talliedThrough: anchor, messages: 0, characters: 0 });
   }
 
   // ── missed tallies ──

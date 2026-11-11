@@ -115,15 +115,15 @@ test('unknown state fails closed, bounded GET retries, and queue replacement inv
   } };
   try {
     await subscriptions.connect(client, SELF);
-    assert.equal(subscriptions.status().known, false); assert.equal(subscriptions.allows('public'), false);
+    assert.equal(subscriptions.status().known, false); assert.equal(subscriptions.allows(14), false);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('retry did not recover')), 200);
       subscriptions.onChange(() => { if (subscriptions.status().known) { clearTimeout(timer); resolve(); } });
     });
-    assert.equal(calls, 2); assert.equal(subscriptions.allows('general'), true);
+    assert.equal(calls, 2); assert.equal(subscriptions.allows(12), true);
     client.callEndpoint = async () => ({ result: 'error' } as any);
     await subscriptions.refresh(true);
-    assert.equal(subscriptions.allows('general'), false);
+    assert.equal(subscriptions.allows(12), false);
   } finally { subscriptions.stop(); }
   const f = planeFixture({ ZULIP_STREAMS_MODE: 'subscribed', ZULIP_STREAMS: 'general' });
   try { assert.equal(f.plane.streamAllowed('general'), false); assert.equal(f.plane.streamAllowed('public'), false); } finally { f.close(); }
@@ -136,18 +136,18 @@ test('peer events apply only to the bot, and an in-flight old snapshot cannot un
   try {
     await subscriptions.connect(client, SELF);
     subscriptions.apply({ op: 'peer_remove', stream_ids: [12], user_id: 42 });
-    assert.equal(subscriptions.allows('general'), true);
+    assert.equal(subscriptions.allows(12), true);
     subscriptions.apply({ op: 'peer_remove', stream_ids: [12], user_ids: [SELF] });
-    assert.equal(subscriptions.allows('general'), false);
+    assert.equal(subscriptions.allows(12), false);
     subscriptions.apply({ op: 'peer_add', stream_ids: [12], user_id: 42 });
-    assert.equal(subscriptions.allows('general'), false);
+    assert.equal(subscriptions.allows(12), false);
     subscriptions.apply({ op: 'peer_add', stream_ids: [12], user_id: SELF });
-    assert.equal(subscriptions.allows('general'), true);
+    assert.equal(subscriptions.allows(12), true);
     client.callEndpoint = () => new Promise(r => { resolve = r; });
     const pending = subscriptions.refresh();
     subscriptions.apply({ op: 'remove', subscriptions: [general] });
     resolve({ result: 'success', subscriptions: [general] }); await pending;
-    assert.equal(subscriptions.allows('general'), false);
+    assert.equal(subscriptions.allows(12), false);
   } finally { subscriptions.stop(); }
 });
 
@@ -220,4 +220,25 @@ test('default mode still delivers unsubscribed public streams and makes no subsc
     assert.equal(f.plane.subscriptions.mode, 'all');
   } finally { f.close(); }
   assert.throws(() => new Subscriptions('typo'), /ZULIP_STREAMS_MODE/);
+});
+
+test('queue requests and handles stream rename/create/delete without granting old-name public streams', async () => {
+  const f = await eventFixture();
+  try {
+    assert.ok(f.registrations[0].event_types.includes('stream'));
+    await f.batch([
+      { id: 1, type: 'stream', op: 'update', stream_id: 12, property: 'name', value: 'renamed' },
+      { id: 2, type: 'stream', op: 'create', streams: [{ stream_id: 14, name: 'general' }] },
+      { id: 3, type: 'message', message: raw(3, 'general', 14) },
+      { id: 4, type: 'message', message: raw(4, 'renamed', 12) },
+      // A forged/stale display name must not make ID 14 a member.
+      { id: 5, type: 'message', message: raw(5, 'renamed', 14) },
+      { id: 6, type: 'subscription', op: 'update', stream_id: 12, property: 'color', value: '#123456' },
+      { id: 7, type: 'stream', op: 'delete', streams: [{ stream_id: 12, name: 'renamed' }] },
+      { id: 8, type: 'message', message: raw(8, 'renamed', 12) },
+    ]);
+    assert.deepEqual(f.incoming.map(m => m.messageId), ['4']);
+    assert.equal(f.plane.subscriptions.allows(12), false);
+    assert.equal(f.plane.subscriptions.allows(14), false);
+  } finally { f.close(); }
 });

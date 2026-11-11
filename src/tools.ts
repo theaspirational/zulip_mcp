@@ -554,10 +554,11 @@ export const toolDefinitions: ToolDefinition[] = [
       "Images (png/jpg/jpeg/gif/webp) return as an image content block usable by vision models. " +
       "Text-ish MIME types (text/*, JSON, CSV, YAML) return as `content_text` so the model can read directly. " +
       "Other binaries return as `base64`. Paths look like '/user_uploads/X/Yy/Zz/name.ext' and appear in " +
-      "incoming message attachment refs. Only paths under /user_uploads/ on the configured realm are allowed.",
+      "incoming message attachment refs. In subscribed mode, message_id must identify a readable message containing the path. Only paths under /user_uploads/ on the configured realm are allowed.",
     inputSchema: {
       type: "object",
       properties: {
+        message_id: { type: "number", description: "Source message ID; required in subscribed mode to authorize this attachment." },
         path: {
           type: "string",
           description: "Attachment path (e.g. '/user_uploads/2/Ab/cd/screenshot.png') or full Zulip URL.",
