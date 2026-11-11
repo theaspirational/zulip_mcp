@@ -14,7 +14,7 @@
  * described on the fly when a message from a new conversation arrives.
  */
 
-import { PollCache, PollUsers, applyPollUpdate, parsePollSubmessage, type WidgetSubmessage } from '../polls.js';
+import { PollCache, PollUsers, countPollDrop, applyPollUpdate, parsePollSubmessage, type WidgetSubmessage } from '../polls.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 
 import type {
@@ -1233,9 +1233,12 @@ export class ZulipAdapter implements PlatformAdapter {
     const update = parsePollSubmessage(s);
     if (!update) return;
     const messageId = s.message_id!;
-    const record = await this.polls.locate(this.zulipClient, messageId);
+    const record = this.polls.entry(messageId);
+    if (!record.message) void this.polls.locate(this.zulipClient, messageId);
+    void this.pollUsers.get(this.zulipClient);
     record.state = applyPollUpdate(record.state, update);
-    if (update.type !== 'vote' || !record.state || !record.message) return;
+    if (update.type !== 'vote') return;
+    if (!record.state || !record.message) { countPollDrop('unknown_poll'); return; }
     if (!this.seen.has(s.message_id!)) {
       const m = normalizeMessage(record.message);
       this.remember(channelIdOf(m, this.identity.selfUserId), m);
@@ -1243,10 +1246,11 @@ export class ZulipAdapter implements PlatformAdapter {
     const option = record.state.options.get(update.key);
     if (!option) return;
     // Use the same placement cache as reactions/edits, including move invalidation.
-    const where = await this.locate(s.message_id!, 'a poll vote');
+    const where = this.seen.get(s.message_id!);
+    if (where?.placementUnknown) { countPollDrop('unknown_placement'); return; }
     if (!where) return;
     if (!where.isDm && !this.filters.streamAllowed(streamNameOf(where.channelId))) return;
-    const users = await this.pollUsers.get(this.zulipClient);
+    const users = this.pollUsers.peek();
     const voter = users.get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
     if (where.isDm && !this.filters.dmAllowed({ id: update.voterId, email: voter.email })) return;
     const own = this.identity.selfUserId !== null && where.authorId === this.identity.selfUserId;

@@ -1,6 +1,5 @@
-/** Zulip poll widget reducer. Fixtures are reconstructed, not captured upstream.
- * Wire assumptions: widget/extra_data initializes; vote {key,vote};
- * new_option {option,idx} uses the submessage sender as the key namespace.
+/** Wire format checked against Zulip 12.3 event_types.py, widget.py and validator.py.
+ * Initial options use canned,N; added options use sender_id,idx.
  */
 import type { ZulipRawMessage } from './history.js';
 
@@ -18,21 +17,34 @@ export type PollUpdate =
   | { type: 'new_option'; key: string; text: string }
   | { type: 'vote'; key: string; voterId: number; action: 'vote' | 'unvote' };
 
+export const POLL_LIMITS = { options: 100, text: 2000, polls: 500, voters: 1000,
+  content: 1_000_000, lookups: 20, negativeTtlMs: 60_000 } as const;
+export const pollDrops: Record<string, number> = Object.create(null);
+export function countPollDrop(reason: string): void { pollDrops[reason] = (pollDrops[reason] ?? 0) + 1; }
+function textLimit(text: string): string {
+  if (text.length > POLL_LIMITS.text) countPollDrop('text_truncated');
+  return text.slice(0, POLL_LIMITS.text);
+}
+
 const positiveId = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n) > 0;
 export function parsePollSubmessage(s: WidgetSubmessage): PollUpdate | null {
   if (!s || s.msg_type !== 'widget' || !positiveId(s.sender_id)) return null;
+  if (typeof s.content !== 'string' || s.content.length > POLL_LIMITS.content) { countPollDrop('content_too_large'); return null; }
   let c;
   try { c = JSON.parse(s.content); } catch { return null; }
   if (!c || typeof c !== 'object') return null;
   if (c.widget_type === 'poll' && typeof c.extra_data?.question === 'string' &&
-      Array.isArray(c.extra_data.options) && c.extra_data.options.every((x: unknown) => typeof x === 'string')) {
-    return { type: 'init', question: c.extra_data.question, options: c.extra_data.options };
+      Array.isArray(c.extra_data.options)) {
+    if (c.extra_data.options.length > POLL_LIMITS.options) countPollDrop('options_truncated');
+    const options = c.extra_data.options.slice(0, POLL_LIMITS.options);
+    if (!options.every((x: unknown) => typeof x === 'string')) return null;
+    return { type: 'init', question: textLimit(c.extra_data.question), options: options.map(textLimit) };
   }
-  if (c.type === 'new_option' && typeof c.option === 'string' && Number.isSafeInteger(c.idx) && c.idx >= 0) {
-    return { type: 'new_option', key: `${s.sender_id},${c.idx}`, text: c.option };
+  if (c.type === 'new_option' && typeof c.option === 'string' && Number.isSafeInteger(c.idx) && c.idx >= 0 && c.idx <= 1000) {
+    return { type: 'new_option', key: `${s.sender_id},${c.idx}`, text: textLimit(c.option) };
   }
-  if (c.type === 'vote' && typeof c.key === 'string' && /^(canned|[1-9]\d*),\d+$/.test(c.key) && typeof c.vote === 'boolean') {
-    return { type: 'vote', key: c.key, voterId: s.sender_id, action: c.vote ? 'vote' : 'unvote' };
+  if (c.type === 'vote' && typeof c.key === 'string' && /^(canned|[1-9]\d*),\d+$/.test(c.key) && (c.vote === 1 || c.vote === -1)) {
+    return { type: 'vote', key: c.key, voterId: s.sender_id, action: c.vote === 1 ? 'vote' : 'unvote' };
   }
   return null;
 }
@@ -41,16 +53,22 @@ export function applyPollUpdate(state: PollState | null, update: PollUpdate | nu
   if (!update) return state;
   if (update.type === 'init') {
     // A replay of initialization must not erase votes already received live.
-    return state ?? { question: update.question, options: new Map(update.options.map((text, i) =>
-      [`canned,${i}`, { key: `canned,${i}`, text, voters: new Set<number>() }])) };
+    return state ?? { question: textLimit(update.question), options: new Map(update.options.slice(0, POLL_LIMITS.options).map((text, i) =>
+      [`canned,${i}`, { key: `canned,${i}`, text: textLimit(text), voters: new Set<number>() }])) };
   }
   if (!state) return null;
   if (update.type === 'new_option') {
-    if (!state.options.has(update.key)) state.options.set(update.key, { key: update.key, text: update.text, voters: new Set() });
+    if (!state.options.has(update.key)) {
+      if (state.options.size >= POLL_LIMITS.options) countPollDrop('option_limit');
+      else state.options.set(update.key, { key: update.key, text: textLimit(update.text), voters: new Set() });
+    }
   } else {
     const option = state.options.get(update.key);
     if (option) {
-      if (update.action === 'vote') option.voters.add(update.voterId);
+      if (update.action === 'vote') {
+        if (option.voters.size < POLL_LIMITS.voters) option.voters.add(update.voterId);
+        else countPollDrop('voter_limit');
+      }
       else option.voters.delete(update.voterId);
     }
   }
@@ -74,8 +92,7 @@ export function pollContent(question: unknown, options: unknown): string {
   return `/poll ${question}\n${options.join('\n')}`;
 }
 
-/** Bounds waits and retained poll ids (including negative lookups). zulip-js
- * cannot cancel an underlying GET; after a timeout the id stays attempted. */
+/** Bounds waits. zulip-js cannot cancel an underlying GET. */
 export async function boundedPollRead<T>(read: Promise<T>, ms = 3000): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -85,15 +102,23 @@ export async function boundedPollRead<T>(read: Promise<T>, ms = 3000): Promise<T
   } finally { clearTimeout(timer); }
 }
 
-export interface PollRecord { message?: ZulipRawMessage; state: PollState | null; attempted: boolean }
+export interface PollRecord { message?: ZulipRawMessage; state: PollState | null }
 export class PollCache {
   private records = new Map<number, PollRecord>();
-  constructor(private cap = 500) {}
+  // Attempts survive record eviction. Token refill bounds all IDs, including cycles.
+  private attempts = new Map<number, number>();
+  private inFlight = 0;
+  private tokens: number = POLL_LIMITS.lookups;
+  private refilled: number;
+  constructor(private cap = POLL_LIMITS.polls as number, private now = Date.now) {
+    this.cap = Math.max(1, Math.min(cap, POLL_LIMITS.polls));
+    this.refilled = now();
+  }
   entry(id: number): PollRecord {
     let entry = this.records.get(id);
     if (!entry) {
       if (this.records.size >= this.cap) this.records.delete(this.records.keys().next().value!);
-      entry = { state: null, attempted: false };
+      entry = { state: null };
       this.records.set(id, entry);
     }
     return entry;
@@ -102,17 +127,29 @@ export class PollCache {
     // Ordinary messages must not evict useful polls.
     if (!message.submessages?.length) return;
     const entry = this.entry(message.id);
-    entry.message = message;
+    entry.message = { ...message, submessages: undefined, content: message.content.slice(0, POLL_LIMITS.text) };
     entry.state = reconstructPoll(message.submessages) ?? entry.state;
   }
   async locate(client: any, id: number): Promise<PollRecord> {
     const entry = this.entry(id);
-    if ((entry.message && entry.state) || entry.attempted) return entry;
-    entry.attempted = true;
+    if (entry.message && entry.state) return entry;
+    const now = this.now();
+    for (const [key, expires] of this.attempts) if (expires <= now) this.attempts.delete(key);
+    if (this.attempts.has(id)) { countPollDrop('negative_cached'); return entry; }
+    this.tokens = Math.min(POLL_LIMITS.lookups, this.tokens + Math.max(0, now - this.refilled) / 3000);
+    this.refilled = now;
+    if (this.inFlight >= POLL_LIMITS.lookups) { countPollDrop('lookup_in_flight'); return entry; }
+    if (this.tokens < 1) { countPollDrop('lookup_budget'); return entry; }
+    this.tokens--;
+    // At most 40 attempts fit in the TTL (20 burst + 20 refill).
+    this.attempts.set(id, now + POLL_LIMITS.negativeTtlMs);
     try {
-      const result = await boundedPollRead<any>(client.messages.getById({ message_id: id, apply_markdown: false }));
+      this.inFlight++;
+      const read = Promise.resolve().then(() => client.messages.getById({ message_id: id, apply_markdown: false }))
+        .finally(() => { this.inFlight--; });
+      const result = await boundedPollRead<any>(read);
       if (result?.result !== 'success' || result.message?.id !== id) return entry;
-      entry.message = result.message;
+      entry.message = { ...result.message, submessages: undefined, content: String(result.message.content ?? '').slice(0, POLL_LIMITS.text) };
       entry.state = reconstructPoll(result.message.submessages);
     } catch { /* Missing, inaccessible, malformed or timed out: no repeat GET storm. */ }
     return entry;
@@ -121,6 +158,8 @@ export class PollCache {
 
 /** One bounded user-directory read per adapter; no lookup per vote. */
 export class PollUsers {
+  private known = new Map<number, { name: string; email: string }>();
+  peek() { return this.known; }
   private users?: Promise<Map<number, { name: string; email: string }>>;
   async get(client: any): Promise<Map<number, { name: string; email: string }>> {
     return this.users ??= (async () => {
@@ -131,6 +170,7 @@ export class PollUsers {
           if (positiveId(u.user_id) && typeof u.full_name === 'string') names.set(u.user_id, { name: u.full_name, email: u.email ?? '' });
         }
       } catch { /* Fall back to the numeric user id when the directory is unavailable. */ }
+      this.known = names;
       return names;
     })();
   }

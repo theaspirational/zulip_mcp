@@ -1,12 +1,12 @@
-/** Fixtures reconstructed from Zulip's poll widget format, NOT upstream
- * captures: widget_type/extra_data; vote {key,vote}; new_option {option,idx}.
+/** Fixtures checked against offline Zulip 12.3 server sources; reconstructed from Zulip's poll widget format, NOT upstream
+ * captures: widget_type/extra_data; vote {key,vote:1|-1}; new_option {option,idx}.
  * Keys are canned,N or sender_id,idx. No network is used. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyPollUpdate, boundedPollRead, parsePollSubmessage, PollCache, pollContent, reconstructPoll, type WidgetSubmessage } from '../src/polls.ts';
+import { applyPollUpdate, boundedPollRead, parsePollSubmessage, PollCache, pollContent, reconstructPoll, POLL_LIMITS, pollDrops, type WidgetSubmessage } from '../src/polls.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { ZulipAdapter, type FilterView } from '../src/platforms/zulip.ts';
 import { MessageIds } from '../src/message-ids.ts';
@@ -17,7 +17,7 @@ function sub(id: number, content: unknown, sender_id = 7, message_id = 77): Widg
   return { id, message_id, sender_id, msg_type: 'widget', content: JSON.stringify(content) };
 }
 const init = sub(1, { widget_type: 'poll', extra_data: { question: 'Ship?', options: ['Yes', 'Wait'] } }, 790);
-const vote = (id: number, key = 'canned,0', yes = true, sender = 7) => sub(id, { type: 'vote', key, vote: yes }, sender);
+const vote = (id: number, key = 'canned,0', yes = true, sender = 7) => sub(id, { type: 'vote', key, vote: yes ? 1 : -1 }, sender);
 const added = sub(4, { type: 'new_option', option: 'Review first', idx: 0 }, 42);
 const raw = (over: Partial<ZulipRawMessage> = {}): ZulipRawMessage => ({
   id: 77, sender_id: 790, sender_full_name: 'Bot', sender_email: 'ship-bot@example.invalid',
@@ -61,7 +61,7 @@ test('poll reads have a timeout and negative lookups are fetched once with bound
   assert.equal(gets, 1);
   await cache.locate(client, 2); await cache.locate(client, 3);
   await cache.locate(client, 1);
-  assert.equal(gets, 4, 'old negative entries evict at the cap');
+  assert.equal(gets, 3, 'negative attempts survive record eviction');
 });
 
 async function eventFixture(events: any[], message = raw(), filters?: FilterView, ids?: MessageIds) {
@@ -84,13 +84,13 @@ async function eventFixture(events: any[], message = raw(), filters?: FilterView
   await done;
   return { incoming, gets, users, registrations };
 }
-const envelope = (s: WidgetSubmessage) => ({ id: s.id + 10, type: 'submessage', submessage: s });
+const envelope = (s: WidgetSubmessage) => ({ ...s, id: s.id + 10, type: 'submessage', submessage_id: s.id });
 
 test('live widget events emit vote/unvote text and metadata; bot polls addressed, unique ids, no extra GET', async () => {
   const result = await eventFixture([
     { id: 0, type: 'message', message: raw() },
     envelope(added), envelope(vote(5, '42,0')), envelope(vote(6, '42,0', false)),
-    envelope(sub(7, { type: 'vote', key: 'canned,1', vote: true }, 42)),
+    envelope(sub(7, { type: 'vote', key: 'canned,1', vote: 1 }, 42)),
     envelope({ ...vote(8), msg_type: 'other' }),
   ], raw(), undefined, new MessageIds('acme', 'strict'));
   assert.equal(result.gets, 0);
@@ -110,13 +110,13 @@ test('live widget events emit vote/unvote text and metadata; bot polls addressed
   assert.ok(result.incoming.every(m => !Number.isFinite(Number(m.messageId))), 'not history cursors');
 });
 
-test('unknown human UI polls fetch once with submessages and remain ambient', async () => {
+test('known human UI polls remain ambient', async () => {
   const ui = raw({ content: '', sender_id: 42, submessages: [init, added, vote(5, '42,0')] });
-  const result = await eventFixture([envelope(vote(5, '42,0')), envelope(vote(6, '42,0', false))], ui);
-  assert.equal(result.gets, 1);
-  assert.equal(result.incoming.length, 2);
-  assert.deepEqual(result.incoming[0].tags, ['zulip:poll-vote', 'chat:ambient']);
-  assert.match((result.incoming[0].content[0] as any).text, /'Review first'/);
+  const result = await eventFixture([{ id: 0, type: 'message', message: ui }, envelope(vote(5, '42,0')), envelope(vote(6, '42,0', false))], ui);
+  assert.equal(result.gets, 0);
+  assert.equal(result.incoming.length, 3);
+  assert.deepEqual(result.incoming[1].tags, ['zulip:poll-vote', 'chat:ambient']);
+  assert.match((result.incoming[1].content[0] as any).text, /'Review first'/);
 });
 
 test('a poll vote waits for an earlier topic move and follows the current topic', async () => {
@@ -132,24 +132,24 @@ test('a poll vote waits for an earlier topic move and follows the current topic'
   assert.equal((result.incoming[0].metadata as any).topic, 'Decision');
 });
 
-test('initial widget submessages arriving live also initialize human UI polls', async () => {
+test('unknown live initialization starts a background read; premature votes are counted drops', async () => {
+  const before = pollDrops.unknown_poll ?? 0;
   const result = await eventFixture([envelope(init), envelope(added), envelope(vote(5, '42,0'))], raw({ sender_id: 42, submessages: [] }));
   assert.equal(result.gets, 1);
-  assert.equal(result.incoming.length, 1);
-  assert.match((result.incoming[0].content[0] as any).text, /Review first/);
-  assert.deepEqual(result.incoming[0].tags, ['zulip:poll-vote', 'chat:ambient']);
+  assert.equal(result.incoming.length, 0);
+  assert.equal(pollDrops.unknown_poll, before + 1);
 });
 
 test('stream and DM voter allowlists apply to poll events', async () => {
   const filters = { streamAllowed: () => false, dmAllowed: (u: { id: number }) => u.id === 42 };
-  const events = [envelope(vote(2)), envelope(vote(3, 'canned,0', false))];
+  const events = [{ id: 0, type: 'message', message: raw() }, envelope(vote(2)), envelope(vote(3, 'canned,0', false))];
   assert.equal((await eventFixture(events, raw(), filters)).incoming.length, 0);
   const dm = raw({ type: 'private', display_recipient: [
     { id: 790, full_name: 'Bot', email: 'ship-bot@example.invalid' },
     { id: 7, full_name: 'Ann', email: 'ann@example.invalid' },
     { id: 42, full_name: 'Bo', email: 'bo@example.invalid' },
   ] });
-  const result = await eventFixture([...events, envelope(vote(4, 'canned,0', true, 42))], dm, filters);
+  const result = await eventFixture([{ id: 0, type: 'message', message: dm }, ...events.slice(1), envelope(vote(4, 'canned,0', true, 42))], dm, filters);
   assert.equal(result.incoming.length, 1);
   assert.equal(result.incoming[0].channelId, 'zulip:dm:7+42');
   assert.equal(result.incoming[0].author.name, 'Bo');
@@ -229,3 +229,71 @@ test('get_poll_results rejects non-polls and invalid legacy ids', async t => {
   await assert.rejects(tools.handleToolCall('get_poll_results', { message_id: 0 }), /positive safe integer/);
   assert.equal(gets.length, 1);
 });
+
+ test('501 unknown IDs cycled four times share one budget independent of eviction', async () => {
+  let gets = 0;
+  const cache = new PollCache(500, () => 0);
+  const client = { messages: { async getById() { gets++; return { result: 'error' }; } } };
+  for (let cycle = 0; cycle < 4; cycle++) for (let id = 1; id <= 501; id++) await cache.locate(client, id);
+  assert.equal(gets, POLL_LIMITS.lookups);
+ });
+
+ test('100,000-option initialization and retained voters/text/polls are bounded', () => {
+  const state = reconstructPoll([sub(1, { widget_type: 'poll', extra_data: {
+    question: 'Q'.repeat(3000), options: Array(100000).fill('A') } })])!;
+  assert.equal(state.options.size, POLL_LIMITS.options);
+  assert.equal(state.question.length, POLL_LIMITS.text);
+  for (let id = 1; id <= 2000; id++) applyPollUpdate(state, { type: 'vote', key: 'canned,0', voterId: id, action: 'vote' });
+  assert.equal(state.options.get('canned,0')!.voters.size, POLL_LIMITS.voters);
+  applyPollUpdate(state, { type: 'new_option', key: '7,0', text: 'huge'.repeat(10000) });
+  assert.equal(state.options.size, POLL_LIMITS.options);
+  const cache = new PollCache(2);
+  const first = cache.entry(1); cache.entry(2); cache.entry(3);
+  assert.notEqual(cache.entry(1), first);
+  assert.ok(pollDrops.options_truncated && pollDrops.voter_limit && pollDrops.option_limit);
+ });
+
+ test('flat submessage envelope needs no nested field; numeric vote protocol only', async () => {
+  assert.equal(parsePollSubmessage(sub(2, { type: 'vote', key: 'canned,0', vote: true })), null);
+  const event = envelope(vote(2));
+  assert.equal('submessage' in event, false);
+  const result = await eventFixture([{ id: 0, type: 'message', message: raw() }, event]);
+  assert.equal(result.incoming.length, 1);
+  assert.equal(result.incoming[0].messageId, 'poll:77:2');
+ });
+
+ test('an unresolved poll lookup never delays the next ordinary message', async () => {
+  let release!: (value: unknown) => void;
+  const read = new Promise(resolve => { release = resolve; });
+  let reads = 0;
+  const incoming: IncomingChannelMessage[] = [];
+  const before = pollDrops.unknown_poll ?? 0;
+  const client = {
+    queues: { async register() { return { queue_id: 'q', last_event_id: -1 }; } },
+    events: { async retrieve() {
+      if (reads++ === 0) return { events: [envelope(vote(2)), { id: 99, type: 'message', message: raw({ id: 88, sender_id: 42, submessages: [] }) }] };
+      adapter.stopEvents(); return { events: [] };
+    } },
+    messages: { getById() { return read; } },
+    users: { async retrieve() { return directory; } },
+  };
+  const adapter = new ZulipAdapter(client, 790, 'nonblocking');
+  try {
+    const delivered = new Promise<void>(resolve => adapter.startEvents(m => { incoming.push(m); resolve(); }));
+    await boundedPollRead(delivered, 100);
+    assert.equal(incoming.length, 1);
+    assert.equal(incoming[0].messageId, '88');
+    assert.equal(pollDrops.unknown_poll, before + 1);
+  } finally { release({ result: 'error' }); adapter.stopEvents(); }
+ });
+
+ test('negative TTL expires and the global lookup budget refills', async () => {
+  let now = 0, gets = 0;
+  const cache = new PollCache(1, () => now);
+  const client = { messages: { async getById() { gets++; return { result: 'error' }; } } };
+  await cache.locate(client, 1); await cache.locate(client, 2); await cache.locate(client, 1);
+  assert.equal(gets, 2);
+  now = POLL_LIMITS.negativeTtlMs;
+  await cache.locate(client, 1);
+  assert.equal(gets, 3);
+ });

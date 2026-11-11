@@ -151,7 +151,7 @@ export type OnZulipMessageChange = (change: ZulipMessageChange) => void;
  */
 export interface ZulipRetrieveResponse {
   events?: ({ id: number; type: string; message?: ZulipEventMessage; flags?: string[] }
-    & { submessage?: WidgetSubmessage }
+    & Partial<WidgetSubmessage> & { submessage_id?: number }
     & Partial<ZulipReactionEvent>
     & Partial<ZulipUpdateMessageEvent>
     & Partial<ZulipDeleteMessageEvent>)[];
@@ -397,8 +397,12 @@ export class ZulipEventLoop {
           lastEventId = event.id;
 
           if (event.type === 'submessage') {
-            if (onSubmessage && event.submessage?.msg_type === 'widget') {
-              try { await onSubmessage(event.submessage); }
+            if (onSubmessage && event.msg_type === 'widget') {
+              try {
+                // Event id is a queue cursor, not the reducer's submessage id.
+                await onSubmessage({ id: event.submessage_id!, message_id: event.message_id,
+                  sender_id: event.sender_id!, msg_type: event.msg_type, content: event.content! });
+              }
               catch (error) { console.error('Zulip event loop: submessage handler failed:', error); }
             }
             continue;
