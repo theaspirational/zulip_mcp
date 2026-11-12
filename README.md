@@ -43,7 +43,7 @@ safeguard, not authentication.
 
 The tool fields are `send_message.reply_to`, `send_poll.reply_to`; `message_id` on `edit_message`,
 `move_messages`, `delete_message`, `add_reaction`, `remove_reaction`, `fetch_around`,
-`get_poll_results`;
+`get_poll_results`, `vote_poll`;
 and `fetch_history.before` / `.after`. Unescaped `[[msg:chat-one:123]]` tokens
 on send/edit follow the same rules (including bare-token warnings/refusals).
 All fields and tokens are checked before **any** lookup, upload, callback or write.
@@ -420,6 +420,31 @@ Questions must be nonempty single lines. Supply at least two nonempty options;
 CR/LF inside an option is refused. Poll text is sent verbatim (no message-link
 expansion), and an oversized poll is refused rather than split into messages.
 `get_poll_results` also reads human-created UI polls and later added options.
+
+`vote_poll` votes in any readable poll, whether authored by this bot, another
+bot or a human. Pass an option key or **exact** text from `get_poll_results`:
+
+```js
+vote_poll({message_id: 12345, option: "canned,0"}) // Toggle this bot's vote
+vote_poll({message_id: 12345, option: "Ship", vote: true}) // Ensure voted
+vote_poll({message_id: 12345, option: "Ship", vote: false}) // Ensure unvoted
+// => {message_id: 12345, key: "canned,0", text: "Ship", vote: false}
+```
+
+Unknown or ambiguous options (including key/text collisions) fail without a
+vote POST; use an unambiguous key to distinguish repeated text. Explicit
+`vote` is boolean and already matching state is a no-op. IDs are validated
+locally before requests; a fresh read, stream policy (list/subscribed/public
+mode and mutes), visible DM conversation and poll widget are checked before
+writing. A DM must include this bot and an allowed counterpart (or be a
+self-DM). Refusals can require a read-only lookup but never issue a vote POST.
+The write is `POST /api/v1/submessage` with `message_id`, `msg_type:"widget"`
+and JSON `content:{type:"vote",key,vote:1|-1}`. The returned boolean is the
+state acknowledged for this bot, not a guarantee against concurrent changes
+from another client using the same bot credentials. Toggles use the fresh
+snapshot, with no automatic write retries. Live permissions, endpoint behavior
+and same-account concurrent voting have not been verified offline.
+
 Message IDs follow `ZULIP_ID_MODE`, including `reply_to` and `pollMessageId`;
 user IDs and option keys do not change.
 
@@ -667,7 +692,7 @@ file, or remove it to re-seed from the environment.
 `get_user_profile`, `fetch_attachment`, `list_emojis`, `get_poll_results`.
 
 **Writing**
-`send_message`, `send_poll`, `send_dm` (by name, email, or id), `upload_file`,
+`send_message`, `send_poll`, `vote_poll`, `send_dm` (by name, email, or id), `upload_file`,
 `edit_message` (own-message content only), `move_messages` (topic/stream moves),
 `delete_message`, `add_reaction`, `remove_reaction`.
 

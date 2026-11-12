@@ -139,6 +139,7 @@ function fakeAdapter(withTyping = true): FakeAdapter {
 }
 
 const fakeTools = {
+  setPollVoteFilters() {},
   calls: [] as { name: string; args: Record<string, unknown> }[],
   /** Set by the server; the real runtime reports every message a tool sends. */
   onSent: null as null | ((sent: { messageId: string; channelId: string; content: string }) => void),

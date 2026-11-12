@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 /** Explicit audit inventory. New registrations must choose a read contract. */
 export const STREAM_READ_TOOLS = new Set([
   'start_monitoring', 'get_monitored_channels', 'get_channel_history', 'get_unread_messages',
-  'fetch_history', 'fetch_around', 'get_poll_results', 'list_streams', 'get_stream_topics',
+  'fetch_history', 'fetch_around', 'get_poll_results', 'vote_poll', 'list_streams', 'get_stream_topics',
   'fetch_attachment', 'refresh_channels', 'channel_missed', 'filters_get', 'filters_update',
   // Conditional reads: reply destinations, message links, move placement.
   'send_message', 'send_dm', 'send_poll', 'edit_message', 'move_messages',

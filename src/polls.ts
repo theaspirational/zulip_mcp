@@ -84,13 +84,25 @@ export function applyPollUpdate(state: PollState | null, update: PollUpdate | nu
   return state;
 }
 
-export function reconstructPoll(submessages: WidgetSubmessage[] = []): PollState | null {
+/** Optional voter focus avoids the display voter cap when deciding this bot's vote. */
+export function reconstructPoll(submessages: WidgetSubmessage[] = [], voterId?: number): PollState | null {
   let state: PollState | null = null;
   if (!Array.isArray(submessages)) return null;
   for (const s of submessages.filter(s => s && positiveId(s.id)).sort((a, b) => a.id - b.id)) {
-    state = applyPollUpdate(state, parsePollSubmessage(s));
+    const update = parsePollSubmessage(s);
+    if (voterId !== undefined && update?.type === 'vote' && update.voterId !== voterId) continue;
+    state = applyPollUpdate(state, update);
   }
   return state;
+}
+
+/** Keys and exact displayed text share a namespace: never guess on a collision. */
+export function resolvePollOption(state: PollState, value: unknown): PollOption {
+  if (typeof value !== 'string' || !value) throw new Error('option must be a nonempty option key or exact text');
+  const matches = [...state.options.values()].filter(o => o.key === value || o.text === value);
+  if (!matches.length) throw new Error('unknown poll option; use a key or exact text from get_poll_results');
+  if (matches.length !== 1) throw new Error('ambiguous poll option; use an unambiguous key from get_poll_results');
+  return matches[0];
 }
 
 export function pollContent(question: unknown, options: unknown): string {

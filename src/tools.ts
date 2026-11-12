@@ -601,3 +601,17 @@ toolDefinitions.push({
   description: 'Read a poll by message id: question, option keys/text/counts, and voter ids/names. Reconstructs the current widget submessages, including human-created UI polls. Unavailable user names fall back to user <id>.',
   inputSchema: { type: 'object', properties: { message_id: { type: 'number', description: 'Poll message ID.' } }, required: ['message_id'] },
 });
+
+toolDefinitions.push({
+  name: 'vote_poll',
+  description: 'Vote in any readable Zulip poll (including human or other bot polls). Use an option key or exact text from get_poll_results; ambiguous or unknown options fail without voting. Omit vote to toggle this bot’s vote, or set true/false for explicit state. Returns message_id, key, text and vote (this bot’s resulting boolean state).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      message_id: { type: 'number', description: 'Poll message ID.' },
+      option: { type: 'string', minLength: 1, description: 'Unambiguous option key or exact option text from get_poll_results.' },
+      vote: { type: 'boolean', description: 'true to vote, false to unvote; omit to toggle. Already matching explicit state is a no-op.' },
+    },
+    required: ['message_id', 'option'],
+  },
+});

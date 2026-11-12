@@ -123,6 +123,7 @@ const argumentsFor: Record<string, any> = {
   fetch_attachment: { path, message_id: 'acme:77' }, refresh_channels: {}, channel_missed: { channel: 'general' },
   send_message: { type: 'stream', to: 'general', topic: 'T', content: '[[msg:acme:77]]' },
   send_dm: { to: ['42'], content: '[[msg:acme:77]]', allow_private_references: true },
+  vote_poll: { message_id: 'acme:77', option: 'Yes' },
   send_poll: { reply_to: 'acme:77', question: 'Q?', options: ['Yes', 'No'] },
   edit_message: { message_id: 'acme:77', content: '[[msg:acme:78]]' },
   move_messages: { message_id: 'acme:77', topic: 'new' },

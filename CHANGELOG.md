@@ -11,6 +11,10 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 
 ## Unreleased
 
+- Added `vote_poll` to toggle or explicitly set this bot's vote in any readable
+  poll using an option key or exact text. Ambiguous options, unreadable
+  conversations and invalid IDs are refused before any vote write.
+
 - Added opt-in realm-qualified message IDs (`ZULIP_REALM_TAG`,
   `ZULIP_ID_MODE=legacy|compat|strict`), with foreign-realm refusal before lookups
   or writes and compat warnings for bare IDs. Channel IDs and persisted numeric

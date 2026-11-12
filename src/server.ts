@@ -192,6 +192,7 @@ export class ZulipMcplServer {
     this.announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
     this.filters = options.filters ?? null;
     this.streamGate = this.filters?.streamReadGate;
+    if (this.filters) this.tools.setPollVoteFilters(this.filters);
     if (this.streamGate) this.tools.setStreamReadPolicy(this.streamGate);
     this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.messageIds, !!this.streamGate);
     // A widened stream allowlist means channels the host has never seen:
@@ -1676,7 +1677,8 @@ export class ZulipMcplServer {
       }
     }
     try {
-      if (STREAM_READ_TOOLS.has(name) && !CONDITIONAL_STREAM_READ_TOOLS.has(name)) this.streamGate?.requireKnown();
+      // vote_poll validates IDs first; its shared message lookup enforces known state.
+      if (name !== "vote_poll" && STREAM_READ_TOOLS.has(name) && !CONDITIONAL_STREAM_READ_TOOLS.has(name)) this.streamGate?.requireKnown();
       const own = await this.serverTool(name, args);
       const result = toToolCallResult(own !== undefined ? this.messageIds.project(own) : await this.tools.handleToolCall(name, args));
       // §8: a tool of the rollback-capable feature set mints a checkpoint and

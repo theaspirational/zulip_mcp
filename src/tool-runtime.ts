@@ -10,9 +10,9 @@
 import { diagnosticError } from './diagnostics.js';
 import { StreamReadGate, STREAM_READ_TOOLS, CONDITIONAL_STREAM_READ_TOOLS } from './stream-read-gate.js';
 
-import { pollContent, reconstructPoll, pollResults, PollUsers, boundedPollRead } from "./polls.js";
+import { pollContent, reconstructPoll, resolvePollOption, pollResults, PollUsers, boundedPollRead } from "./polls.js";
 import { ZULIP_MAX_MESSAGE_LENGTH } from "./content.js";
-import { LOCATE_TIMEOUT_MS, withTimeout } from "./platforms/zulip.js";
+import { LOCATE_TIMEOUT_MS, withTimeout, type FilterView } from "./platforms/zulip.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -315,6 +315,50 @@ export class ZulipToolRuntime {
     this.zulipClient = this.streamGate.client(this.zulipClient);
   }
 
+  // Used only by vote_poll: existing read/send tools retain their contracts.
+  private pollVoteFilters?: FilterView & { streamMuted(name: string): boolean };
+
+  setPollVoteFilters(filters: FilterView & { streamMuted(name: string): boolean }): void {
+    this.pollVoteFilters = filters;
+  }
+
+  /** Same fresh, gated lookup and widget reconstruction as get_poll_results. */
+  private async readPoll(id: number, voterId?: number) {
+    if (!Number.isSafeInteger(id) || id <= 0) throw new Error("message_id must be a positive safe integer");
+    const result = await boundedPollRead<any>(this.zulipClient.messages.getById({ message_id: id, apply_markdown: false }));
+    assertApiSuccess(result, "reading poll");
+    if (result.message?.id !== id) throw new Error("response contained a different message id");
+    if (voterId !== undefined) this.assertPollVoteVisible(result.message);
+    const state = reconstructPoll(result.message?.submessages, voterId);
+    if (!state) throw new Error("message has no supported poll widget");
+    return { message: result.message, state };
+  }
+
+  private assertPollVoteVisible(message: any): void {
+    const filters = this.pollVoteFilters;
+    if (message.type === "stream") {
+      if (typeof message.display_recipient !== "string" || !message.display_recipient ||
+          !Number.isSafeInteger(message.stream_id) || message.stream_id <= 0) throw new Error("poll conversation is not visible");
+      this.streamGate?.assert(message.stream_id);
+      if (filters && (!filters.streamAllowed(message.display_recipient, message.stream_id) || filters.streamMuted(message.display_recipient))) {
+        throw new Error("poll conversation is not visible under the stream read policy");
+      }
+    } else if (message.type === "private") {
+      const recipients = message.display_recipient;
+      const self = this.session.selfUserId;
+      if (!Array.isArray(recipients) || !recipients.length ||
+          recipients.some(r => !Number.isSafeInteger(r?.id) || r.id <= 0) || !recipients.some(r => r.id === self)) {
+        throw new Error("poll conversation is not visible");
+      }
+      // Per-conversation visibility, including self-authored polls: at least
+      // one counterpart must be allowed. Self-DMs are always this bot's own.
+      const counterparts = recipients.filter(r => r.id !== self);
+      if (filters && counterparts.length && !counterparts.some(r => filters.dmAllowed({ id: r.id, email: typeof r.email === "string" ? r.email : "" }))) {
+        throw new Error("poll conversation is not visible under the DM read policy");
+      }
+    } else throw new Error("poll conversation is not visible");
+  }
+
   private monitoredOperand(name: string, state: ChannelState): string | number {
     if (!this.streamGate) return name;
     this.streamGate.assertFresh(state.streamId, state.readEpoch ?? this.streamGate.checkpoint());
@@ -410,7 +454,8 @@ export class ZulipToolRuntime {
   }
 
   private async handleParsedCall(name: string, args: any): Promise<any> {
-    if (STREAM_READ_TOOLS.has(name) && !CONDITIONAL_STREAM_READ_TOOLS.has(name)) this.streamGate?.requireKnown();
+    // vote_poll validates IDs first; its shared message lookup enforces known state.
+    if (name !== "vote_poll" && STREAM_READ_TOOLS.has(name) && !CONDITIONAL_STREAM_READ_TOOLS.has(name)) this.streamGate?.requireKnown();
     if (this.messageIds.mode === "legacy") return this.handleValidatedCall(name, args);
     let warned = false;
     const warning = `Warning: bare message_id accepted by ${this.messageIds.tag}; use ${this.messageIds.tag}:<n>.`;
@@ -418,7 +463,7 @@ export class ZulipToolRuntime {
     try {
       args = { ...args };
       const fields = ["send_message", "send_poll"].includes(name) ? ["reply_to"] : name === "fetch_history" ? ["before", "after"]
-        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around", "get_poll_results", "fetch_attachment"].includes(name) ? ["message_id"] : [];
+        : ["edit_message", "move_messages", "delete_message", "add_reaction", "remove_reaction", "fetch_around", "get_poll_results", "vote_poll", "fetch_attachment"].includes(name) ? ["message_id"] : [];
       for (const field of fields) {
         // The send destination contract has historical strict-schema absent sentinels.
         if (field === "reply_to" && ([undefined, null, ""].includes(args[field]) || numberOrUndefined(args[field]) === 0)) continue;
@@ -776,13 +821,32 @@ export class ZulipToolRuntime {
 
       case "get_poll_results": {
         const id = args.message_id;
-        if (!Number.isSafeInteger(id) || id <= 0) throw new Error("message_id must be a positive safe integer");
-        const result = await boundedPollRead<any>(zulipClient.messages.getById({ message_id: id, apply_markdown: false }));
-        assertApiSuccess(result, "reading poll");
-        if (result.message?.id !== id) throw new Error("response contained a different message id");
-        const state = reconstructPoll(result.message?.submessages);
-        if (!state) throw new Error("message has no supported poll widget");
+        const { state } = await this.readPoll(id);
         return pollResults(id, state, await new PollUsers().get(zulipClient));
+      }
+
+      case "vote_poll": {
+        if (typeof args.option !== "string" || !args.option) throw new Error("option must be a nonempty option key or exact text");
+        if (args.vote !== undefined && typeof args.vote !== "boolean") throw new Error("vote must be a boolean");
+        const self = this.session.selfUserId;
+        if (!Number.isSafeInteger(self) || self === null || self <= 0) throw new Error("this bot's user id is unavailable");
+        const { state } = await this.readPoll(args.message_id, self);
+        const option = resolvePollOption(state, args.option);
+        const current = option.voters.has(self);
+        const vote = args.vote ?? !current;
+        // Explicit state is idempotent. Toggle is based on the fresh snapshot,
+        // just as in the web client; no automatic retry of a write on failure.
+        if (vote !== current) {
+          this.streamGate?.recheck();
+          const result = await zulipClient.callEndpoint("submessage", "POST", {
+            message_id: args.message_id,
+            msg_type: "widget",
+            content: JSON.stringify({ type: "vote", key: option.key, vote: vote ? 1 : -1 }),
+          });
+          assertApiSuccess(result, "voting in poll");
+          if (result?.result !== "success") throw new Error("invalid response while voting in poll");
+        }
+        return { message_id: args.message_id, key: option.key, text: option.text, vote };
       }
 
       case "send_poll":

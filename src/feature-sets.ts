@@ -161,6 +161,7 @@ export function buildServerCapabilities(options: FeatureSetOptions): McplManifes
 export function featureSetForTool(toolName: string): string | undefined {
   switch (toolName) {
     case 'send_poll':
+    case 'vote_poll':
     case 'send_message':
     case 'send_dm':
     case 'upload_file':
