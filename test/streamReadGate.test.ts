@@ -35,7 +35,11 @@ async function fixture(known = true) {
   const calls: any[] = [];
   const client = {
     config: { apiURL: 'https://zulip.invalid/api/v1' },
-    async callEndpoint() { return { result: 'success', subscriptions: streams }; },
+    async callEndpoint(path: string, _method: string, args: any) {
+      if (path === 'get_stream_id') return { result: 'success', stream_id: streams.find(s => s.name === args.stream)?.stream_id };
+      if (/^streams\/\d+$/.test(path)) return { result: 'success', stream: { stream_id: Number(path.split('/')[1]), invite_only: false } };
+      return { result: 'success', subscriptions: streams };
+    },
     messages: {
       async getById(p: any) { calls.push(['id', p]); return { result: 'success', message: raw(p.message_id) }; },
       async retrieve(p: any) { calls.push(['messages', p]); return { result: 'success', messages: [raw()], found_newest: true }; },
@@ -118,6 +122,7 @@ const argumentsFor: Record<string, any> = {
   get_poll_results: { message_id: 'acme:77' }, list_streams: {}, get_stream_topics: { stream_id: 12 },
   fetch_attachment: { path, message_id: 'acme:77' }, refresh_channels: {}, channel_missed: { channel: 'general' },
   send_message: { type: 'stream', to: 'general', topic: 'T', content: '[[msg:acme:77]]' },
+  send_dm: { to: ['42'], content: '[[msg:acme:77]]', allow_private_references: true },
   send_poll: { reply_to: 'acme:77', question: 'Q?', options: ['Yes', 'No'] },
   edit_message: { message_id: 'acme:77', content: '[[msg:acme:78]]' },
   move_messages: { message_id: 'acme:77', topic: 'new' },

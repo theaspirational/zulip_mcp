@@ -27,7 +27,7 @@ import type {
 import type { CapabilityGrant } from './grant.js';
 import { McplRpcError, capabilityDenied } from './errors.js';
 import { looksLikeBotEmail } from './history.js';
-import type { MessageChangeEvent, MoveEcho, PlatformAdapter, PlatformSystemEvent, RoutingHints } from './platforms/adapter.js';
+import type { MessageChangeEvent, MoveEcho, PlatformAdapter, PlatformSystemEvent, PublishResult, RoutingHints } from './platforms/adapter.js';
 
 const DEFAULT_BATCH_WINDOW_MS = 500;
 
@@ -579,8 +579,7 @@ export class ChannelManager {
     if (Number.isFinite(id)) this.highestKnownMessageId = Math.max(this.highestKnownMessageId, id);
   }
 
-  captureMoveEpochs(messageId: number): ReadonlyMap<string, number> {
-    this.observeMessageId(messageId);
+  captureMoveEpochs(): ReadonlyMap<string, number> {
     return new Map([...this.lastIncoming].map(([channelId, reference]) => [channelId, reference.epoch]));
   }
 
@@ -638,7 +637,7 @@ export class ChannelManager {
         }
         this.lastIncoming.set(channelId, { ...reference, epoch: ++this.routingEpoch,
           expectedEcho: undefined,
-          leftTopic: departure(change.previousTopic ?? reference.hints.threadId,
+          leftTopic: departure(change.previousTopic ?? change.topic,
             change.selfEcho?.destinationChannelId ?? destination, change.selfEcho?.topic ?? change.topic),
           lastEcho: change.selfEcho ? { beforeEpoch: reference.epoch, shape: change.selfEcho } : undefined,
           refusalAfter: this.refusalFloor(channelId, ...change.messageIds.map(Number)),
@@ -679,7 +678,7 @@ export class ChannelManager {
       const hasDestinationHint = exact || knownSource;
       if (uncertain || destination !== channelId) {
         this.lastIncoming.set(channelId, { ...source,
-          leftTopic: hasDestinationHint ? departure(scope.topic, destination, change.topic) : undefined,
+          leftTopic: hasDestinationHint ? departure(scope.topic, destination, change.topic) : reference.leftTopic,
           movedTo: {
             channelId: hasDestinationHint ? destination : null,
             topic: hasDestinationHint && !uncertain ? change.topic : null,
@@ -742,7 +741,7 @@ export class ChannelManager {
   /**
    * Handle channels/publish from the host — route to the owning adapter.
    */
-  async publish(params: ChannelsPublishParams): Promise<ChannelsPublishResult> {
+  async publish(params: ChannelsPublishParams): Promise<PublishResult> {
     if (!this.grant.has('channels.publish')) throw capabilityDenied('channels.publish');
 
     const channelId = params.channelId;
@@ -771,10 +770,12 @@ export class ChannelManager {
       }
       const hint = isDM ? 'private conversation' :
         `${movedTo.channelId ?? `stream unknown${movedTo.streamId !== undefined ? ` (stream ${movedTo.streamId})` : ''}`} > ${movedTo.topic ?? `(unconfirmed topic)${topic ? `; likely ${topic}` : ''}`}`;
-      const fallback = isDM ? 'use an explicit private recipient' :
-        `use send_message({type: "stream", to: ${JSON.stringify(stream)}, topic: ${JSON.stringify(topic ?? null)}, content: ...}) after checking list_streams/get_stream_topics if unknown`;
+      const fallback = typeof stream === 'string' && stream.trim().length > 0 &&
+        typeof topic === 'string' && topic.trim().length > 0
+        ? `; alternatively use send_message({type: "stream", to: ${JSON.stringify(stream)}, topic: ${JSON.stringify(topic)}, content: ...}) after checking list_streams/get_stream_topics if unknown`
+        : '';
       throw new McplRpcError(-32602,
-        `Nothing was posted. ${movedTo.topic !== null ? `Conversation moved to ${hint}` : `Conversation placement unconfirmed; destination hint: ${hint}`}. Reply with ${recovery}; alternatively ${fallback}.`,
+        `Nothing was posted. ${movedTo.topic !== null ? `Conversation moved to ${hint}` : `Conversation placement unconfirmed; destination hint: ${hint}`}. Reply with ${recovery}${fallback}.`,
         data);
     }
     return adapter.publish(

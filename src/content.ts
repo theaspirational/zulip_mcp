@@ -295,7 +295,9 @@ export const ZULIP_MAX_MESSAGE_LENGTH = 10000;
  * paragraph boundaries, then line boundaries, then a hard cut. Boundary
  * whitespace at the split is dropped; nothing else is.
  */
-export function chunkMessage(text: string, limit: number = ZULIP_MAX_MESSAGE_LENGTH): string[] {
+export function chunkMessage(text: string, limit: number = ZULIP_MAX_MESSAGE_LENGTH, protectedText: readonly string[] = []): string[] {
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error("Message length limit must be a positive integer");
+  if (protectedText.some(value => value.length > limit)) throw new Error("Message-link expansion exceeds the realm message length limit");
   const out: string[] = [];
   let rest = text;
   while (rest.length > 0) {
@@ -307,6 +309,26 @@ export function chunkMessage(text: string, limit: number = ZULIP_MAX_MESSAGE_LEN
     let cut = window.lastIndexOf('\n\n');
     if (cut <= 0) cut = window.lastIndexOf('\n');
     if (cut <= 0) cut = limit;
+    // Merge overlapping protected spans before selecting a boundary. If the
+    // preferred newline is inside a span starting at zero, use its END, not
+    // zero: every iteration must consume text without splitting a replacement.
+    const spans: {start: number; end: number}[] = [];
+    for (const value of protectedText) {
+      if (!value) continue;
+      for (let at = rest.indexOf(value); at !== -1 && at < limit; at = rest.indexOf(value, at + 1)) {
+        spans.push({start: at, end: at + value.length});
+      }
+    }
+    spans.sort((a, b) => a.start - b.start);
+    const merged: typeof spans = [];
+    for (const span of spans) {
+      const last = merged.at(-1);
+      if (last && span.start < last.end) last.end = Math.max(last.end, span.end);
+      else merged.push({...span});
+    }
+    const crossing = merged.find(span => span.start < cut && cut < span.end);
+    if (crossing) cut = crossing.start > 0 ? crossing.start : crossing.end;
+    if (cut <= 0 || cut > limit) throw new Error("Message-link expansion exceeds the realm message length limit");
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut).replace(/^\n+/, '');
   }

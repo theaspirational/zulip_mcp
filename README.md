@@ -364,7 +364,7 @@ marker. For host integrations:
 3. On an open channel, a new message (but not this bot's own messages)
    **above the refusal's message-id floor** clears refusal and routes replies
    to that message's topic. In the stream/topic the conversation left, only
-   bot senders (identified by `looksLikeBotEmail`) are ignored: a person's new
+   senders whose email has a `-bot@` local part are ignored: a person's new
    message there, including a delete-and-repost, clears refusal.
    A Notification Bot notice in the old topic does not clear refusal; a new
    destination breadcrumb can. On a closed channel, only such a message accepted
@@ -676,27 +676,56 @@ For stream replies, optionally provide `topic` to send in a different topic **in
 A topic on a private reply, supplied `to`, conflicting types, or unreadable IDs fail before uploads or sends.
 Without `reply_to`, provide `type` and `to` (plus `topic` for streams). No additional permissions are needed.
 Strict-schema callers may include every property: unused `type`, `to`, `topic`, and `reply_to`
-can be `null` or `""` (both mean absent); `reply_to: 0` also means absent. The published
-destination schemas allow `null`. An explicitly empty topic on a stream send **without**
-`reply_to` remains an error; use `[]` for unused attachments.
-For `move_messages`, unused `topic` or `stream_id` may be `null`; an empty topic still
-means move to the unnamed topic. Strict clients can use `propagate_mode: "change_one"`
-for the default single-message move. `send_dm` requires recipients, and `edit_message`
-has no optional destination fields.
+can be `null` or `""` (both mean absent); `reply_to: 0` and `reply_to: "0"` also mean absent.
+The published schemas allow these forms, including integer-valued strings for `reply_to`.
+Send topics are trimmed; a whitespace-only topic is absent. A standalone stream send
+**requires a non-empty topic**, whether the absent spelling is omitted, `null`, `""`, or whitespace.
+This deliberately refuses general-chat sends: Zulip 10+ (feature level 334) can accept
+empty topics as *general chat*, subject to realm/channel topic requirements. This is
+not unchanged server behavior or an error on every Zulip realm. Use `[]` for unused attachments.
+For replies, an absent topic retains the parent's topic (including an existing unnamed topic).
+For `move_messages`, unused `topic` or `stream_id` may be `null`; `topic: ""` is **not**
+a placeholder: it moves to the unnamed topic. `propagate_mode: null` uses the server
+default (`change_one`); an explicit `"change_one"` also works.
+
+Other strict-shaped calls with safe absent forms:
+- `filters_update`: `addStreams`/`removeStreams` accept `null` or `[]` for no change.
+  **Use `setDmUsers: null` to leave the DM allowlist unchanged. `setDmUsers: []` retains
+  its existing meaning: UNRESTRICTED (anyone may DM), not an unused placeholder.**
+  Send `setDmUsers: []` alone; combining it with non-empty `addStreams` or `removeStreams` is refused.
+- `fetch_history`: `before`/`after` accept `null` or `0` for no cursor (newest page by default);
+  `after: 1` reads from the oldest; `topic: null`/`""` means no topic filter;
+  `limit: null` uses 50, while `limit: 0` is clamped to 1 message.
+- `get_unread_messages`: `channels: null`/`[]` checks all monitored channels;
+  `format: null` and `mark_as_read: null` use their defaults.
+- `send_dm` requires recipients; `edit_message` has no optional destination fields.
+  Upload fields (also in attachments) accept `""` for unused `file`/`data`/`name`/`mime_type`.
+
+The remaining optional-field tools have been surveyed, but are **not covered by this
+strict-placeholder contract**: `stop_monitoring` (`[]` stops all monitoring; there is no no-op form),
+`get_channel_history` (date/format/boolean defaults), `list_streams`, `get_stream_topics`,
+`list_users` (boolean options), and `fetch_around` (limit). Do not mechanically fill their
+optional fields with placeholders: omit them, or choose explicit option/default values.
+Tools with only required fields or no properties have no optional-placeholder ambiguity.
 
 | Send tool | Destination fields in every successful receipt (in addition to existing fields) |
 | --- | --- |
-| `send_message` (stream, including replies) | `type: "stream"`, `stream` (name, not numeric ID), `topic`, `channelId` |
-| `send_message` (DM, including replies) | `type: "private"`, `recipients` (email addresses for email sends; user IDs for ID sends/replies), `channelId` |
+| `send_message` (stream, including replies) | `type: "stream"`, `stream` (input name for standalone sends; referenced stream name for replies), `topic`, `channelId` |
+| `send_message` (DM, including replies) | `type: "private"`, `recipients` (email addresses for schema-based standalone sends; user IDs for replies), `channelId` |
 | `send_dm` | `type: "private"`, `recipients` (resolved user IDs), `channelId`; existing `to_user_ids` is retained |
 
 Receipts describe the selected send destination, including any reply topic override, also for
-attachments or chunked messages. `channelId` matches the existing send callback: `zulip:<stream>`
-for streams, `zulip:dm:<sorted IDs>` for ID-based DMs (reply IDs exclude the bot except self-DMs),
-and `zulip:<email destination>` for raw email sends. No extra directory/placement lookup is made.
+attachments or chunked messages. Non-reply destinations and reply topic overrides echo the
+normalized input, not a destination confirmed by Zulip (which may truncate topics); no extra
+directory/placement lookup is made. `type` is always
+canonical (`stream`/`private`), including `channel`/`direct` aliases. The runtime also accepts
+numeric ID-array `to` values outside the published `send_message` schema; those receipts contain
+user IDs. `channelId` matches the existing send callback: `zulip:<stream>` for streams,
+`zulip:dm:<sorted IDs>` for ID-based DMs (reply channel IDs exclude the bot except self-DMs;
+`recipients` includes every sent participant), and `zulip:<email destination>` for raw email sends.
 MCPL `channels/publish` retains its existing protocol receipt.
 
-`send_message` and `edit_message` resolve exact `[[msg:ID]]` tokens in
+`send_message`, `send_dm`, `edit_message` and MCPL `channels/publish` resolve exact `[[msg:ID]]` tokens in
 `content`, for example `{"reply_to":12345,"content":"See [[msg:67890]]"}`.
 Each decimal ID is read through the bot's Zulip API access before any uploads,
 content chunking, sends or edits. If any lookup fails (missing message, no
@@ -705,20 +734,67 @@ is sent or edited. There are at most **20 unescaped token occurrences** per call
 including duplicates; duplicate IDs are fetched once per call, never cached
 across calls. IDs must be positive safe integers (leading zeroes are accepted).
 Every `[[msg:ID]]` is resolved wherever it appears: prose, inline code, fences,
-spoiler/quote blocks, blockquotes and tables. There is no Markdown parsing.
+spoiler/quote blocks, blockquotes and tables. Scanning is independent of Markdown; a conservative message-wide rule chooses the rendering.
 To send a literal token, write `\[[msg:ID]]`: the immediately preceding
 backslash is removed, `[[msg:ID]]` is sent unchanged, and no lookup occurs.
 Escaped tokens do not count toward the cap or undergo ID validation. If more
 backslashes precede a token, only the one immediately before it is removed.
 In JSON tool arguments, encode that backslash as `\\`, for example
 `{"content":"\\[[msg:123]]"}` sends the literal `[[msg:123]]`.
-Token lookup errors use fixed descriptions and allowlisted API codes, never
-response bodies or raw client exceptions. Any `reply_to` lookup failure also
-uses a fixed sanitized error, without API body text or client exception details.
-Token resolution leaves bare numbers and other non-token text untouched: it
-is opt-in, not a number detector.
+By default a reference is allowed only in the **same conversation** (same
+stream and topic, or same full DM participant set), or from a **non-invite-only
+stream into a stream**. The stream's `invite_only` flag is authoritative:
+web-public and private-history settings do not change this audience rule.
+Missing stream metadata fails closed. Cross-DM, private-stream-to-other-topic,
+and stream-to-DM references are otherwise refused, naming the token and
+suggesting the backslash escape. The three tools accept an explicit per-call
+`allow_private_references: true` to allow any readable source, knowingly
+revealing its location. MCPL publishes use the default policy; use a send tool
+for the explicit opt-in. Successful results from `send_message`, `send_dm`,
+and `edit_message` include
+`links: [{token, url}]` (one entry per expanded occurrence), so their tool
+transcripts record every link. The host does not record publish link metadata.
 
-After token resolution, `send_message` and `edit_message` insert missing
+Token and `reply_to` lookup errors share sanitized diagnostics: `BAD_REQUEST`
+means not found/not accessible; rate limits, server errors and transport failures
+say temporarily unavailable with an allowlisted code and advise retrying.
+API bodies, arbitrary codes and client exception text are never forwarded.
+Bare numbers and all other text are untouched: this is opt-in, not a number
+detector.
+
+Streams use Zulip's labelled Markdown fallback `[#channel > topic @ 💬](url)`
+and DMs use `[DM @ 💬](url)` only when the whole message has no backtick of any
+count (even escaped/unmatched), `~~~`, tab or `$` anywhere (including `$$` math),
+no `[`, `]` or `<` outside exact `[[msg:ID]]` tokens (including escaped tokens;
+`<` covers `<time:...>`, HTML and autolinks), no four consecutive spaces
+before a line's first non-marker character (including at any list/quote nesting step),
+and no horizontal rule; otherwise **every token becomes its bare message URL**, still a working link.
+This rejects all fences and intentionally avoids Markdown-parser parity: even a
+closed “quote then comment” message (including Anarchid's case) gets bare URLs, not labels.
+The fallback does not require a feature level; native `#**channel>topic@id**`
+chips require feature level 319. Channel/topic labels use Zulip's entity-based escaping (not
+backslashes); legacy CR/LF in names is folded to spaces in display labels only.
+Empty topics display as “general chat”; their URL topic operand stays empty.
+URLs use the **Copy link to message** operators:
+`<realm>/#narrow/channel/<stream-operand>/topic/<encoded-topic>/near/<id>` and
+`#narrow/dm/<sorted-participant-ids>-dm/near/<id>` (`-group` for three or more,
+including the bot). Names/topics use [Zulip's hash encoding](https://zulip.com/api/zulip-urls),
+including UTF-8 `.XX` escapes. Stream-name slug spaces become hyphens; the
+stream operand omits the name if encoding adds more than 10 characters or
+exceeds 1.5 times its original length. Empty topics are requested verbatim.
+
+Sends resolve before uploads and chunking, and never split a generated link. Protected-span chunk cuts always advance;
+a preferred newline inside a link at the start uses the end of that link.
+A single expansion larger than the realm limit fails before uploads/sends.
+All edits, including token-free edits, that exceed the configured message limit
+in Unicode code points fail before PATCH rather than relying on Zulip's silent
+truncation. The realm's `max_message_length` is read from event-queue
+`POST /register` (`realm` in `fetch_event_types`); until registration or when
+unknown, the default is 10000. `ZULIP_MAX_MESSAGE_LENGTH` overrides it.
+On edits only tokens in replacement
+content change; existing links are not rewritten, and the old body is not merged.
+
+After token resolution, `send_message`, `send_dm`, `edit_message` and MCPL publishes insert missing
 boundary blank lines around recognizable, unindented top-level pipe tables
 **only in simple messages**. Agents should still add blank lines before and
 after tables themselves; normalization deliberately does not repair complex
@@ -792,26 +868,6 @@ The rule was validated offline against Zulip 12.3's real Markdown renderer on
 tooling and corpora are on branch
 [`fix/markdown-table-cautious` of `theaspirational/zulip_mcp`](https://github.com/theaspirational/zulip_mcp/tree/fix/markdown-table-cautious/scripts/zulip-oracle)
 (`scripts/zulip-oracle/`).
-
-The replacement is a plain absolute URL, the form Zulip's **Copy link to
-message** produces, so Zulip can render its native message-link chip rather
-than a server-invented markdown label. Stream links have the form
-`<realm>/#narrow/stream/<stream-operand>/topic/<encoded-topic>/near/<message-id>`;
-DM links use `#narrow/pm-with/<sorted-participant-ids>-dm/near/<message-id>`
-(or `-group` for three or more participants, including the bot). Names/topics
-use [Zulip's hash encoding](https://zulip.com/api/zulip-urls), including UTF-8
-`.XX` escapes and spaces replaced by hyphens in the stream-name slug only.
-The stream operand is normally `<id>-<slug>`, but Zulip omits the name when
-encoding the full operand adds more than 10 characters or exceeds 1.5 times
-its original length. For example, stream 12 named `general` uses
-`stream/12-general/topic/links/near/101`; named `R&D / café. (test)!*'`
-it uses `stream/12/topic/links/near/101`.
-The legacy `stream` and `pm-with` operators work on older servers and remain
-accepted by newer clients as aliases for `channel` and `dm`; this server does
-not retain a server feature level, so it does not guess a version threshold.
-On edits, only tokens in the supplied replacement content are resolved;
-existing links are left as supplied (the old message body is not fetched or
-merged). `send_dm` and MCPL publishes do not expand this syntax.
 
 Both send tools take an optional `attachments` array; each entry is a local
 file (`{ "file": "notes/report.pdf" }`) or inline bytes

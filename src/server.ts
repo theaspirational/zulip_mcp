@@ -280,7 +280,7 @@ export class ZulipMcplServer {
     this.tools.onDeleted = (messageId) => this.adapter.noteSelfDeleted?.(Number(messageId));
     this.tools.onDeleteFailed = (messageId) => this.adapter.forgetSelfDeleted?.(Number(messageId));
     this.tools.onMessageObserved = (id) => this.channelManager.observeMessageId(id);
-    this.tools.onMoveStarted = (id) => this.channelManager.captureMoveEpochs(id);
+    this.tools.onMoveStarted = () => this.channelManager.captureMoveEpochs();
     this.tools.onMoved = (move) => this.adapter.noteSelfMoved?.(move);
     this.adapter.onSelfChanged = (change) => this.channelManager.reconcileSelfChange(change);
   }
@@ -678,7 +678,7 @@ export class ZulipMcplServer {
               this.stateTracker.recordSent(id, publish.channelId, text);
             }
           }
-          conn.sendResponse(req.id, { delivered: result.delivered, ...(result.messageId ? { messageId: this.messageIds.format(result.messageId) } : {}) });
+          conn.sendResponse(req.id, { delivered: result.delivered, ...(result.messageId ? { messageId: this.messageIds.format(result.messageId) } : {}), ...(result.links ? { links: result.links } : {}) });
           break;
         }
 
@@ -1807,6 +1807,10 @@ export class ZulipMcplServer {
         const addStreams = Array.isArray(args.addStreams) ? args.addStreams.map((s) => this.streamArg(s)) : [];
         const removeStreams = Array.isArray(args.removeStreams) ? args.removeStreams.map((s) => this.streamArg(s)) : [];
         const setDmUsers = Array.isArray(args.setDmUsers) ? args.setDmUsers.map(String) : undefined;
+        // [] is an explicit DM reset, not a placeholder for a stream-only edit.
+        if (setDmUsers?.length === 0 && (addStreams.length > 0 || removeStreams.length > 0)) {
+          throw new Error('Send setDmUsers: [] alone, without non-empty addStreams or removeStreams; it makes DMs UNRESTRICTED. Use setDmUsers: null to leave DMs unchanged.');
+        }
         if (addStreams.length === 0 && removeStreams.length === 0 && setDmUsers === undefined) {
           throw new Error('Nothing to change: pass addStreams, removeStreams, and/or setDmUsers.');
         }

@@ -24,7 +24,7 @@ import {
   type JsonRpcRequest,
   type PushEventParams,
 } from '@animalabs/mcpl-core';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChannelHistoryPage, ChannelHistoryQuery, MessageChangeEvent, OnIncomingMessage, OnMessageChange, OnReaction, OnSystemEvent, PlatformAdapter, RoutingHints } from '../src/platforms/adapter.ts';
@@ -35,6 +35,7 @@ import { FiltersPlane } from '../src/filters.ts';
 import { MessageIds } from '../src/message-ids.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { toolDefinitions } from '../src/tools.ts';
+import { assertStrictArguments } from './strictArguments.ts';
 import { TOOL_CLASSES } from '../src/tool-classes.ts';
 
 // Isolate the process-wide limiter between tests, without bypassing it in
@@ -433,9 +434,9 @@ test('tools/list carries each tool\'s RFC-008 class and leaves the model-facing 
     for (const [name, fields] of [['send_message', ['type', 'to', 'topic', 'reply_to']], ['move_messages', ['topic', 'stream_id']]] as const) {
       const definition = tools.find(t => t.name === name) as unknown as { inputSchema: { properties: Record<string, { type: string[]; enum?: unknown[] }> } };
       for (const field of fields) {
-        assert.deepEqual(definition.inputSchema.properties[field].type, [field === 'reply_to' || field === 'stream_id' ? 'integer' : 'string', 'null']);
+        assert.deepEqual(definition.inputSchema.properties[field].type, field === 'reply_to' ? ['integer', 'string', 'null'] : [field === 'stream_id' ? 'integer' : 'string', 'null']);
       }
-      if (name === 'send_message') assert.deepEqual(definition.inputSchema.properties.type.enum, ['stream', 'private', '', null]);
+      if (name === 'send_message') assert.deepEqual(definition.inputSchema.properties.type.enum, ['stream', 'private', 'channel', 'direct', '', null]);
     }
     await h.close();
   }
@@ -1140,6 +1141,17 @@ test('a muted stream delivers nothing, and the filters tools read and write the 
     assert.equal(plane.dmAllowed({ id: 42, email: 'x' }), true);
     assert.equal(plane.dmAllowed({ id: 7, email: 'x' }), false);
 
+    // A strict-shaped stream-only update must not replace the DM allowlist.
+    const strictUpdate = { addStreams: ['general'], removeStreams: null, setDmUsers: null };
+    assertStrictArguments('filters_update', strictUpdate);
+    const kept = json(await call('filters_update', strictUpdate));
+    assert.deepEqual(kept.dmUsers, ['42']);
+    assert.equal(plane.dmAllowed({ id: 7, email: 'x' }), false);
+    const noChange = await call('filters_update', { addStreams: null, removeStreams: [], setDmUsers: null });
+    assert.equal(noChange.isError, true);
+    assert.match(noChange.content[0].text, /Nothing to change/);
+    assert.deepEqual(plane.current().dmUsers, ['42']);
+
     // Clearing the DM allowlist is allowed, and says what it means.
     const anyone = json(await call('filters_update', { setDmUsers: [] }));
     assert.equal(anyone.dmUsers, null);
@@ -1156,6 +1168,62 @@ test('a muted stream delivers nothing, and the filters tools read and write the 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// R2-3: an ambiguous placeholder must not open DMs or partially edit streams.
+for (const streams of [
+  { addStreams: ['dev'], removeStreams: [] },
+  { addStreams: [], removeStreams: ['general'] },
+  { addStreams: ['ops'], removeStreams: ['general'] },
+]) {
+  test(`R2-3 filters_update refuses a mixed DM reset ${JSON.stringify(streams)}`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'zulip-mixed-dm-reset-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, 'filters.json');
+    writeFileSync(path, JSON.stringify({ streams: ['general', 'dev'], dmUsers: ['42'] }));
+    const plane = new FiltersPlane(path, {}, { pollMs: 60_000 });
+    plane.start();
+    t.after(() => plane.stop());
+    const h = harness({ filters: plane });
+    t.after(() => h.close());
+    await initialize(h, true);
+    await settled(h);
+    const before = readFileSync(path, 'utf8');
+    const result = await h.host.sendRequest('tools/call', {
+      name: 'filters_update', arguments: { ...streams, setDmUsers: [] },
+    }) as { isError?: boolean; content: { text: string }[] };
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /setDmUsers.*\[\].*(alone|own)/);
+    assert.deepEqual(plane.current().streams, ['general', 'dev']);
+    assert.deepEqual(plane.current().dmUsers, ['42']);
+    assert.equal(plane.dmAllowed({ id: 7, email: 'x' }), false);
+    assert.equal(readFileSync(path, 'utf8'), before, 'no partial update persisted');
+  });
+}
+
+for (const streams of [{}, { addStreams: [], removeStreams: [] }, { addStreams: null, removeStreams: null }]) {
+  test(`R2-3 filters_update permits an isolated DM reset ${JSON.stringify(streams)}`, async t => {
+    const dir = mkdtempSync(join(tmpdir(), 'zulip-alone-dm-reset-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const path = join(dir, 'filters.json');
+    writeFileSync(path, JSON.stringify({ streams: ['general'], dmUsers: ['42'] }));
+    const plane = new FiltersPlane(path, {}, { pollMs: 60_000 });
+    plane.start();
+    t.after(() => plane.stop());
+    const h = harness({ filters: plane });
+    t.after(() => h.close());
+    await initialize(h, true);
+    await settled(h);
+    const result = await h.host.sendRequest('tools/call', {
+      name: 'filters_update', arguments: { ...streams, setDmUsers: [] },
+    }) as { isError?: boolean; content: { text: string }[] };
+    assert.notEqual(result.isError, true);
+    const value = JSON.parse(result.content[0].text);
+    assert.equal(value.dmUsers, null);
+    assert.match(value.note, /UNRESTRICTED/);
+    assert.equal(plane.dmAllowed({ id: 7, email: 'x' }), true);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { streams: ['general'] });
+  });
+}
 
 test('attachments on live delivery are inlined from the configured source', async () => {
   const fetched: string[] = [];
@@ -3813,3 +3881,28 @@ for (const mode of ['list', 'public'] as const) {
     } finally { await h.close(); plane.stop(); rmSync(dir, { recursive: true, force: true }); }
   });
 }
+test('R1-3 channels/publish expands through the real adapter and returns its audit links on the wire', async () => {
+  const h = harness();
+  const sent: any[] = [];
+  const adapter = new ZulipAdapter({
+    config: {realm:'https://example.invalid'},
+    async callEndpoint(path: string, method: string, args: any) {
+      assert.equal(path,'get_stream_id'); assert.equal(method,'GET'); assert.equal(args.stream,'general');
+      return {result:'success',stream_id:7};
+    },
+    messages: {
+      async getById({message_id}: any) {return {result:'success',message:{id:message_id,type:'stream',stream_id:7,display_recipient:'general',subject:'mcpl'}};},
+      async send(args: any) {sent.push(args); return {result:'success',id:41};},
+    },
+  },790,'test');
+  h.adapter.publish = adapter.publish.bind(adapter);
+  try {
+    await initialize(h,true);
+    await h.host.sendRequest(method.FEATURE_SETS_UPDATE,{effectiveCapabilities:FULL_GRANT});
+    await awaitRegistered(h);
+    const result=await h.host.sendRequest(method.CHANNELS_PUBLISH,{conversationId:'c1',channelId:'zulip:general',content:[{type:'text',text:'[[msg:101]]'}]});
+    assert.deepEqual(result,{delivered:true,messageId:'41',links:[{token:'[[msg:101]]',url:'https://example.invalid/#narrow/channel/7-general/topic/mcpl/near/101'}]});
+    assert.equal(sent[0].to,7);
+    assert.equal(sent[0].content,'[#general > mcpl @ 💬](https://example.invalid/#narrow/channel/7-general/topic/mcpl/near/101)');
+  } finally {await h.close();}
+});

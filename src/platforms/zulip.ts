@@ -42,6 +42,8 @@ import type {
   SelfMove,
 } from './adapter.js';
 import { ZulipEventLoop, type ZulipMessageChange } from './zulip-events.js';
+import { normalizeMarkdownTables } from '../markdown-tables.js';
+import { resolveMessageLinks, canonicalDestination, type MessageLink } from '../message-links.js';
 import { chunkMessage, cleanMarkdown } from '../content.js';
 import { messageLineHead } from '../message-line.js';
 import { ActiveTopicsCache } from '../active-topics.js';
@@ -210,6 +212,8 @@ export interface ZulipAdapterOptions {
   dmDiscoveryLimit?: number;
   /** The realm's max message length; longer publishes are split. */
   maxMessageLength?: number;
+  /** Share a newly registered realm limit with tool sends/edits; return the effective override. */
+  onRealmMessageLength?: (limit: number) => number;
   /** Uploads for the media blocks of a publish (image/audio with inline data). Unset: such blocks are dropped. */
   uploader?: Uploader;
   /** Size and count limits for those uploads. Required with `uploader`. */
@@ -237,7 +241,9 @@ export class ZulipAdapter implements PlatformAdapter {
   private readonly backscrollLimits: ReadonlyMap<string, number>;
   private readonly filters: FilterView;
   private readonly dmDiscoveryLimit: number;
-  private readonly maxMessageLength: number | undefined;
+  private maxMessageLength: number | undefined;
+  private readonly onRealmMessageLength?: (limit: number) => number;
+  private readonly configuredMaxMessageLength: number | undefined;
   private readonly uploader: Uploader | null;
   private readonly uploadPolicy: UploadPolicy | null;
   private readonly formatTime: (d: Date) => string;
@@ -313,6 +319,8 @@ export class ZulipAdapter implements PlatformAdapter {
     }
     this.dmDiscoveryLimit = options.dmDiscoveryLimit ?? DEFAULT_DM_DISCOVERY_LIMIT;
     this.maxMessageLength = options.maxMessageLength;
+    this.configuredMaxMessageLength = options.maxMessageLength;
+    this.onRealmMessageLength = options.onRealmMessageLength;
     this.uploader = options.uploader ?? null;
     this.uploadPolicy = options.uploadPolicy ?? null;
     this.formatTime = options.formatTime ?? agentLineTimeFormatter();
@@ -965,6 +973,16 @@ export class ZulipAdapter implements PlatformAdapter {
     content: ContentBlock[],
     hints?: RoutingHints,
   ): Promise<PublishResult> {
+    const read = () => this.publishGated(channelId, descriptor, content, hints);
+    return this.streamGate ? this.streamGate.run(read) : read();
+  }
+
+  private async publishGated(
+    channelId: string,
+    descriptor: ChannelDescriptor | undefined,
+    content: ContentBlock[],
+    hints?: RoutingHints,
+  ): Promise<PublishResult> {
     const epoch = this.streamGate?.checkpoint();
     const streamId = addressOf(descriptor).stream_id ?? this.filters.subscriptions?.resolveName(streamNameOf(channelId));
     const retainedEpoch = typeof hints?.metadata?.readEpoch === 'number' ? hints.metadata.readEpoch : epoch;
@@ -978,17 +996,6 @@ export class ZulipAdapter implements PlatformAdapter {
       .filter((c): c is TextContent => c.type === 'text')
       .map(c => c.text)
       .join('\n');
-    // Image and audio blocks ride along as uploads, linked after the text
-    // (Zulip's own attachment form). Uploads happen before the send, so a
-    // failed upload fails the publish whole; a send that fails after them
-    // leaves unreferenced uploads, which Zulip garbage-collects.
-    if (this.uploader && this.uploadPolicy) {
-      const uploaded = await uploadBlocks(this.uploader, content, this.uploadPolicy);
-      check();
-      textContent = withAttachmentLinks(textContent, uploaded);
-    }
-    if (!textContent) return { delivered: false };
-
     const dmIds = parseDmChannelId(channelId);
     let target: Record<string, unknown>;
     let what: string;
@@ -1008,10 +1015,27 @@ export class ZulipAdapter implements PlatformAdapter {
       what = `message to #${streamName}`;
     }
 
+    const links: MessageLink[] = [], replacements: string[] = [];
+    textContent = normalizeMarkdownTables(await resolveMessageLinks(textContent, {
+      client: this.zulipClient, realm: this.zulipClient.config?.realm ?? '',
+    }, { messageIds: this.messageIds, destination: async () => target = await canonicalDestination(this.zulipClient, target), links, replacements, selfUserId: this.identity.selfUserId }));
+    check();
+    chunkMessage(textContent, this.maxMessageLength, replacements); // Preflight before uploads.
+    // Image and audio blocks ride along as uploads, linked after the text
+    // (Zulip's own attachment form). Uploads happen before the send, so a
+    // failed upload fails the publish whole; a send that fails after them
+    // leaves unreferenced uploads, which Zulip garbage-collects.
+    if (this.uploader && this.uploadPolicy) {
+      const uploaded = await uploadBlocks(this.uploader, content, this.uploadPolicy);
+      check();
+      textContent = withAttachmentLinks(textContent, uploaded);
+    }
+    if (!textContent) return { delivered: false };
+
     // Zulip rejects anything over the realm's max_message_length; a long
     // reply goes out as several messages rather than failing whole.
     const messageIds: string[] = [];
-    for (const chunk of chunkMessage(textContent, this.maxMessageLength)) {
+    for (const chunk of chunkMessage(textContent, this.maxMessageLength, replacements)) {
       check();
       const result = await this.zulipClient.messages.send({ ...target, content: chunk });
       check();
@@ -1019,7 +1043,7 @@ export class ZulipAdapter implements PlatformAdapter {
       this.highestMessageId = Math.max(this.highestMessageId, Number(result.id));
       messageIds.push(String(result.id));
     }
-    return { delivered: true, messageId: messageIds[messageIds.length - 1], messageIds };
+    return { delivered: true, links, messageId: messageIds[messageIds.length - 1], messageIds };
   }
 
   /** Mark a message as seen: a reaction, 👀 by default. `value` may be an emoji name (':eyes:' / 'eyes'). */
@@ -1313,7 +1337,13 @@ export class ZulipAdapter implements PlatformAdapter {
     onReaction?: OnReaction,
     onMessageChange?: OnMessageChange,
   ): void {
-    const loop = this.eventLoop = new ZulipEventLoop({ messageIds: this.messageIds, streamsMode: this.filters.subscriptions?.mode, readEpoch: () => this.streamGate?.checkpoint() });
+    const loop = this.eventLoop = new ZulipEventLoop({
+      messageIds: this.messageIds, streamsMode: this.filters.subscriptions?.mode,
+      readEpoch: () => this.streamGate?.checkpoint(),
+      onRealmMessageLength: limit => {
+        this.maxMessageLength = this.onRealmMessageLength?.(limit) ?? this.configuredMaxMessageLength ?? limit;
+      },
+    });
     // Changes are placed asynchronously (a cache miss costs one GET) but must
     // reach the server in queue order: an edit followed by a deletion of the
     // same message reads backwards otherwise. Reactions await the earlier

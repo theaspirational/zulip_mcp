@@ -72,7 +72,7 @@ test('edit_message PATCHes the id in the path and only content in the form body'
   const f = await fixture(response);
   try {
     const content = 'Updated **text** & + = \n✓';
-    assert.deepEqual(await f.tools.handleToolCall('edit_message', { message_id: 42, content, extra: 'not sent' }), response);
+    assert.deepEqual(await f.tools.handleToolCall('edit_message', { message_id: 42, content, extra: 'not sent' }), { ...response, links: [] });
     assert.deepEqual(f.calls, [{
       method: 'PATCH', path: '/api/v1/messages/42',
       body: new URLSearchParams({ content }).toString(), auth: f.authHeader,
@@ -225,7 +225,7 @@ test('move_messages requires a topic or stream_id without making a request', asy
 });
 
 for (const { field, invalid, error } of [
-  { field: 'propagate_mode', invalid: ['all', 'CHANGE_ALL', '', null, 1, false, {}],
+  { field: 'propagate_mode', invalid: ['all', 'CHANGE_ALL', '', 1, false, {}],
     error: /^Error: propagate_mode must be change_one, change_later, or change_all$/ },
   { field: 'stream_id', invalid: [0, -1, 1.5, '17', false, NaN, Infinity, {}],
     error: /^Error: stream_id must be a positive integer$/ },
@@ -266,7 +266,7 @@ test('move_messages schema exposes optional topic, propagation, and stream field
   assert.deepEqual(properties.topic.type, ['string', 'null']);
   assert.deepEqual(properties.stream_id.type, ['integer', 'null']);
   assert.equal(properties.stream_id.minimum, 1);
-  assert.deepEqual(properties.propagate_mode.enum, ['change_one', 'change_later', 'change_all']);
+  assert.deepEqual(properties.propagate_mode.enum, ['change_one', 'change_later', 'change_all', null]);
   assert.equal(properties.propagate_mode.default, undefined, 'Zulip chooses the default');
 });
 
@@ -287,7 +287,7 @@ test('move_messages validates message_id before edit fields', async () => {
 test('edit_message stays content-only and rejects moves without a request', async () => {
   const tool = toolDefinitions.find(tool => tool.name === 'edit_message')!;
   assert.deepEqual(tool.inputSchema.required, ['message_id', 'content']);
-  assert.deepEqual(Object.keys(tool.inputSchema.properties), ['message_id', 'content']);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties), ['allow_private_references', 'message_id', 'content']);
   assert.match(tool.description, /your own/);
   const f = await fixture({ result: 'success', msg: '' });
   try {
@@ -321,6 +321,8 @@ test('move_messages describes visible breadcrumbs and resolving a whole topic', 
   const tool = toolDefinitions.find(tool => tool.name === 'move_messages')!;
   assert.match(tool.description, /Notification Bot breadcrumb in the destination topic by default/);
   assert.match(tool.description, /resolve a topic.*✔ <topic> with change_all/);
+  assert.match(tool.description, /For a move refusal, reply with send_message\(\{reply_to: <messageId>, content\}\)/);
+  assert.match(tool.description, /deletion\/hidden-move refusal needs a newer readable message id with reply_to, or an explicit destination/);
   const properties = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
   assert.match(String(properties.propagate_mode.description), /Zulip defaults to change_one/);
   assert.match(String(properties.propagate_mode.description), /change_later moves this and later messages/);
@@ -468,5 +470,15 @@ test('move_messages treats null destinations as absent before requests', async (
       message_id: 42, topic: null, stream_id: null, propagate_mode: 'change_one',
     }), /^Error: topic or stream_id is required$/);
     assert.deepEqual(f.calls, []); assert.deepEqual(f.lookups, []);
+  } finally { await f.close(); }
+});
+
+test('move_messages null propagation leaves the server default out of the PATCH', async () => {
+  const f = await fixture({ result: 'success' });
+  try {
+    const args = { message_id: 42, topic: null, stream_id: 17, propagate_mode: null };
+    assertStrictArguments('move_messages', args);
+    await f.tools.handleToolCall('move_messages', args);
+    assert.deepEqual(Object.fromEntries(new URLSearchParams(f.calls[0].body)), { stream_id: '17' });
   } finally { await f.close(); }
 });

@@ -22,6 +22,16 @@ export interface ZulipSession {
   sessionId: string;
   /** The realm's advertised per-file upload cap (`max_file_upload_size_mib`), bytes; null when unknown. */
   maxUploadBytes?: number | null;
+  /** Realm message limit (learned at event registration), default 10000. */
+  maxMessageLength?: number;
+}
+
+/** Share the /register realm limit while preserving the explicit env override. */
+export function updateRealmMessageLength(session: Pick<ZulipSession, 'maxMessageLength'>,
+  limit: number, env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.ZULIP_MAX_MESSAGE_LENGTH);
+  session.maxMessageLength = Number.isSafeInteger(configured) && configured > 0 ? configured : limit;
+  return session.maxMessageLength;
 }
 
 export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env): Promise<ZulipSession> {
@@ -110,6 +120,7 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
   // The realm's upload cap, so the outbound ceiling is what the server will
   // actually accept rather than a guess. Fail-open: unknown → null.
   let maxUploadBytes: number | null = null;
+  let maxMessageLength = 10000;
   try {
     const settings = await client.callEndpoint("server_settings", "GET", {});
     const mib = settings?.max_file_upload_size_mib;
@@ -117,6 +128,9 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
   } catch (err) {
     diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', "Failed to read realm server settings (upload cap):", err);
   }
+
+  const configuredLimit = Number(env.ZULIP_MAX_MESSAGE_LENGTH);
+  if (Number.isSafeInteger(configuredLimit) && configuredLimit > 0) maxMessageLength = configuredLimit;
 
   // Auto-subscribe to streams named in ZULIP_SUBSCRIBE (comma-separated).
   // Needed because Zulip's event queue only delivers message events for streams
@@ -138,5 +152,5 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
   }
 
   diagnosticError(env.ZULIP_STREAMS_MODE === 'subscribed', 'zulip-client', `Zulip MCP initialized with session: ${sessionId}`);
-  return { client, selfUserId, realm, authHeader, sessionId, maxUploadBytes };
+  return { client, selfUserId, realm, authHeader, sessionId, maxUploadBytes, maxMessageLength };
 }

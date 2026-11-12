@@ -16,7 +16,7 @@ const privateMessage = { type: 'private', display_recipient: [{ id: 790 }, { id:
 const properties = toolDefinitions.find(t => t.name === 'send_message')!.inputSchema.properties!;
 function strictCall(fields: Record<string, unknown>, unused: null | '') {
   // Every advertised property is present, as in a Codex strict-schema call.
-  return { ...Object.fromEntries(Object.keys(properties).map(k => [k, k === 'attachments' ? [] : k === 'reply_to' && unused === '' ? 0 : unused])), ...fields };
+  return { ...Object.fromEntries(Object.keys(properties).map(k => [k, k === 'allow_private_references' ? false : k === 'attachments' ? [] : unused])), ...fields };
 }
 function fixture(message: unknown = stream) {
   const dir = mkdtempSync(join(tmpdir(), 'zulip-receipt-'));
@@ -26,10 +26,38 @@ function fixture(message: unknown = stream) {
     client: { messages: {
       async getById() { gets++; return { result: 'success', message }; },
       async send(p: any) { sends.push(p); return { result: 'success', id: 501, msg: '' }; },
-    }, users: { async retrieve() { throw new Error('No user-directory lookup expected'); } } },
+    }, users: { async retrieve() { throw new Error('No user-directory lookup expected'); } },
+    async callEndpoint(path: string, method: string, args: any) {
+      assert.equal(path, 'get_stream_id'); assert.equal(method, 'GET');
+      assert.deepEqual(args, { stream: 'General' });
+      return { result: 'success', stream_id: 12 };
+    } },
     realm: 'https://example.invalid', authHeader: '', selfUserId: 790, sessionId: 'receipt',
   }, dir, { uploader: { async upload() { uploads++; throw new Error('Unexpected upload'); } } });
   return { tools, sends, gets: () => gets, uploads: () => uploads, close: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+for (const content of ['hello', '[[msg:101]]']) {
+  test(`stream receipt and callback preserve the caller's name for ${content}`, async t => {
+    const f = fixture({ ...stream, id: 101 }); t.after(f.close);
+    const callbacks: any[] = [];
+    f.tools.onSent = event => callbacks.push(event);
+    const args = strictCall({ type: 'stream', to: 'General', topic: 'Parent', content }, null);
+    assertStrictArguments('send_message', args);
+    const before = structuredClone(args);
+    const url = 'https://example.invalid/#narrow/channel/12-General/topic/Parent/near/101';
+    const hasToken = content === '[[msg:101]]';
+    const rendered = hasToken ? `[#General > Parent @ 💬](${url})` : content;
+    const receipt = await f.tools.handleToolCall('send_message', args);
+    assert.deepEqual(receipt, {
+      result: 'success', id: 501, msg: '', type: 'stream',
+      channelId: 'zulip:General', stream: 'General', topic: 'Parent',
+      links: hasToken ? [{ token: content, url }] : [],
+    });
+    assert.deepEqual(f.sends, [{ type: 'stream', to: hasToken ? 12 : 'General', topic: 'Parent', content: rendered }]);
+    assert.deepEqual(callbacks, [{ messageId: '501', channelId: 'zulip:General', content: rendered }]);
+    assert.deepEqual(args, before, 'canonicalization does not mutate caller arguments');
+  });
 }
 
 for (const unused of [null, ''] as const) {
@@ -52,7 +80,7 @@ for (const unused of [null, ''] as const) {
       assert.deepEqual(Object.keys(args).sort(), Object.keys(properties).sort());
       const result = await f.tools.handleToolCall('send_message', args);
       assert.deepEqual(f.sends, [{ ...payload, content: 'hello' }]);
-      assert.deepEqual(result, { result: 'success', id: 501, msg: '', ...destination });
+      assert.deepEqual(result, { result: 'success', id: 501, msg: '', links: [], ...destination });
       assert.equal(f.gets(), 'reply_to' in fields ? 1 : 0);
       assert.deepEqual(args, before, 'normalization does not mutate caller arguments');
     });
@@ -63,7 +91,7 @@ for (const unused of [null, ''] as const) {
     assertStrictArguments('send_message', args);
     const result = await f.tools.handleToolCall('send_message', args);
     assert.deepEqual(f.sends, [{ type: 'private', to: [790, 42, 7], topic: undefined, content: 'hello' }]);
-    assert.deepEqual(result, { result: 'success', id: 501, msg: '', type: 'private', recipients: [790, 42, 7], channelId: 'zulip:dm:7+42' });
+    assert.deepEqual(result, { result: 'success', id: 501, msg: '', links: [], type: 'private', recipients: [790, 42, 7], channelId: 'zulip:dm:7+42' });
   });
 }
 
@@ -86,7 +114,7 @@ test('explicitly empty stream topic without reply_to is refused before upload/se
 test('send_dm includes its destination alongside existing receipt fields', async t => {
   const f = fixture(); t.after(f.close);
   const result = await f.tools.handleToolCall('send_dm', { to: ['42', '7'], content: 'hello' });
-  assert.deepEqual(result, { result: 'success', id: 501, msg: '', to_user_ids: [42, 7], type: 'private', recipients: [42, 7], channelId: 'zulip:dm:7+42' });
+  assert.deepEqual(result, { result: 'success', id: 501, msg: '', links: [], to_user_ids: [42, 7], type: 'private', recipients: [42, 7], channelId: 'zulip:dm:7+42' });
 });
 
 test('reply topic and receipt follow the real zulip-js HTTP send, including chunking', async t => {
@@ -148,17 +176,17 @@ test('schema descriptions document strict placeholders and stream-only reply top
     assert.match((properties[key] as any).description, /[Nn]ull or empty string means absent/);
   }
   assert.match((properties.topic as any).description, /private reply_to/);
-  assert.match((properties.topic as any).description, /explicitly empty topic.*error/);
+  assert.match((properties.topic as any).description, /non-empty trimmed string/);
 });
 
 test('send_message publishes nullable destination types and a nullable type enum', () => {
   for (const key of ['type', 'to', 'topic', 'reply_to']) {
-    assert.deepEqual((properties[key] as any).type, [key === 'reply_to' ? 'integer' : 'string', 'null']);
+    assert.deepEqual((properties[key] as any).type, key === 'reply_to' ? ['integer', 'string', 'null'] : ['string', 'null']);
   }
-  assert.deepEqual((properties.type as any).enum, ['stream', 'private', '', null]);
+  assert.deepEqual((properties.type as any).enum, ['stream', 'private', 'channel', 'direct', '', null]);
 });
 
-for (const reply_to of [null, '', 0]) {
+for (const reply_to of [null, '', 0, '0']) {
   test(`absent reply_to ${JSON.stringify(reply_to)} cannot trigger a lookup without a destination`, async t => {
     const f = fixture(); t.after(f.close);
     await assert.rejects(f.tools.handleToolCall('send_message', {
@@ -166,5 +194,60 @@ for (const reply_to of [null, '', 0]) {
       attachments: [{ data: 'aGk=', name: 'hi.txt' }],
     }), /type and to are required without reply_to/);
     assert.equal(f.gets(), 0); assert.equal(f.uploads(), 0); assert.deepEqual(f.sends, []);
+  });
+}
+
+for (const type of ['stream', 'channel']) {
+  for (const topic of [undefined, null, '', '   ', 42, { a: 1 }]) {
+    test(`standalone ${type} refuses missing/invalid topic ${JSON.stringify(topic)} before side effects`, async t => {
+      const f = fixture(); t.after(f.close);
+      await assert.rejects(f.tools.handleToolCall('send_message', {
+        type, to: 'General', topic, content: 'hi', attachments: [{ data: 'aGk=', name: 'hi.txt' }],
+      }), /topic.*(empty|string)/);
+      assert.equal(f.gets(), 0); assert.equal(f.uploads(), 0); assert.deepEqual(f.sends, []);
+    });
+  }
+}
+for (const [type, canonical] of [['channel', 'stream'], ['direct', 'private']]) {
+  test(`non-reply ${type} normalizes payload and receipt to ${canonical}`, async t => {
+    const f = fixture(); t.after(f.close);
+    const args = strictCall({ type, to: canonical === 'stream' ? 'General' : 'ann@example.com', topic: canonical === 'stream' ? '  New  ' : null, content: 'hi' }, null);
+    assertStrictArguments('send_message', args);
+    const receipt = await f.tools.handleToolCall('send_message', args);
+    assert.equal(f.sends[0].type, canonical); assert.equal(receipt.type, canonical);
+    if (canonical === 'stream') {
+      assert.equal(f.sends[0].topic, 'New'); assert.equal(receipt.topic, 'New'); assert.equal(receipt.stream, 'General');
+      assert.equal(receipt.recipients, undefined);
+    } else { assert.deepEqual(receipt.recipients, ['ann@example.com']); }
+  });
+}
+for (const topic of [42, { a: 1 }]) {
+  test(`reply topic ${JSON.stringify(topic)} fails before upload/send`, async t => {
+    const f = fixture(); t.after(f.close);
+    await assert.rejects(f.tools.handleToolCall('send_message', {
+      reply_to: 123, topic, content: 'hi', attachments: [{ data: 'aGk=', name: 'hi.txt' }],
+    }), /topic must be a string/);
+    assert.equal(f.uploads(), 0); assert.deepEqual(f.sends, []);
+  });
+}
+for (const topic of ['   ', '  New  ']) {
+  test(`reply topic ${JSON.stringify(topic)} is trimmed and empty inherits`, async t => {
+    const f = fixture(); t.after(f.close);
+    const receipt = await f.tools.handleToolCall('send_message', { reply_to: '123', topic, content: 'hi' });
+    assert.equal(f.sends[0].topic, topic.trim() || 'Parent'); assert.equal(receipt.topic, topic.trim() || 'Parent');
+  });
+}
+test('whitespace-only topic is absent on private replies', async t => {
+  const f = fixture(privateMessage); t.after(f.close);
+  const receipt = await f.tools.handleToolCall('send_message', { reply_to: 123, topic: '   ', content: 'hi' });
+  assert.equal(receipt.type, 'private'); assert.equal(f.sends[0].topic, undefined);
+});
+for (const reply_to of [null, '', 0, '0', '123', ' 123 ', '123.0', '1.23e2']) {
+  test(`documented reply_to ${JSON.stringify(reply_to)} matches schema and lookup behavior`, async t => {
+    const f = fixture(); t.after(f.close);
+    const args = strictCall({ type: 'stream', to: Number(reply_to) === 123 ? null : 'General', topic: 'New', reply_to, content: 'hi' }, null);
+    assertStrictArguments('send_message', args);
+    await f.tools.handleToolCall('send_message', args);
+    assert.equal(f.gets(), Number(reply_to) === 123 ? 1 : 0);
   });
 }

@@ -66,7 +66,7 @@ export function idToolDefinitions<T>(definitions: T, ids: MessageIds): T {
   for (const tool of copy) {
     for (const [key, field] of Object.entries(tool.inputSchema?.properties ?? {}) as [string, any][]) {
       if (key !== 'reply_to' && key !== 'message_id' && !(tool.name === 'fetch_history' && ['before', 'after'].includes(key))) continue;
-      field.type = ids.mode === 'strict' ? ['string', ...(key === 'reply_to' ? ['null'] : [])]
+      field.type = ids.mode === 'strict' ? ['string', ...(Array.isArray(field.type) && field.type.includes('null') ? ['null'] : [])]
         : [...new Set(['string', ...(Array.isArray(field.type) ? field.type : [field.type])])];
       field.description += ` Use ${ids.tag}:<n>. ${ids.mode === 'compat' ? 'Bare numbers warn.' : 'Bare numbers are refused.'}`;
     }

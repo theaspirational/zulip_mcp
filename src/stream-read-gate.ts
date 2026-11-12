@@ -6,11 +6,11 @@ export const STREAM_READ_TOOLS = new Set([
   'fetch_history', 'fetch_around', 'get_poll_results', 'list_streams', 'get_stream_topics',
   'fetch_attachment', 'refresh_channels', 'channel_missed', 'filters_get', 'filters_update',
   // Conditional reads: reply destinations, message links, move placement.
-  'send_message', 'send_poll', 'edit_message', 'move_messages',
+  'send_message', 'send_dm', 'send_poll', 'edit_message', 'move_messages',
 ]);
-export const CONDITIONAL_STREAM_READ_TOOLS = new Set(['send_message', 'send_poll', 'edit_message']);
+export const CONDITIONAL_STREAM_READ_TOOLS = new Set(['send_message', 'send_dm', 'send_poll', 'edit_message']);
 export const NON_STREAM_READ_TOOLS = new Set([
-  'send_dm', 'stop_monitoring', 'listen', 'unlisten', 'upload_file', 'delete_message', 'add_reaction',
+  'stop_monitoring', 'listen', 'unlisten', 'upload_file', 'delete_message', 'add_reaction',
   'remove_reaction', 'list_users', 'find_user', 'get_user_profile', 'list_emojis',
   'mute_channel', 'unmute_channel', 'set_reaction_visibility',
 ]);
@@ -115,6 +115,27 @@ export class StreamReadGate {
     const gate = this;
     const visible = (m: any) => m?.type === 'private' || (m?.type === 'stream' && gate.allowed(m.stream_id));
     return { ...original,
+      callEndpoint: async (path: string, method: string, params: any) => {
+        const stream = /^streams\/(\d+)$/.exec(path);
+        if (method !== 'GET' || (path !== 'get_stream_id' && !stream)) {
+          return original.callEndpoint(path, method, params);
+        }
+        gate.recheck();
+        gate.requireKnown();
+        const epoch = gate.checkpoint();
+        const id = stream ? Number(stream[1]) : gate.named(params.stream);
+        gate.assert(id);
+        const result = await original.callEndpoint(path, method, params);
+        gate.assertFresh(id, epoch);
+        if (path === 'get_stream_id') {
+          gate.assertFresh(result?.stream_id, epoch);
+          if (result.stream_id !== id) throw new Error('Read refused by subscribed-stream policy: address changed');
+        } else if (result?.stream?.stream_id !== undefined && result.stream.stream_id !== id) {
+          throw new Error('Read refused by subscribed-stream policy: address changed');
+        }
+        gate.recheck();
+        return result;
+      },
       messages: { ...original.messages,
         getById: async (params: any) => {
           const epoch = gate.checkpoint();
