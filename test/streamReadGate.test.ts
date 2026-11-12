@@ -34,7 +34,7 @@ async function fixture(known = true) {
   plane.start();
   const calls: any[] = [];
   const client = {
-    config: { apiURL: 'https://zulip.invalid/api/v1' },
+    config: { realm: 'https://zulip.invalid', apiURL: 'https://zulip.invalid/api/v1' },
     async callEndpoint(path: string, _method: string, args: any) {
       if (path === 'get_stream_id') return { result: 'success', stream_id: streams.find(s => s.name === args.stream)?.stream_id };
       if (/^streams\/\d+$/.test(path)) return { result: 'success', stream: { stream_id: Number(path.split('/')[1]), invite_only: false } };
@@ -145,7 +145,7 @@ test('unknown state refuses every stream-reading tool and resource without retur
 });
 
 for (const name of ['get_poll_results', 'fetch_around', 'start_monitoring', 'get_unread_messages',
-  'send_message', 'send_poll', 'edit_message', 'move_messages', 'fetch_attachment', 'unread-summary']) {
+  'send_message', 'send_dm', 'send_poll', 'edit_message', 'move_messages', 'fetch_attachment', 'unread-summary']) {
   test(`unsubscribe during final await: ${name}`, async () => {
     const f = await fixture();
     const d = deferred();
@@ -164,7 +164,7 @@ for (const name of ['get_poll_results', 'fetch_around', 'start_monitoring', 'get
         let calls = 0;
         f.client.messages.retrieve = async () => ++calls === 1 ? { result: 'success', messages: [raw()] } : d.wait();
         args = { channels: ['general', 'second'] };
-      } else if (['send_message', 'send_poll'].includes(name)) {
+      } else if (['send_message', 'send_dm', 'send_poll'].includes(name)) {
         (f.runtime as any).zulipClient.messages.send = () => d.wait();
         response = { result: 'success', id: 99 };
       } else if (['edit_message', 'move_messages'].includes(name)) {
@@ -982,4 +982,90 @@ test('all connection notices, catch-up/reconnect, errors, counters, status and h
     console.error = originalError;
     s.channelManager.destroy(); f.close();
   }
+});
+
+for (const to of ['general', '12', 12, '"general"', '["general"]']) {
+  test(`subscribed token receipt preserves caller destination ${JSON.stringify(to)} and sends its authorized ID`, async () => {
+    const f = await fixture();
+    try {
+      const result = await f.runtime.handleToolCall('send_message', { type: 'channel', to, topic: '  SECRET topic  ', content: '[[msg:acme:77]]' });
+      assert.equal(f.calls.find(c => c[0] === 'send')[1].to, 12);
+      assert.equal(result.stream, to);
+      assert.equal(result.topic, 'SECRET topic');
+      assert.equal(result.id, 'acme:99');
+      assert.equal(result.links[0].token, '[[msg:acme:77]]');
+      assert.match(result.links[0].url, /near\/77$/);
+    } finally { f.close(); }
+  });
+}
+
+test('token destination lookup cannot authorize an old-name public impostor', async () => {
+  const f = await fixture();
+  try {
+    f.client.callEndpoint = async () => ({ result: 'success', stream_id: 14 }) as any;
+    await assert.rejects(f.runtime.handleToolCall('send_message', { type: 'stream', to: 'general', topic: 'T', content: '[[msg:acme:77]]' }));
+    assert.equal(f.calls.some(c => c[0] === 'send'), false);
+  } finally { f.close(); }
+});
+
+test('unsubscribe/regrant during token audience metadata GET refuses the whole receipt before sending', async () => {
+  const f = await fixture();
+  const d = deferred();
+  try {
+    const original = f.client.callEndpoint;
+    f.client.callEndpoint = (path: string, method: string, args: any) => path === 'streams/12' ? d.wait() : original(path, method, args);
+    const pending = f.runtime.handleToolCall('send_message', { type: 'stream', to: 'second', topic: 'T', content: '[[msg:acme:77]]' });
+    await d.started; regrant(f);
+    d.resolve({ result: 'success', stream: { stream_id: 12, invite_only: false } });
+    await assert.rejects(pending, /subscribed-stream policy/);
+    assert.equal(f.calls.some(c => c[0] === 'send'), false);
+  } finally { f.close(); }
+});
+
+test('direct publish retains referenced-stream dependencies through uploads even when destination stays subscribed', async () => {
+  const f = await fixture();
+  const d = deferred();
+  try {
+    const adapter = new ZulipAdapter(f.client, 790, 'references', {
+      filters: f.plane, messageIds: new MessageIds('acme', 'strict'), activeTopics: 0,
+      uploader: { upload: () => d.wait() }, uploadPolicy: { roots: new Map(), maxCount: 2, maxBytes: 100, maxTotalBytes: 100 },
+    });
+    const pending = adapter.publish('zulip:second', undefined, [
+      { type: 'text', text: '[[msg:acme:77]]' }, { type: 'image', data: 'aGk=', mimeType: 'image/png' },
+    ] as any);
+    await d.started; regrant(f);
+    d.resolve({ url: '/user_uploads/test.png', name: 'test.png' });
+    await assert.rejects(pending, /subscribed-stream policy/);
+    assert.equal(f.plane.streamReadAllowed(13), true);
+    assert.equal(f.calls.some(c => c[0] === 'send'), false);
+  } finally { f.close(); }
+});
+
+test('active-topic refresh cannot resurrect a revoked snapshot after regrant', async t => {
+  const { ZulipEventLoop } = await import('../src/platforms/zulip-events.ts');
+  let receive!: (...args: any[]) => Promise<void>;
+  t.mock.method(ZulipEventLoop.prototype, 'start', async (_client, onMessage) => { receive = onMessage as typeof receive; });
+  const f = await fixture();
+  const d = deferred();
+  const seen: any[] = [];
+  const adapter = new ZulipAdapter(f.client, 790, 'topics', { filters: f.plane });
+  const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+  try {
+    f.client.streams.topics.retrieve = () => d.wait();
+    adapter.startEvents(m => seen.push(m));
+    await receive('general', raw(90), []);
+    await d.started; regrant(f);
+    d.resolve({ result: 'success', topics: [{ name: 'REVOKED topic', max_id: 89 }] });
+    await turn();
+    f.client.streams.topics.retrieve = async () => ({ result: 'success', topics: [{ name: 'fresh topic', max_id: 91 }] });
+    await receive('general', raw(92), []);
+    assert.equal(seen[1].metadata.activeTopics, undefined);
+    await turn();
+    await receive('general', raw(93), []);
+    assert.ok(seen[2].metadata.activeTopics.some((topic: any) => topic.name === 'fresh topic'));
+    assert.ok(!JSON.stringify(seen).includes('REVOKED topic'));
+    f.remove();
+    await receive('general', raw(94), []);
+    assert.equal(seen.length, 3);
+  } finally { adapter.stopEvents(); f.close(); }
 });

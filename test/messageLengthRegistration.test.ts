@@ -37,5 +37,8 @@ for(const override of [undefined,'100','0','invalid']) test(`registered limit re
  sent.length=0;
  await tools.handleToolCall('send_message',{type:'stream',to:'general',topic:'plans',content:'x'.repeat(150)});
  assert.ok(sent.every(s=>s.length<=expected));assert.equal(sent.join(''),'x'.repeat(150));
+ sent.length=0;
+ await assert.rejects(tools.handleToolCall('send_poll',{type:'stream',to:'general',topic:'plans',question:'x'.repeat(expected+1),options:['Yes','No']}),/poll exceeds.*limit/);
+ assert.deepEqual(sent,[], 'polls exceeding the registered realm limit must not split or send');
  await assert.rejects(tools.handleToolCall('edit_message',{message_id:101,content:'x'.repeat(expected+1)}),/content exceeds.*limit/);
 });

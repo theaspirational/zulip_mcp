@@ -21,7 +21,7 @@ function fixture(t: TestContext, tag: string, mode: IdMode) {
   const dir = mkdtempSync(join(tmpdir(), 'zulip-ids-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const record = (op: string, result: any) => async (args: any) => { calls.push({ op, args }); return result; };
-  const client = { callEndpoint: record('destination', { result: 'success', stream_id: 12 }), messages: {
+  const client = { config: { realm: `https://${tag}.example.invalid` }, callEndpoint: record('destination', { result: 'success', stream_id: 12 }), messages: {
     getById: record('get', { result: 'success', message: raw(tag) }),
     retrieve: record('history', { result: 'success', messages: [raw(tag)], found_oldest: true, found_newest: true }),
     send: record('send', { result: 'success', id: 7 }), deleteById: record('delete', { result: 'success' }),
@@ -103,7 +103,7 @@ for (const mode of ['legacy', 'compat', 'strict'] as const) {
 for (const mode of ['compat', 'strict'] as const) {
   test(`${mode}: all link tokens and fields validated before even the first lookup`, async t => {
     const f = fixture(t, 'alpha', mode);
-    for (const name of ['send_message', 'edit_message']) {
+    for (const name of ['send_message', 'send_dm', 'edit_message']) {
       for (const content of ['[[msg:alpha:7]] [[msg:beta:7]]', '[[msg:alpha:7]] [[msg:0]]', '[[msg:alpha:7]] [[msg:9007199254740992]]']) {
         f.calls.length = 0;
         await assert.rejects(f.tools.handleToolCall(name, { reply_to: 'alpha:7', message_id: 'alpha:7', content }));
@@ -334,3 +334,55 @@ for (const mode of ['legacy', 'compat', 'strict'] as const) {
     assert.equal(gap.metadata.lastMessageId, 7, 'internal recovery anchor stays numeric');
   });
 }
+
+for (const mode of ['compat', 'strict'] as const) {
+  test(`${mode}: publish validates all tagged tokens before any lookup or send`, async t => {
+    const f = fixture(t, 'alpha', mode);
+    const adapter = new ZulipAdapter(f.client, 1, 'tokens', { messageIds: f.ids });
+    await assert.rejects(adapter.publish('zulip:general', undefined, [{ type: 'text', text: '[[msg:alpha:7]] [[msg:beta:7]]' }]), /differs/);
+    assert.deepEqual(f.calls, []);
+    const published = await adapter.publish('zulip:general', undefined, [{ type: 'text', text: '[[msg:alpha:7]] \\[[msg:beta:7]]' }], { threadId: 'topic' });
+    assert.deepEqual(published.links, [{ token: '[[msg:alpha:7]]', url: 'https://alpha.example.invalid/#narrow/channel/12-general/topic/topic/near/7' }]);
+    assert.equal(f.calls.find(c => c.op === 'get')!.args.message_id, 7);
+    assert.equal(f.calls.find(c => c.op === 'send')!.args.to, 12);
+    assert.match(f.calls.find(c => c.op === 'send')!.args.content, /^\[#general > topic @ 💬\]/);
+    assert.match(f.calls.find(c => c.op === 'send')!.args.content, /\[\[msg:beta:7\]\]$/);
+  });
+}
+
+test('strict: new cursor/reply placeholders stay absent while actual IDs require the realm tag', async t => {
+  const f = fixture(t, 'alpha', 'strict');
+  for (const reply_to of ['0', '00', '0.0', 0, null, '']) {
+    f.calls.length = 0;
+    const receipt = await f.tools.handleToolCall('send_message', { type: 'channel', to: 'general', topic: '  plans  ', reply_to, content: 'hi' });
+    assert.equal(receipt.id, 'alpha:7');
+    assert.equal(receipt.type, 'stream');
+    assert.equal(receipt.topic, 'plans');
+    assert.deepEqual(f.calls.map(c => c.op), ['send']);
+  }
+  for (const cursor of [null, 0]) {
+    f.calls.length = 0;
+    await f.tools.handleToolCall('fetch_history', { channel: 'general', before: cursor, after: cursor });
+    assert.equal(f.calls[0].args.anchor, 'newest');
+  }
+  const schema = idToolDefinitions(toolDefinitions, f.ids).find(t => t.name === 'fetch_history')!.inputSchema as any;
+  assert.deepEqual(schema.properties.before.type, ['string', 'null']);
+  assert.deepEqual(schema.properties.after.type, ['string', 'null']);
+  f.calls.length = 0;
+  await assert.rejects(f.tools.handleToolCall('fetch_history', { channel: 'general', after: 1 }), /bare/);
+  assert.deepEqual(f.calls, []);
+});
+
+test('strict: successful move response IDs are tagged, not stream IDs or reconciliation callbacks', async t => {
+  const f = fixture(t, 'alpha', 'strict');
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ result: 'success', message_id: 7, message_ids: [7, 8], first_message_id_allowed_to_move: 6 }), { status: 200 }));
+  let reconciled: any;
+  f.tools.onMoved = move => { reconciled = move; };
+  const moved = await f.tools.handleToolCall('move_messages', { message_id: 'alpha:7', topic: 'other', propagate_mode: null });
+  assert.equal(moved.message_id, 'alpha:7');
+  assert.deepEqual(moved.message_ids, ['alpha:7', 'alpha:8']);
+  assert.equal(moved.first_message_id_allowed_to_move, 'alpha:6');
+  assert.equal(moved.moved_to.stream, 'general');
+  assert.equal(reconciled.messageId, 7);
+  assert.equal(f.calls.find(c => c.op === 'onMoveStarted')!.args, undefined);
+});

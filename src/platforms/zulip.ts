@@ -987,6 +987,7 @@ export class ZulipAdapter implements PlatformAdapter {
     const streamId = addressOf(descriptor).stream_id ?? this.filters.subscriptions?.resolveName(streamNameOf(channelId));
     const retainedEpoch = typeof hints?.metadata?.readEpoch === 'number' ? hints.metadata.readEpoch : epoch;
     const check = () => {
+      this.streamGate?.recheck();
       if (!this.streamGate || parseDmChannelId(channelId)) return;
       this.streamGate.assertFresh(streamId, Math.min(epoch!, retainedEpoch!));
       for (const id of (hints?.metadata?.readStreamIds ?? []) as number[]) this.streamGate.assertFresh(id, retainedEpoch!);
