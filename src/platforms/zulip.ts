@@ -36,6 +36,7 @@ import type {
 import { ZulipEventLoop, type ZulipMessageChange } from './zulip-events.js';
 import { cleanMarkdown } from '../content.js';
 import { NothingToSend, SendRefused, sendMessage, ZULIP_MAX_MESSAGE_LENGTH, type Destination } from '../outgoing.js';
+import { ActiveTopicsCache } from '../active-topics.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 import { messageLineHead } from '../message-line.js';
 import { agentLineTimeFormatter } from '../timezone.js';
@@ -159,6 +160,8 @@ export interface FilterView {
 const ALLOW_ALL: FilterView = { streamAllowed: () => true, dmAllowed: () => true };
 
 export interface ZulipAdapterOptions {
+  activeTopics?: number;
+  activeTopicsTtlMs?: number;
   messageIds?: MessageIds;
   /** Backscroll cap advertised per channel and enforced on channels/open. */
   backscrollDefault?: number;
@@ -230,6 +233,7 @@ export class ZulipAdapter implements PlatformAdapter {
   private listRead: Promise<boolean> | null = null;
   /** Messages just moved to a stream the bot cannot see, by id → when: the
    *  delete event Zulip sends for lost visibility is a vanishing, not a deletion. */
+  private readonly activeTopics: ActiveTopicsCache;
   private readonly messageIds: MessageIds;
   private movedAway = new Map<number, number>();
 
@@ -239,6 +243,7 @@ export class ZulipAdapter implements PlatformAdapter {
     sessionId: string,
     options: ZulipAdapterOptions = {},
   ) {
+    this.activeTopics = new ActiveTopicsCache(this.api, options.activeTopics, Date.now, options.activeTopicsTtlMs);
     this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.identity = { selfUserId, sessionId };
     this.backscrollDefault = options.backscrollDefault ?? DEFAULT_BACKSCROLL;
@@ -539,6 +544,8 @@ export class ZulipAdapter implements PlatformAdapter {
    * names — a deleted DM the cache never saw cannot be placed and is dropped.
    */
   private async onZulipChange(change: ZulipMessageChange, emit: OnMessageChange): Promise<void> {
+    this.activeTopics.invalidate(change.streamId);
+    if (change.kind === "edit" && change.newStreamId !== null) this.activeTopics.invalidate(change.newStreamId);
     const self = this.identity.selfUserId;
     if (change.kind === 'edit') {
       if (self !== null && change.actorId === self) return;
@@ -1065,6 +1072,7 @@ export class ZulipAdapter implements PlatformAdapter {
         }
       : undefined;
     loop.start(this.api, async (_streamName, msg, flags) => {
+      if (msg.type === "stream" && msg.stream_id !== undefined) this.activeTopics.observe(msg.stream_id, msg.subject, msg.id, new Date(msg.timestamp * 1000).toISOString());
       const raw = { ...(msg as ZulipRawMessage), flags };
       const m = normalizeMessage(raw);
       const key = await this.keyFor(m, raw);
@@ -1095,7 +1103,7 @@ export class ZulipAdapter implements PlatformAdapter {
       // it is cleared on reconnect, and a descriptor the host refused or
       // never confirmed must be offered again rather than held back by
       // adapter-side memory.
-      onMessage(toIncoming(key, m, this.identity), this.streamDescriptor(streamId) ?? undefined);
+      onMessage(this.activeTopics.decorate(toIncoming(key, m, this.identity), streamId), this.streamDescriptor(streamId) ?? undefined);
     }, onSystemEvent, reactionHandler, changeHandler).catch(error => {
       console.error('Zulip event loop failed:', error);
     });
