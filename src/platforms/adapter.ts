@@ -58,7 +58,8 @@ export interface RoutingHints {
  * when it routes the message, if the host holds no id for that channel.
  */
 export interface IncomingEntry {
-  key: ChannelKey;
+  /** null reserves all current channel frontiers until placement is read. */
+  key: ChannelKey | null;
   messageId: string;
   ready(changes?: readonly ChangeEntry[]): Promise<{ message: KeyedMessage; newChannel?: ChannelDescriptor } | null>;
 }

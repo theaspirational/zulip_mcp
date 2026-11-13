@@ -215,6 +215,9 @@ export class ZulipAdapter implements PlatformAdapter {
    *  a round trip: id → channel, author, topic, snippet. Bounded; oldest
    *  evicted. A deletion can only be placed from here — the message is gone. */
   private seen = new Map<number, SeenMessage>();
+  // Routing identity only, never content or read authority. Survives a revoke
+  // so a later event can reserve its old lane before doing any fresh reads.
+  private placementHints = new Map<number, ChannelKey>();
   private static readonly SEEN_CAP = 2000;
   private static quoteBudget = { tokens: QUOTE_GET_BURST, updatedAt: performance.now() };
 
@@ -422,6 +425,10 @@ export class ZulipAdapter implements PlatformAdapter {
   }
 
   private remember(key: ChannelKey, m: ZulipMessage): void {
+    if (!this.placementHints.has(m.id) && this.placementHints.size >= ZulipAdapter.SEEN_CAP) {
+      this.placementHints.delete(this.placementHints.keys().next().value!);
+    }
+    this.placementHints.set(m.id, key);
     this.failedQuoteLookups.delete(m.id);
     this.movedAway.delete(m.id);
     if (!this.seen.has(m.id) && this.seen.size >= ZulipAdapter.SEEN_CAP) {
@@ -1209,12 +1216,13 @@ export class ZulipAdapter implements PlatformAdapter {
       });
     }, onSystemEvent, reactionHandler, changeHandler, s => {
       if (!pollsEnabled() || parsePollSubmessage(s)?.type !== 'vote') return;
-      const known = this.cached(s.message_id!);
-      const enter = (key: ChannelKey) => onMessage({ key, messageId: `poll:${s.message_id}:${s.id}`, ready: () => this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s)) });
-      if (known && this.placing === 0) return enter(known.key);
-      this.inOrder(current, async () => {
-        const where = await this.locate(s.message_id!, "a poll vote");
-        if (where && current()) enter(where.key);
+      // No locate(), users lookup or content read on arrival. Even an expired
+      // hint is enough to reserve a lane; ready resolves current placement and
+      // the server hands moves to the destination under its normal rules.
+      onMessage({
+        key: this.placementHints.get(s.message_id!) ?? null,
+        messageId: `poll:${s.message_id}:${s.id}`,
+        ready: () => this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s)),
       });
     }).catch(error => {
       console.error('Zulip event loop failed:', error);

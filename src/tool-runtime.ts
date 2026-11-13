@@ -398,8 +398,12 @@ export class ZulipToolRuntime {
   /** Views hide unavailable snapshots without writing across channel lanes. */
   private visibleMonitoredChannels(): Map<string, ChannelState> {
     if (!this.streamGate) return this.monitoredChannels;
-    return new Map([...this.monitoredChannels].filter(([name, state]) =>
-      this.streamGate!.fresh(state.streamId ?? this.streamGateId(name), state.readEpoch ?? 0)));
+    return new Map([...this.monitoredChannels].filter(([name, state]) => {
+      const id = state.streamId ?? this.streamGateId(name);
+      if (!this.streamGate!.fresh(id, state.readEpoch ?? 0)) return false;
+      this.streamGate!.assertFresh(id, state.readEpoch ?? 0);
+      return true;
+    }));
   }
   private streamGateId(name: string): number | undefined {
     return this.streamGate?.resolveName(name);
@@ -413,6 +417,20 @@ export class ZulipToolRuntime {
       return id!;
     }
     return this.streamGate.named(name);
+  }
+
+  /** Installed by the server; tools share the channel's writer/read lane. */
+  inMonitoringLane: <T>(key: ChannelKey, work: () => Promise<T>) => Promise<T> = (_key, work) => work();
+
+  private monitoringTurn<T>(name: string, work: () => Promise<T>): Promise<T> {
+    if (!this.streamGate) return work();
+    const gate = this.streamGate;
+    const id = gate.named(name);
+    const epoch = gate.checkpoint();
+    return this.inMonitoringLane(streamKey(id), async () => {
+      gate.assertFresh(id, epoch);
+      return work();
+    });
   }
 
   /** Reaction suppression for history rendering (the filters plane). */
@@ -585,29 +603,31 @@ export class ZulipToolRuntime {
 
         for (const channelName of channels) {
           try {
-            // Get latest message to establish baseline
-            const messages = await api.request<{ messages: any[] }>("GET", "/messages", `the newest message in #${channelName}`, {
-              anchor: "newest",
-              num_before: 1,
-              num_after: 0,
-              narrow: [["stream", this.monitoredOperand(channelName)]],
-            });
+            await this.monitoringTurn(channelName, async () => {
+              // Get latest message to establish baseline
+              const messages = await api.request<{ messages: any[] }>("GET", "/messages", `the newest message in #${channelName}`, {
+                anchor: "newest",
+                num_before: 1,
+                num_after: 0,
+                narrow: [["stream", this.monitoredOperand(channelName)]],
+              });
 
-            const lastMessageId = messages.messages.length > 0
-              ? messages.messages[0].id
-              : 0;
+              const lastMessageId = messages.messages.length > 0
+                ? messages.messages[0].id
+                : 0;
 
-            monitoredChannels.set(channelName, {
-              channelName,
-              ...(this.streamGate ? { streamId: this.streamGate.named(channelName), readEpoch: this.streamGate.checkpoint() } : {}),
-              lastReadMessageId: lastMessageId,
-              subscribed: true,
-            });
+              monitoredChannels.set(channelName, {
+                channelName,
+                ...(this.streamGate ? { streamId: this.streamGate.named(channelName), readEpoch: this.streamGate.checkpoint() } : {}),
+                lastReadMessageId: lastMessageId,
+                subscribed: true,
+              });
 
-            results.push({
-              channel: channelName,
-              status: "monitoring",
-              last_message_id: lastMessageId,
+              results.push({
+                channel: channelName,
+                status: "monitoring",
+                last_message_id: lastMessageId,
+              });
             });
           } catch (error) {
             results.push({
@@ -630,31 +650,21 @@ export class ZulipToolRuntime {
       case "stop_monitoring": {
         const channels: string[] = args.channels;
 
-        if (!channels || channels.length === 0) {
-          // Stop all monitoring
-          const stopped = Array.from(monitoredChannels.keys());
-          monitoredChannels.clear();
-          this.saveState();
-          return {
-            message: "Stopped monitoring all channels",
-            stopped_channels: stopped,
-          };
-        }
-
+        // Revoked snapshots stay retained until their lane-owned purge. Do
+        // not clear the raw map, even for "all", or report its hidden names.
+        const visible = this.visibleMonitoredChannels();
+        const stopAll = !channels || channels.length === 0;
         const stopped: string[] = [];
-        for (const channel of channels) {
-          if (monitoredChannels.has(channel)) {
-            monitoredChannels.delete(channel);
-            stopped.push(channel);
-          }
+        for (const channel of stopAll ? visible.keys() : channels) {
+          if (!visible.has(channel)) continue;
+          await this.monitoringTurn(channel, async () => {
+            if (monitoredChannels.delete(channel)) stopped.push(channel);
+          });
         }
-
         this.saveState();
-
-        return {
-          stopped_channels: stopped,
-          still_monitoring: Array.from(monitoredChannels.keys()),
-        };
+        return stopAll
+          ? { message: "Stopped monitoring all channels", stopped_channels: stopped }
+          : { stopped_channels: stopped, still_monitoring: [...this.visibleMonitoredChannels().keys()] };
       }
 
       case "listen": {
@@ -739,77 +749,79 @@ export class ZulipToolRuntime {
       }
 
       case "get_channel_history": {
-        // Parse dates
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const now = new Date();
+        return this.monitoringTurn(args.channel, async () => {
+          // Parse dates
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          const now = new Date();
 
-        const startDate = parseDate(args.start_date, today);
-        const endDate = parseDate(args.end_date, now);
-        const startTimestamp = Math.floor(startDate.getTime() / 1000);
-        const endTimestamp = Math.floor(endDate.getTime() / 1000);
+          const startDate = parseDate(args.start_date, today);
+          const endDate = parseDate(args.end_date, now);
+          const startTimestamp = Math.floor(startDate.getTime() / 1000);
+          const endTimestamp = Math.floor(endDate.getTime() / 1000);
 
-        // Build narrow filters
-        const narrow: any[] = [["stream", this.monitoredOperand(args.channel)]];
-        if (args.topic) {
-          narrow.push(["topic", args.topic]);
-        }
-
-        // Retrieve messages
-        const maxMessages = args.max_messages || 500;
-        const result = await api.request<{ messages: any[] }>("GET", "/messages", `history of #${args.channel}`, {
-          anchor: "newest",
-          num_before: maxMessages,
-          num_after: 0,
-          narrow: narrow,
-        });
-
-        // Filter by date range
-        const filteredMessages = result.messages.filter((msg: any) => {
-          return msg.timestamp >= startTimestamp && msg.timestamp <= endTimestamp;
-        });
-
-        // Auto-monitor: Start monitoring this channel if requested (default: true)
-        const autoMonitor = args.auto_monitor !== false;
-        let monitoringStatus = "not_monitored";
-
-        if (autoMonitor && result.messages.length > 0) {
-          const latestMessageId = Math.max(...result.messages.map((m: any) => m.id));
-
-          if (!monitoredChannels.has(args.channel)) {
-            monitoredChannels.set(args.channel, {
-              channelName: args.channel,
-            ...(this.streamGate ? { streamId: this.streamGate.named(args.channel), readEpoch: this.streamGate.checkpoint() } : {}),
-              lastReadMessageId: latestMessageId,
-              subscribed: true,
-            });
-            monitoringStatus = "started_monitoring";
-            this.saveState();
-          } else {
-            // Update last read
-            const state = monitoredChannels.get(args.channel)!;
-            state.lastReadMessageId = latestMessageId;
-            monitoringStatus = "updated_read_position";
-            this.saveState();
+          // Build narrow filters
+          const narrow: any[] = [["stream", this.monitoredOperand(args.channel)]];
+          if (args.topic) {
+            narrow.push(["topic", args.topic]);
           }
-        } else if (monitoredChannels.has(args.channel)) {
-          monitoringStatus = "already_monitored";
-        }
 
-        // Format output — suppressed reaction markers never reach the model, raw format included.
-        const format = args.format || "detailed";
-        const formattedOutput = formatMessages(stripSuppressedReactions(filteredMessages, this.reactionPolicy), format, this.messageIds);
+          // Retrieve messages
+          const maxMessages = args.max_messages || 500;
+          const result = await api.request<{ messages: any[] }>("GET", "/messages", `history of #${args.channel}`, {
+            anchor: "newest",
+            num_before: maxMessages,
+            num_after: 0,
+            narrow: narrow,
+          });
 
-        return {
-          channel: args.channel,
-          topic: args.topic,
-          start_date: startDate.toISOString(),
-          end_date: endDate.toISOString(),
-          message_count: filteredMessages.length,
-          total_retrieved: result.messages.length,
-          monitoring_status: monitoringStatus,
-          formatted_history: formattedOutput,
-        };
+          // Filter by date range
+          const filteredMessages = result.messages.filter((msg: any) => {
+            return msg.timestamp >= startTimestamp && msg.timestamp <= endTimestamp;
+          });
+
+          // Auto-monitor: Start monitoring this channel if requested (default: true)
+          const autoMonitor = args.auto_monitor !== false;
+          let monitoringStatus = "not_monitored";
+
+          if (autoMonitor && result.messages.length > 0) {
+            const latestMessageId = Math.max(...result.messages.map((m: any) => m.id));
+
+            if (!monitoredChannels.has(args.channel)) {
+              monitoredChannels.set(args.channel, {
+                channelName: args.channel,
+                ...(this.streamGate ? { streamId: this.streamGate.named(args.channel), readEpoch: this.streamGate.checkpoint() } : {}),
+                lastReadMessageId: latestMessageId,
+                subscribed: true,
+              });
+              monitoringStatus = "started_monitoring";
+              this.saveState();
+            } else {
+              // Update last read
+              const state = monitoredChannels.get(args.channel)!;
+              state.lastReadMessageId = latestMessageId;
+              monitoringStatus = "updated_read_position";
+              this.saveState();
+            }
+          } else if (monitoredChannels.has(args.channel)) {
+            monitoringStatus = "already_monitored";
+          }
+
+          // Format output — suppressed reaction markers never reach the model, raw format included.
+          const format = args.format || "detailed";
+          const formattedOutput = formatMessages(stripSuppressedReactions(filteredMessages, this.reactionPolicy), format, this.messageIds);
+
+          return {
+            channel: args.channel,
+            topic: args.topic,
+            start_date: startDate.toISOString(),
+            end_date: endDate.toISOString(),
+            message_count: filteredMessages.length,
+            total_retrieved: result.messages.length,
+            monitoring_status: monitoringStatus,
+            formatted_history: formattedOutput,
+          };
+        });
       }
 
       case "get_unread_messages": {
@@ -826,53 +838,55 @@ export class ZulipToolRuntime {
         const channelResults: any[] = [];
 
         for (const channelName of channelsToCheck) {
-          const state = monitoredChannels.get(channelName);
+          await this.monitoringTurn(channelName, async () => {
+            const state = monitoredChannels.get(channelName);
 
-          if (!state) {
-            channelResults.push({
-              channel: channelName,
-              status: "not_monitored",
-              unread_count: 0,
-            });
-            continue;
-          }
-
-          try {
-            // Get messages since last read
-            const result = await api.request<{ messages: any[] }>("GET", "/messages", `unread messages in #${channelName}`, {
-              anchor: "newest",
-              num_before: 200,
-              num_after: 0,
-              narrow: [["stream", this.monitoredOperand(channelName)]],
-            });
-
-            const unreadMessages = result.messages.filter((msg: any) =>
-              msg.id > state.lastReadMessageId
-            );
-
-            allUnreadMessages.push(...unreadMessages.map((msg: any) => ({
-              ...msg,
-              channel: channelName,
-            })));
-
-            // Update last read if mark_as_read is true
-            if (args.mark_as_read !== false && unreadMessages.length > 0) {
-              state.lastReadMessageId = Math.max(...unreadMessages.map((m: any) => m.id));
+            if (!state) {
+              channelResults.push({
+                channel: channelName,
+                status: "not_monitored",
+                unread_count: 0,
+              });
+              return;
             }
 
-            channelResults.push({
-              channel: channelName,
-              status: "checked",
-              unread_count: unreadMessages.length,
-              latest_message_id: unreadMessages.length > 0 ? unreadMessages[0].id : state.lastReadMessageId,
-            });
-          } catch (error) {
-            channelResults.push({
-              channel: channelName,
-              status: "error",
-              error: this.streamGate ? subscribedError(error) : error instanceof Error ? error.message : String(error),
-            });
-          }
+            try {
+              // Get messages since last read
+              const result = await api.request<{ messages: any[] }>("GET", "/messages", `unread messages in #${channelName}`, {
+                anchor: "newest",
+                num_before: 200,
+                num_after: 0,
+                narrow: [["stream", this.monitoredOperand(channelName)]],
+              });
+
+              const unreadMessages = result.messages.filter((msg: any) =>
+                msg.id > state.lastReadMessageId
+              );
+
+              allUnreadMessages.push(...unreadMessages.map((msg: any) => ({
+                ...msg,
+                channel: channelName,
+              })));
+
+              // Update last read if mark_as_read is true
+              if (args.mark_as_read !== false && unreadMessages.length > 0) {
+                state.lastReadMessageId = Math.max(...unreadMessages.map((m: any) => m.id));
+              }
+
+              channelResults.push({
+                channel: channelName,
+                status: "checked",
+                unread_count: unreadMessages.length,
+                latest_message_id: unreadMessages.length > 0 ? unreadMessages[0].id : state.lastReadMessageId,
+              });
+            } catch (error) {
+              channelResults.push({
+                channel: channelName,
+                status: "error",
+                error: this.streamGate ? subscribedError(error) : error instanceof Error ? error.message : String(error),
+              });
+            }
+          });
         }
 
         // Sort by timestamp

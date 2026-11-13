@@ -1,3 +1,4 @@
+import { AsyncResource } from 'node:async_hooks';
 import { subscribedError } from './tool-errors.js';
 import { StreamReadGate } from './stream-read-gate.js';
 /**
@@ -324,6 +325,7 @@ export class ZulipMcplServer {
         known: () => plane.subscriptions.status().known, ids: () => plane.subscriptions.status().streams.map(s => s.id),
       });
       this.tools.setStreamReadPolicy(this.streamGate);
+      this.tools.inMonitoringLane = (key, work) => this.inChannelLane(key, work);
       this.adapter.setStreamReadPolicy?.(this.streamGate);
       const policyIds = new Set(plane.subscriptions.status().streams.map(s => s.id));
       const changed = () => {
@@ -1187,6 +1189,7 @@ export class ZulipMcplServer {
   /** One message from the adapter: it enters its channel's lane, held until it is decided. */
   private onIncoming(entry: IncomingEntry): void {
     if (!this.lanes) return;
+    if (entry.key === null) return this.onUnplacedIncoming(entry);
     const key = entry.key;
     const lane = this.lanes.lane(key);
     const id = numericId(entry);
@@ -1211,6 +1214,38 @@ export class ZulipMcplServer {
       if (id !== null && (message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true) ctx.w.delivery.verifyReply(key, id);
       return this.route(ctx, message, newChannel);
     }, id === null ? { kind: 'other' } : { kind: 'message', id });
+  }
+
+  /** No routing hint: reserve every existing frontier before reading placement.
+   * Rare (a vote for a never-seen/evicted message); known votes use one lane.
+   * Each reservation routes in place, so later messages cannot overtake it.
+   */
+  private onUnplacedIncoming(entry: IncomingEntry): void {
+    const lanes = this.lanes!;
+    const keys = new Set([...lanes.keys(), ...this.directory.ids().map(streamKey)]);
+    const active = [...keys].filter(key => !lanes.lane(key).isEnded);
+    let remaining = active.length;
+    let resolve!: () => void;
+    const frontier = new Promise<void>(done => { resolve = done; });
+    if (remaining === 0) resolve();
+    const ready = frontier.then(() => entry.ready());
+    let handed = false;
+    if (active.length === 0) {
+      void ready.then(result => {
+        if (result) this.onIncoming({ ...entry, key: result.message.key, ready: async () => result });
+      }).catch(error => console.error('[zulip-mcp] unplaced event failed:', error));
+      return;
+    }
+    for (const key of active) lanes.lane(key).enter(async ctx => {
+      if (--remaining === 0) resolve();
+      const result = await ready;
+      if (!result || ctx.ended) return;
+      if (result.message.key === key) return this.route(ctx, result.message, result.newChannel);
+      if (!keys.has(result.message.key) && !handed) {
+        handed = true;
+        this.onIncoming({ ...entry, key: result.message.key, ready: async () => result });
+      }
+    });
   }
 
   private letGo(w: DeliveryWriter, key: ChannelKey, id: number): void {
@@ -2393,12 +2428,51 @@ export class ZulipMcplServer {
     return name;
   }
 
+  private inChannelLane<T>(key: ChannelKey, work: () => Promise<T>): Promise<T> {
+    return this.inChannelLanes([key], work);
+  }
+
+  private inChannelLanes<T>(keys: ChannelKey[], work: () => Promise<T>): Promise<T> {
+    if (!this.lanes || keys.length === 0) return work();
+    const lanes = keys.map(key => this.lanes!.lane(key));
+    if (lanes.some(lane => lane.isEnded)) return Promise.reject(new Error('Channel lane ended'));
+    // Reserve all turns synchronously in arrival order, never hold one lane
+    // while enqueueing another (which could deadlock with unplaced events).
+    // Keep the caller's read-set rather than inheriting a lane pump's scope.
+    const bound = AsyncResource.bind(work);
+    let remaining = lanes.length;
+    let resolve!: () => void;
+    const frontier = new Promise<void>(done => { resolve = done; });
+    const result = frontier.then(bound);
+    for (const lane of lanes) lane.enter(async () => {
+      if (--remaining === 0) resolve();
+      try { await result; } catch { /* propagated to the tool caller */ }
+    });
+    return result;
+  }
+
   /** Tools that read the server's own delivery state. undefined = not ours. */
   private visibleNames(names: string[]): string[] { return this.streamGate ? this.streamGate.visibleNames(names) : names; }
   private visibleChannelIds(ids: string[]): string[] {
     return ids.filter(id => isDmChannelId(id) || this.visibleNames([id.replace(/^zulip:/, '')]).length > 0);
   }
-  private async serverTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  private async serverTool(name: string, args: Record<string, unknown>, laneOwned = false): Promise<unknown> {
+    if (this.streamGate && !laneOwned) {
+      const gate = this.streamGate;
+      const channels = ['channel_missed', 'mute_channel', 'unmute_channel', 'set_reaction_visibility'].includes(name)
+        ? [this.channelIdArg(args.channel)]
+        : name === 'filters_update'
+          ? [...(Array.isArray(args.addStreams) ? args.addStreams : []), ...(Array.isArray(args.removeStreams) ? args.removeStreams : [])].map(value => this.channelIdArg(value))
+          : [];
+      const keys = [...new Set(channels.filter(id => !isDmChannelId(id)).map(id => streamKey(gate.named(id.slice('zulip:'.length)))))].sort();
+      if (keys.length) {
+        const epoch = gate.checkpoint();
+        return this.inChannelLanes(keys, () => {
+          for (const key of keys) gate.assertFresh(streamIdOfKey(key)!, epoch);
+          return this.serverTool(name, args, true);
+        });
+      }
+    }
     if (this.streamGate) {
       if (['filters_get', 'refresh_channels'].includes(name)) this.streamGate.requireKnown();
       if (['channel_missed', 'mute_channel', 'unmute_channel', 'set_reaction_visibility'].includes(name) && typeof args.channel === 'string' && !isDmChannelId(args.channel)) this.streamGate.named(args.channel.replace(/^zulip:/, '').replace(/^#/, ''));
@@ -2411,7 +2485,7 @@ export class ZulipMcplServer {
         return {
           streams: plane.subscriptions.mode === 'public' ? null : f.streams ? this.visibleNames(f.streams) : null,
           ...(plane.subscriptions.configured ? { streamsMode: plane.subscriptions.mode } : {}),
-          ...(this.streamGate ? { subscriptions: { ...plane.subscriptions.status(), streams: plane.subscriptions.status().streams.filter(s => this.streamGate!.allowed(s.id)) }, effectiveSubscribedStreams: plane.subscriptions.status().streams.filter(s => this.streamGate!.allowed(s.id)) } : {}),
+          ...(this.streamGate ? { subscriptions: { ...plane.subscriptions.status(), streams: this.streamGate.select(plane.subscriptions.status().streams, s => s.id) }, effectiveSubscribedStreams: this.streamGate.select(plane.subscriptions.status().streams, s => s.id) } : {}),
           dmUsers: f.dmUsers ?? null,
           mutedStreams: this.visibleNames(f.mutedStreams ?? []),
           reactionChannels: this.visibleChannelIds(f.reactionChannels ?? []),
@@ -2536,6 +2610,7 @@ export class ZulipMcplServer {
         const answer = await this.ids.keyOf(channelId);
         if ('refusal' in answer) throw new Error(answer.refusal);
         const key = 'key' in answer ? answer.key : null;
+        if (key !== null && !isDmKey(key)) this.streamGate?.assert(streamIdOfKey(key)!);
         const tally = key !== null ? this.delivery.tally(key) : undefined;
         const open = key !== null && this.channelManager.isKeyOpen(key);
         if (!tally) {
