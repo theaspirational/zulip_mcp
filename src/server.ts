@@ -1,3 +1,4 @@
+import { subscribedError } from './tool-errors.js';
 import { StreamReadGate } from './stream-read-gate.js';
 /**
  * ZulipMcplServer — the JSON-RPC main loop over an `McplConnection`.
@@ -728,12 +729,12 @@ export class ZulipMcplServer {
       }
     } catch (err) {
       if (err instanceof McplRpcError) {
-        conn.sendError(req.id, err.code, err.message, err.data);
+        conn.sendError(req.id, err.code, this.streamGate ? subscribedError(err, 'Read refused by subscribed-stream policy') : err.message, this.streamGate ? undefined : err.data);
         return;
       }
       const e = err as Error;
       console.error(`[zulip-mcp] handleRequest error: method=${req.method}`, e.stack ?? e.message);
-      conn.sendError(req.id, -32603, this.streamGate ? 'Read refused by subscribed-stream policy' : e.message ?? String(err));
+      conn.sendError(req.id, -32603, this.streamGate ? subscribedError(err, 'Read refused by subscribed-stream policy') : e.message ?? String(err));
     }
   }
 
@@ -1817,7 +1818,7 @@ export class ZulipMcplServer {
   private async callTool(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     if (!this.streamGate) return this.callGatedTool(name, args);
     try { return await this.streamGate.run(() => this.callGatedTool(name, args)); }
-    catch { return { content: [{ type: 'text', text: 'Read refused by subscribed-stream policy' }], isError: true }; }
+    catch (error) { return { content: [{ type: 'text', text: subscribedError(error, 'Read refused by subscribed-stream policy') }], isError: true }; }
   }
 
   private async callGatedTool(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
@@ -1848,7 +1849,7 @@ export class ZulipMcplServer {
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { content: [{ type: 'text' as const, text: this.streamGate ? 'Operation refused by subscribed-stream policy' : `Error: ${message}` }], isError: true };
+      return { content: [{ type: 'text' as const, text: this.streamGate ? subscribedError(error) : `Error: ${message}` }], isError: true };
     }
   }
 

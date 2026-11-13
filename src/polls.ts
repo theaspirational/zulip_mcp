@@ -1,3 +1,4 @@
+import { CallerValidationError } from './validation-errors.js';
 /** Wire format checked against Zulip 12.3 event_types.py, widget.py and validator.py.
  * Initial options use canned,N; added options use sender_id,idx.
  */
@@ -99,17 +100,17 @@ export function reconstructPoll(submessages: WidgetSubmessage[] = [], voterId?: 
 
 /** Keys and exact displayed text share a namespace: never guess on a collision. */
 export function resolvePollOption(state: PollState, value: unknown): PollOption {
-  if (typeof value !== 'string' || !value) throw new Error('option must be a nonempty option key or exact text');
+  if (typeof value !== 'string' || !value) throw new CallerValidationError('option must be a nonempty option key or exact text');
   const matches = [...state.options.values()].filter(o => o.key === value || o.text === value);
-  if (!matches.length) throw new Error('unknown poll option; use a key or exact text from get_poll_results');
-  if (matches.length !== 1) throw new Error('ambiguous poll option; use an unambiguous key from get_poll_results');
+  if (!matches.length) throw new CallerValidationError('unknown poll option; use a key or exact text from get_poll_results');
+  if (matches.length !== 1) throw new CallerValidationError('ambiguous poll option; use an unambiguous key from get_poll_results');
   return matches[0];
 }
 
 export function pollContent(question: unknown, options: unknown): string {
-  if (typeof question !== 'string' || !question.trim() || /[\r\n]/.test(question)) throw new Error('question must be a nonempty single line');
+  if (typeof question !== 'string' || !question.trim() || /[\r\n]/.test(question)) throw new CallerValidationError('question must be a nonempty single line');
   if (!Array.isArray(options) || options.length < 2 || options.some(o => typeof o !== 'string' || !o.trim() || /[\r\n]/.test(o))) {
-    throw new Error('options must contain at least two nonempty single-line strings');
+    throw new CallerValidationError('options must contain at least two nonempty single-line strings');
   }
   return `/poll ${question}\n${options.join('\n')}`;
 }

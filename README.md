@@ -642,3 +642,10 @@ routing hints, and fences asynchronous reads by immutable stream ID through
 final return—even across unsubscribe/regrant. `fetch_attachment` additionally
 requires the source `message_id`. `channels/open` never silently subscribes.
 See [read boundaries](docs/stream-read-emissions.md) for the surface inventory.
+
+Subscribed-mode tool errors distinguish policy from caller validation and
+transport failure. Malformed active message-link tokens fail before any POST
+and tell you to escape a literal with a backslash (`\[[msg:literal]]`), or put
+it in code. Upstream numeric-token backslash behavior is unchanged. Remote
+failures expose only safe Zulip code/HTTP status, network, timeout or internal
+categories—not response text, stream identities, topics or content.

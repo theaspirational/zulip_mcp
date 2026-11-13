@@ -1,5 +1,5 @@
 import { LEGACY_IDS, type MessageIds } from './message-ids.js';
-import { isRefusal, type ZulipApi, type ZulipRefusal, type ZulipSuccess } from './zulip-api.js';
+import { statusOfAnswer, isRefusal, type ZulipApi, type ZulipRefusal, type ZulipSuccess } from './zulip-api.js';
 import { withAttachmentLinks, type UploadedFile } from './uploads.js';
 import { blankLineAboveTables } from './tables.js';
 import { audienceOf, linkMessages, type Unlinkable } from './message-links.js';
@@ -22,9 +22,10 @@ export interface SendResult {
 }
 
 export class SendRefused extends Error {
+  readonly status?: number;
   constructor(readonly answer: ZulipRefusal) {
     super(answer.msg ?? answer.code ?? 'Zulip refused the message');
-    this.name = 'SendRefused';
+    this.name = 'SendRefused'; this.status = statusOfAnswer(answer);
   }
 }
 

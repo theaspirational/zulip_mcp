@@ -1,3 +1,4 @@
+import { CallerValidationError } from './validation-errors.js';
 /*
  * HASH_REPLACEMENTS, encodeHashComponent, the slug in streamSlug, and
  * MARKDOWN_SYNTAX with escapeMarkdownSyntax are ported from Zulip 12.4,
@@ -180,8 +181,14 @@ export function validateMessageLinks(text: string, ids: MessageIds = LEGACY_IDS,
     if (slashes % 2 && !/^[0-9]+$/.test(token.digits)) continue;
     if (ids.mode === 'legacy') {
       if (!/^[0-9]+$/.test(token.digits) || !Number.isSafeInteger(Number(token.digits)) || Number(token.digits) <= 0)
-        throw new Error('Invalid message-link token: use [[msg:ID]] with a positive message ID; escape a literal token with a backslash: \\[[msg:...]].');
-    } else ids.parse(token.digits, bare);
+        throw new CallerValidationError('Invalid message-link token: use [[msg:ID]] with a positive message ID; escape a literal token with a backslash: \\[[msg:...]].');
+    } else {
+      try { ids.parse(token.digits, bare); }
+      catch (error) {
+        if (!(error instanceof CallerValidationError)) throw error;
+        throw new CallerValidationError(`${error.message}. Escape a literal token with a backslash: \\[[msg:...]].`);
+      }
+    }
   }
 }
 
@@ -272,8 +279,8 @@ export type Unlinkable = 'refuse' | 'as-typed';
 
 /** One or more tokens can't become links; each reason names its token. */
 export class MessageLinkRefused extends Error {
-  constructor(readonly reasons: string[]) {
-    super(reasons.join(' '));
+  constructor(readonly reasons: string[], cause?: unknown) {
+    super(reasons.join(' '), cause === undefined ? undefined : { cause });
     this.name = 'MessageLinkRefused';
   }
 }
@@ -368,7 +375,7 @@ export async function linkMessages(
       // A tool call says what failed, and its caller adds that nothing was
       // sent: the preparation only reads. A plain answer reads no further
       // once Zulip doesn't answer, and posts the rest of its tokens as typed.
-      if (unlinkable === 'refuse') throw new MessageLinkRefused([`[[msg:${token.digits}]] can't become a link: ${String(err instanceof Error ? err.message : err).replace(/\.$/, '')}.`]);
+      if (unlinkable === 'refuse') throw new MessageLinkRefused([`[[msg:${token.digits}]] can't become a link: ${String(err instanceof Error ? err.message : err).replace(/\.$/, '')}.`], err);
       if (!(err instanceof ZulipNoAnswer)) throw err;
       outcomes.set(key, { digits: token.digits, outcome: null });
       answered = false;

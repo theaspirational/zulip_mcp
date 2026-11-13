@@ -1,3 +1,4 @@
+import { CallerValidationError } from './validation-errors.js';
 /** Agent boundary only. API calls, routing cursors and disk state remain numeric. */
 export type IdMode = 'legacy' | 'compat' | 'strict';
 const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -8,8 +9,8 @@ const ID_ARRAYS = new Set(['message_ids', 'messageIds', 'targetMessageIds']);
 
 export class MessageIds {
   constructor(readonly tag: string, readonly mode: IdMode = 'legacy') {
-    if (!TAG.test(tag) || tag !== tag.trim()) throw new Error('ZULIP_REALM_TAG must match [a-z0-9][a-z0-9_-]{0,63}');
-    if (!['legacy', 'compat', 'strict'].includes(mode)) throw new Error('ZULIP_ID_MODE must be legacy, compat or strict');
+    if (!TAG.test(tag) || tag !== tag.trim()) throw new CallerValidationError('ZULIP_REALM_TAG must match [a-z0-9][a-z0-9_-]{0,63}');
+    if (!['legacy', 'compat', 'strict'].includes(mode)) throw new CallerValidationError('ZULIP_ID_MODE must be legacy, compat or strict');
   }
 
   static fromEnv(realm: string, env: NodeJS.ProcessEnv = process.env): MessageIds {
@@ -24,20 +25,20 @@ export class MessageIds {
   }
 
   parse(value: unknown, bare?: () => void): number {
-    if (typeof value === 'string' && value !== value.trim()) throw new Error('message_id must be a positive safe integer or <tag>:<n>');
+    if (typeof value === 'string' && value !== value.trim()) throw new CallerValidationError('message_id must be a positive safe integer or <tag>:<n>');
     let numeric = value;
     if (typeof value === 'string' && value.includes(':')) {
       const match = /^([a-z0-9][a-z0-9_-]{0,63}):([0-9]+)$/.exec(value);
-      if (!match) throw new Error('message_id must be a positive safe integer or <tag>:<n>');
-      if (match[1] !== this.tag) throw new Error(`message_id tag "${match[1]}" differs from this server's "${this.tag}"; use the matching server`);
+      if (!match) throw new CallerValidationError('message_id must be a positive safe integer or <tag>:<n>');
+      if (match[1] !== this.tag) throw new CallerValidationError('message_id tag differs from this server; use the matching server');
       numeric = match[2];
     } else {
-      if (this.mode === 'strict') throw new Error(`bare message_id is refused; use ${this.tag}:<n>`);
+      if (this.mode === 'strict') throw new CallerValidationError(`bare message_id is refused; use ${this.tag}:<n>`);
       bare?.();
     }
     if ((typeof numeric !== 'number' && (typeof numeric !== 'string' || !/^[0-9]+$/.test(numeric))) ||
         !Number.isSafeInteger(Number(numeric)) || Number(numeric) <= 0) {
-      throw new Error('message_id must be a positive safe integer');
+      throw new CallerValidationError('message_id must be a positive safe integer');
     }
     return Number(numeric);
   }
