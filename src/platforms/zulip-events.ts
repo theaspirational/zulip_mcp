@@ -1,3 +1,4 @@
+import type { WidgetSubmessage } from '../polls.js';
 /**
  * Zulip Event Loop — Real-time message delivery via long-polling.
  *
@@ -125,7 +126,7 @@ export interface ZulipRetrieveResponse {
   events?: ({ id: number; type: string; message?: ZulipEventMessage; flags?: string[] }
     & Partial<ZulipReactionEvent>
     & Partial<ZulipUpdateMessageEvent>
-    & Partial<ZulipDeleteMessageEvent>)[];
+    & Partial<ZulipDeleteMessageEvent> & Partial<WidgetSubmessage> & { submessage_id?: number })[];
 }
 
 export interface ZulipEventLoopOptions {
@@ -204,10 +205,11 @@ export class ZulipEventLoop {
     onSystemEvent?: OnSystemEvent,
     onReaction?: OnZulipReaction,
     onChange?: OnZulipMessageChange,
+    onSubmessage?: (s: WidgetSubmessage) => void | Promise<void>,
   ): Promise<void> {
     while (!this.stopped) {
       try {
-        await this.pollLoop(api, onMessage, onSystemEvent, onReaction, onChange);
+        await this.pollLoop(api, onMessage, onSystemEvent, onReaction, onChange, onSubmessage);
       } catch (error) {
         if (this.stopped) return;
         console.error('Zulip event loop error, restarting in 5s:', error);
@@ -229,6 +231,7 @@ export class ZulipEventLoop {
     onSystemEvent?: OnSystemEvent,
     onReaction?: OnZulipReaction,
     onChange?: OnZulipMessageChange,
+    onSubmessage?: (s: WidgetSubmessage) => void | Promise<void>,
   ): Promise<void> {
     // Register event queue.
     // Zulip delivers exactly the registered types: without 'update_message'
@@ -243,7 +246,7 @@ export class ZulipEventLoop {
     // for them, keep the stream directory: the list's place among the events
     // is this queue's first event id.
     const registration = await api.requestAnswer<{ queue_id?: unknown; last_event_id: number; streams?: unknown }>('POST', '/register', {
-      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'stream'],
+      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'stream', 'submessage'],
       all_public_streams: true,
       apply_markdown: false,
       client_capabilities: { notification_settings_null: false, bulk_message_deletion: true },
@@ -340,6 +343,14 @@ export class ZulipEventLoop {
 
           if (event.type === 'stream') {
             this.directory?.applyEvent(event as ZulipStreamEvent);
+            continue;
+          }
+
+          if (event.type === 'submessage') {
+            if (onSubmessage && event.msg_type === 'widget') {
+              try { await onSubmessage({ id: event.submessage_id!, message_id: event.message_id, sender_id: event.sender_id!, msg_type: event.msg_type, content: event.content! }); }
+              catch { console.error('[zulip-mcp] poll event handler failed'); }
+            }
             continue;
           }
 

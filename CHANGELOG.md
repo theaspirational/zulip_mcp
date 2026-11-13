@@ -15,3 +15,4 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 
 - Add opt-in realm-tagged message IDs (`ZULIP_REALM_TAG`, `ZULIP_ID_MODE`).
 - Restore bounded active-topic hints on incoming events without replacing upstream `get_stream_topics`.
+- Port `send_poll`, `get_poll_results`, fresh-placement vote events, and `vote_poll` to upstream's native API; preserve feature-set and comms classifications.

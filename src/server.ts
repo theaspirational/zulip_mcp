@@ -245,6 +245,7 @@ export class ZulipMcplServer {
     this.attributeDelivery = options.attributeDelivery !== false;
     this.announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
     this.filters = options.filters ?? null;
+    if (this.filters) this.tools.setPollVoteFilters?.(this.filters);
     this.directory = options.directory ?? new StreamDirectory();
     this.ids = new ChannelIds(this.directory, (why) => this.adapter.refreshStreams?.(why) ?? Promise.resolve());
     const delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.directory);
@@ -1133,6 +1134,11 @@ export class ZulipMcplServer {
         return this.letGo(ctx.w, key, id);
       }
       const { message, newChannel } = ready;
+      if (message.key !== key) {
+        // Fresh poll placement may have moved while this lane was waiting.
+        this.onIncoming({ key: message.key, messageId: message.messageId, ready: async () => ready });
+        return;
+      }
       if (id !== null && (message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true) ctx.w.delivery.verifyReply(key, id);
       return this.route(ctx, message, newChannel);
     }, { kind: 'message', ...(id !== null ? { id } : {}) });
@@ -1175,6 +1181,17 @@ export class ZulipMcplServer {
     if (!this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) {
       ctx.decide(id);
       return ctx.w.delivery.hold(key, id, 'failed');
+    }
+
+    if (meta.pollVote === true) {
+      if (newChannel && this.ids.heldIdOf(key) === undefined) {
+        void this.channelManager.registerAdditional([newChannel]);
+        ctx.lane.enterFirst(c => this.route(c, message));
+        return;
+      }
+      if (this.channelManager.isKeyOpen(key)) ctx.w.channels.onIncomingMessage(key, message);
+      else if (meta.onOwnMessage === true) void this.pushEvent(message, `zulip_${message.messageId}`, meta);
+      return;
     }
 
     // A channel the host has never seen — a DM from someone new, or a stream
@@ -1399,6 +1416,7 @@ export class ZulipMcplServer {
         // names its author.
         ...(meta.attributed === true ? { attributed: true, attributionHeader: meta.attributionHeader } : {}),
         ...(missed ? { missedMessages: missed.messages, missedCharacters: missed.characters } : {}),
+        ...(Array.isArray(meta.activeTopics) ? { activeTopics: meta.activeTopics } : {}),
         ...extraOrigin,
       },
       tags: message.tags,
@@ -2772,7 +2790,7 @@ function numericId(m: { messageId: string }): number | null {
 /** The human sender of a real message; null for synthetic ones (system markers, reactions, catch-up blocks). */
 function senderOf(m: KeyedMessage): { id: number; email: string } | null {
   const meta = (typeof m.metadata === 'object' && m.metadata !== null ? m.metadata : {}) as Record<string, unknown>;
-  if (meta.system === true || meta.reaction === true || meta.missed === true || typeof meta.change === 'string') return null;
+  if (meta.system === true || meta.pollVote === true || meta.reaction === true || meta.missed === true || typeof meta.change === 'string') return null;
   const id = Number(m.author?.id);
   if (!Number.isFinite(id)) return null;
   return { id, email: typeof meta.senderEmail === 'string' ? meta.senderEmail : '' };

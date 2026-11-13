@@ -1,3 +1,4 @@
+import { PollLookups, PollUsers, reconstructPoll, applyPollUpdate, parsePollSubmessage, countPollDrop, type WidgetSubmessage } from '../polls.js';
 /**
  * ZulipAdapter — Zulip implementation of PlatformAdapter.
  *
@@ -235,6 +236,8 @@ export class ZulipAdapter implements PlatformAdapter {
   private listRead: Promise<boolean> | null = null;
   /** Messages just moved to a stream the bot cannot see, by id → when: the
    *  delete event Zulip sends for lost visibility is a vanishing, not a deletion. */
+  private readonly pollLookups = new PollLookups();
+  private readonly pollUsers = new PollUsers();
   private readonly activeTopics: ActiveTopicsCache;
   private readonly messageIds: MessageIds;
   private movedAway = new Map<number, number>();
@@ -1140,7 +1143,15 @@ export class ZulipAdapter implements PlatformAdapter {
         const placed = await this.keyFor(m, raw);
         if (placed !== null && current()) this.handOn(raw, m, placed, onMessage);
       });
-    }, onSystemEvent, reactionHandler, changeHandler).catch(error => {
+    }, onSystemEvent, reactionHandler, changeHandler, s => {
+      const known = this.seen.get(s.message_id!);
+      const enter = (key: ChannelKey) => onMessage({ key, messageId: `poll:${s.message_id}:${s.id}`, ready: () => this.onPollSubmessage(s) });
+      if (known && this.placing === 0) return enter(known.key);
+      this.inOrder(current, async () => {
+        const where = await this.locate(s.message_id!, "a poll vote");
+        if (where && current()) enter(where.key);
+      });
+    }).catch(error => {
       console.error('Zulip event loop failed:', error);
     });
   }
@@ -1224,6 +1235,35 @@ export class ZulipAdapter implements PlatformAdapter {
     // adapter-side memory.
     const newChannel = this.streamDescriptor(streamId);
     return { message: this.activeTopics.decorate(toIncoming(key, m, this.identity), streamId), ...(newChannel ? { newChannel } : {}) };
+  }
+
+  private async onPollSubmessage(s: WidgetSubmessage): Promise<{ message: KeyedMessage; newChannel?: ChannelDescriptor } | null> {
+    if (!Number.isSafeInteger(s.message_id) || s.message_id! <= 0 || !Number.isSafeInteger(s.id) || s.id <= 0) return null;
+    const update = parsePollSubmessage(s);
+    if (update?.type !== 'vote') return null;
+    void this.pollUsers.get(this.api);
+    // Each vote starts its own GET AFTER its event; no cached envelope can route it.
+    const message = await this.pollLookups.fetch(this.api, s.message_id!);
+    if (!message) return null;
+    const state = applyPollUpdate(reconstructPoll(message.submessages), update);
+    const option = state?.options.get(update.key);
+    if (!state || !option) { countPollDrop('unknown_poll_option'); return null; }
+    const m = normalizeMessage(message);
+    const key = await this.keyFor(m, message);
+    if (key === null) return null;
+    if (!m.isDm && (!this.streamAllowed(m.streamId!))) return null;
+    const voter = this.pollUsers.peek().get(update.voterId) ?? { name: `user ${update.voterId}`, email: '' };
+    if (m.isDm && !this.filters.dmAllowed({ id: update.voterId, email: voter.email })) return null;
+    const own = this.identity.selfUserId !== null && m.authorId === this.identity.selfUserId;
+    const descriptor = m.isDm ? this.describeDm(m) : this.streamDescriptor(m.streamId!) ?? undefined;
+    return { message: { key, messageId: `poll:${s.message_id}:${s.id}`, threadId: m.topic || undefined,
+      author: { id: String(update.voterId), name: voter.name }, timestamp: new Date().toISOString(),
+      content: [{ type: 'text', text: `[poll vote] ${voter.name} ${update.action === 'vote' ? 'voted' : 'unvoted'} '${option.text}' on poll ${this.messageIds.format(s.message_id!)} '${state.question}'` }],
+      tags: ['zulip:poll-vote', own ? 'chat:addressed' : 'chat:ambient'],
+      metadata: { pollVote: true, pollMessageId: s.message_id, optionKey: update.key, optionText: option.text,
+        voterId: update.voterId, action: update.action, question: state.question, onOwnMessage: own,
+        topic: m.topic, isDM: m.isDm, senderEmail: voter.email, attributed: true },
+    }, ...(descriptor ? { newChannel: descriptor } : {}) };
   }
 
   stopEvents(): void {
