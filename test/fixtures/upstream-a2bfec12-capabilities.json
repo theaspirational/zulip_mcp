@@ -1,0 +1,171 @@
+[
+  {
+    "version": "0.5",
+    "pushEvents": true,
+    "contextHooks": {
+      "beforeInference": {
+        "observe": false,
+        "inject": {
+          "system": false,
+          "beforeUser": true,
+          "afterUser": false
+        }
+      }
+    },
+    "featureSets": {
+      "zulip.messaging": {
+        "description": "Real-time Zulip message delivery and channel management",
+        "uses": [
+          "channels.register",
+          "channels.lifecycle",
+          "channels.publish",
+          "channels.incoming",
+          "channels.acknowledge",
+          "channels.streaming",
+          "pushEvents",
+          "tools"
+        ],
+        "rollback": true,
+        "tagOntology": {
+          "coreTags": [
+            "chat:addressed",
+            "chat:mention",
+            "chat:reply",
+            "chat:dm",
+            "chat:private",
+            "chat:ambient",
+            "chat:from-human",
+            "chat:from-bot",
+            "chat:reaction",
+            "chat:reaction-remove",
+            "chat:edited",
+            "chat:deleted",
+            "chat:has-image",
+            "chat:has-file"
+          ],
+          "tags": {
+            "zulip:moved": {
+              "desc": "A message the agent has seen moved to another topic or stream (with chat:edited).",
+              "facet": "lifecycle"
+            },
+            "zulip:wildcard-mention": {
+              "desc": "An @all / @everyone / @stream wildcard reached the bot; never counts as addressed.",
+              "facet": "addressing"
+            },
+            "zulip:missed": {
+              "desc": "Catch-up delivery of messages that arrived while the server was offline.",
+              "facet": "lifecycle"
+            }
+          },
+          "open": true
+        }
+      },
+      "zulip.history": {
+        "description": "Read back through Zulip stream history",
+        "uses": [
+          "tools"
+        ]
+      },
+      "zulip.context": {
+        "description": "Zulip message history injection before inference",
+        "uses": [
+          "contextHooks.beforeInference.inject.beforeUser"
+        ]
+      }
+    },
+    "channels": {
+      "register": true,
+      "lifecycle": true,
+      "publish": true,
+      "incoming": true,
+      "acknowledge": true,
+      "streaming": true,
+      "typing": false
+    }
+  },
+  {
+    "version": "0.5",
+    "pushEvents": true,
+    "contextHooks": {
+      "beforeInference": {
+        "observe": false,
+        "inject": {
+          "system": false,
+          "beforeUser": true,
+          "afterUser": false
+        }
+      }
+    },
+    "featureSets": {
+      "zulip.messaging": {
+        "description": "Real-time Zulip message delivery and channel management",
+        "uses": [
+          "channels.register",
+          "channels.lifecycle",
+          "channels.publish",
+          "channels.incoming",
+          "channels.acknowledge",
+          "channels.streaming",
+          "pushEvents",
+          "tools",
+          "channels.typing"
+        ],
+        "rollback": true,
+        "tagOntology": {
+          "coreTags": [
+            "chat:addressed",
+            "chat:mention",
+            "chat:reply",
+            "chat:dm",
+            "chat:private",
+            "chat:ambient",
+            "chat:from-human",
+            "chat:from-bot",
+            "chat:reaction",
+            "chat:reaction-remove",
+            "chat:edited",
+            "chat:deleted",
+            "chat:has-image",
+            "chat:has-file"
+          ],
+          "tags": {
+            "zulip:moved": {
+              "desc": "A message the agent has seen moved to another topic or stream (with chat:edited).",
+              "facet": "lifecycle"
+            },
+            "zulip:wildcard-mention": {
+              "desc": "An @all / @everyone / @stream wildcard reached the bot; never counts as addressed.",
+              "facet": "addressing"
+            },
+            "zulip:missed": {
+              "desc": "Catch-up delivery of messages that arrived while the server was offline.",
+              "facet": "lifecycle"
+            }
+          },
+          "open": true
+        }
+      },
+      "zulip.history": {
+        "description": "Read back through Zulip stream history",
+        "uses": [
+          "tools"
+        ]
+      },
+      "zulip.context": {
+        "description": "Zulip message history injection before inference",
+        "uses": [
+          "contextHooks.beforeInference.inject.beforeUser"
+        ]
+      }
+    },
+    "channels": {
+      "register": true,
+      "lifecycle": true,
+      "publish": true,
+      "incoming": true,
+      "acknowledge": true,
+      "streaming": true,
+      "typing": true
+    }
+  }
+]

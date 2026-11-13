@@ -1,3 +1,4 @@
+import { pollsEnabled } from './features.js';
 /**
  * Feature Set Declarations — MCPL 0.5 (SPEC §5.1, §6.1, §6.2).
  *
@@ -73,7 +74,6 @@ export const ZULIP_TAG_ONTOLOGY: TagOntology = {
     'chat:has-image', 'chat:has-file',
   ],
   tags: {
-    'zulip:poll-vote': { desc: 'A poll vote or unvote, with fresh message placement; data only.', facet: 'lifecycle' },
     'zulip:moved': {
       desc: 'A message the agent has seen moved to another topic or stream (with chat:edited).',
       facet: 'lifecycle',
@@ -112,7 +112,12 @@ export function buildFeatureSets(options: FeatureSetOptions): Record<string, Fea
       // §8.1: what this server sent since a checkpoint can be undone
       // (state/rollback deletes the bot's own messages).
       rollback: true,
-      tagOntology: ZULIP_TAG_ONTOLOGY,
+      tagOntology: pollsEnabled() ? {
+        ...ZULIP_TAG_ONTOLOGY,
+        tags: { ...ZULIP_TAG_ONTOLOGY.tags,
+          'zulip:poll-vote': { desc: 'A poll vote or unvote, with fresh message placement; data only.', facet: 'lifecycle' },
+        },
+      } : ZULIP_TAG_ONTOLOGY,
     },
     [HISTORY_FEATURE_SET]: {
       description: 'Read back through Zulip stream history',

@@ -2834,7 +2834,7 @@ export class ZulipMcplServer {
   private async channelsChangedWithHost(params: ChannelsChangedParams, timeoutMs = this.announceTimeoutMs): Promise<ChannelsRegisterResult | undefined> {
     const conn = this.conn;
     if (!conn) throw new Error('not connected');
-    params = { ...params, added: this.visibleDescriptors(params.added ?? []) };
+    if (this.streamGate && params.added) params = { ...params, added: this.visibleDescriptors(params.added) };
     const answer = this.outToHost(conn.sendRequest(method.CHANNELS_CHANGED, params, timeoutMs));
     for (const descriptor of params.added ?? []) {
       const key = this.ids.keyOfDescriptor(descriptor);

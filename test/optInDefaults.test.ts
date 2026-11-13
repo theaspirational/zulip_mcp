@@ -11,6 +11,7 @@ import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { ZulipAdapter } from '../src/platforms/zulip.ts';
 import { ZulipMcplServer } from '../src/server.ts';
 import { ZulipEventLoop } from '../src/platforms/zulip-events.ts';
+import { buildServerCapabilities } from '../src/feature-sets.ts';
 import { standInApi } from './zulip-stand-in.ts';
 
 function env(t: any, values: Record<string, string | undefined> = {}) {
@@ -115,4 +116,27 @@ test('queue registration and poll callbacks are opt-in independently of stream m
       assert.equal(delivered, polls ? 1 : 0);
     }
   }
+});
+
+
+test('default MCPL capabilities are byte-identical to base; poll ontology requires exactly 1', t => {
+  env(t);
+  const snapshot = readFileSync(new URL('./fixtures/upstream-a2bfec12-capabilities.json', import.meta.url), 'utf8');
+  for (const flag of [undefined, '0', 'true']) {
+    if (flag === undefined) delete process.env.ZULIP_POLLS; else process.env.ZULIP_POLLS = flag;
+    assert.equal(JSON.stringify([false, true].map(typing => buildServerCapabilities({ typing })), null, 2) + '\n', snapshot);
+  }
+  process.env.ZULIP_POLLS = '1';
+  const manifest = buildServerCapabilities({ typing: true }) as any;
+  assert.ok(manifest.featureSets['zulip.messaging'].tagOntology.tags['zulip:poll-vote']);
+});
+
+test('default channel change notifications preserve omitted optional fields', async t => {
+  env(t);
+  const { server } = fixture(t);
+  const expected = { removed: ['zulip:old'] };
+  let sent: unknown;
+  (server as any).conn = { sendRequest: async (_name: string, params: unknown) => { sent = params; return {}; } };
+  await (server as any).channelsChangedWithHost(expected);
+  assert.deepEqual(sent, expected);
 });
