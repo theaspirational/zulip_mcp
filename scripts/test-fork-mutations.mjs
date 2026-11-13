@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-const evidence = process.env.ORGASMIC_EVIDENCE_DIR ?? '.tmp/mutations';
+const evidence = process.env.FORK_MUTATION_EVIDENCE_DIR ?? '.tmp/mutations';
 mkdirSync(evidence, { recursive: true });
 const mutants = [
   {
