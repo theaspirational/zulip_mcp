@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { MessageIds } from '../src/message-ids.ts';
 import { FiltersPlane } from '../src/filters.ts';
 import { ZulipToolRuntime } from '../src/tool-runtime.ts';
 import { ZulipAdapter } from '../src/platforms/zulip.ts';
@@ -11,7 +12,7 @@ import { StreamDirectory } from '../src/stream-directory.ts';
 import { ZulipNoAnswer, zulipApi } from '../src/zulip-api.ts';
 import { CallerValidationError, StreamPolicyError, subscribedError } from '../src/tool-errors.ts';
 
-async function fixture(t: any) {
+async function fixture(t: any, messageIds?: MessageIds) {
   let posts = 0;
   let failure: unknown;
   const api = zulipApi(async (method, path) => {
@@ -25,7 +26,7 @@ async function fixture(t: any) {
   const filters = new FiltersPlane(join(dir, 'filters.json'), { ZULIP_STREAMS_MODE: 'subscribed' });
   t.after(() => filters.subscriptions.stop());
   const directory = new StreamDirectory(); directory.list([{ stream_id: 12, name: 'allowed' }]);
-  const tools = new ZulipToolRuntime({ api, selfUserId: 1, realm: 'https://alpha.example.invalid', authHeader: '', sessionId: 'test' }, dir);
+  const tools = new ZulipToolRuntime({ api, selfUserId: 1, realm: 'https://alpha.example.invalid', authHeader: '', sessionId: 'test' }, dir, { messageIds });
   const adapter = new ZulipAdapter(api, 1, 'test', { filters, directory });
   const server = new ZulipMcplServer(adapter, tools, { serverInfo: { name: 'test', version: '1' }, filters, directory });
   await filters.subscriptions.connect(api, 1);
@@ -38,10 +39,10 @@ async function fixture(t: any) {
 }
 
 test('unescaped nonnumeric message token reports validation with escape hint, not policy; zero POSTs', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, new MessageIds('alpha', 'compat'));
   for (const content of ['[[msg:not-a-number]]', '[[msg:]]']) {
     const error = await f.call('send_message', { type: 'stream', to: 'allowed', topic: 'neutral', content });
-    assert.match(error, /Invalid message-link token/);
+    assert.match(error, /message_id must be a positive safe integer/);
     assert.match(error, /backslash: \\\[/);
     assert.doesNotMatch(error, /subscribed-stream policy|not-a-number/);
   }
@@ -87,4 +88,12 @@ test('outer final recheck keeps the Read refusal text after revocation', async t
     return { content: [{ type: 'text', text: 'withhold' }] };
   };
   assert.equal(await f.call('fetch_history', { channel: 'allowed' }), 'Read refused by subscribed-stream policy');
+});
+
+test('policy errors survive nested wrapper fields and cycles without exposing remote text', () => {
+  const error = new StreamPolicyError('hidden stream secret');
+  assert.equal(subscribedError(new Error('outer', { cause: new Error('middle', { cause: error }) })), 'Operation refused by subscribed-stream policy');
+  assert.equal(subscribedError({ error: { originalError: { innerError: error } } }, 'Read refused by subscribed-stream policy'), 'Read refused by subscribed-stream policy');
+  const cycle: any = { error: new Error('secret') }; cycle.cause = cycle;
+  assert.equal(subscribedError(cycle), 'Error: internal error');
 });

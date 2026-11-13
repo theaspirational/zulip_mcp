@@ -76,7 +76,7 @@ import { messageLineHead } from './message-line.js';
 import { CHAT_TAGS } from '@animalabs/mcpl-core';
 import type { ReactionSummary } from './history.js';
 import { LEGACY_IDS, idToolDefinitions, type MessageIds } from './message-ids.js';
-import { toolDefinitions } from './tools.js';
+import { toolDefinitionsForEnv } from './tools.js';
 import { withToolClasses } from './tool-classes.js';
 import { toToolCallResult, type FollowSeen, type ToolCallResult, type ZulipToolRuntime } from './tool-runtime.js';
 
@@ -709,7 +709,7 @@ export class ZulipMcplServer {
 
         case 'tools/list':
           // MCPL RFC-008: each tool carries its class in _meta['mcpl/class'].
-          conn.sendResponse(req.id, { tools: withToolClasses(idToolDefinitions(toolDefinitions, this.messageIds)) });
+          conn.sendResponse(req.id, { tools: withToolClasses(idToolDefinitions(toolDefinitionsForEnv(process.env, this.filters?.subscriptions.mode), this.messageIds)) });
           break;
 
         case 'tools/call': {
@@ -2393,7 +2393,7 @@ export class ZulipMcplServer {
         const f = plane.current();
         return {
           streams: plane.subscriptions.mode === 'public' ? null : f.streams ? this.visibleNames(f.streams) : null,
-          streamsMode: plane.subscriptions.mode,
+          ...(plane.subscriptions.configured ? { streamsMode: plane.subscriptions.mode } : {}),
           ...(this.streamGate ? { subscriptions: { ...plane.subscriptions.status(), streams: plane.subscriptions.status().streams.filter(s => this.streamGate!.allowed(s.id)) }, effectiveSubscribedStreams: plane.subscriptions.status().streams.filter(s => this.streamGate!.allowed(s.id)) } : {}),
           dmUsers: f.dmUsers ?? null,
           mutedStreams: this.visibleNames(f.mutedStreams ?? []),

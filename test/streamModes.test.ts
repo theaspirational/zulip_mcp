@@ -175,3 +175,16 @@ test('subscribed mode preserves disabled active-topic hints', async t => {
   await turn();
   assert.equal(f.calls.filter(c => c.path.endsWith('/topics')).length, 0);
 });
+
+test('wrapped topic and message-link policy refusals survive tool preparation; zero writes', async t => {
+  const f = await fixture(t);
+  for (const [name, args] of [
+    ['get_stream_topics', { stream: 'hidden' }],
+    ['send_message', { type: 'stream', to: 'allowed', topic: 'neutral', content: '[[msg:8]]' }],
+  ] as const) {
+    const result = await (f.server as any).callTool(name, args);
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, 'Operation refused by subscribed-stream policy');
+  }
+  assert.equal(f.calls.filter(c => c.method !== 'GET').length, 0);
+});

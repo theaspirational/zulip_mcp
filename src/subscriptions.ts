@@ -24,6 +24,7 @@ export function parseStreamsMode(mode: string | undefined): StreamsMode {
 
 export class Subscriptions {
   readonly mode: StreamsMode;
+  readonly configured: boolean;
   private known = false;
   private streams = new Map<number, string>();
   private revision = 0;
@@ -36,6 +37,7 @@ export class Subscriptions {
 
   constructor(mode: string | undefined, private readonly options: { retryMs?: number; timeoutMs?: number } = {}) {
     this.mode = parseStreamsMode(mode);
+    this.configured = mode !== undefined;
   }
 
   allows(id: number | undefined): boolean {

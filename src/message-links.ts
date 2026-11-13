@@ -64,6 +64,7 @@ import { ZulipNoAnswer, isRefusal, type ZulipApi } from './zulip-api.js';
 
 // ── Where a token is ──
 
+const LEGACY_TOKEN = /\[\[msg:([0-9]+)\]\]/g;
 const TOKEN = /\[\[msg:([^\]\r\n]*)\]\]/g;
 const BACKTICK = /(?:(?<!\\)((?:\\{2})+)(?=`+)|(?<!\\)(`+)(.+?)(?<!`)\2(?!`))/gs;
 /** Zulip's MarkdownListPreprocessor.LI_RE (zerver/lib/markdown/__init__.py at tag 12.4). */
@@ -129,7 +130,7 @@ function inlineRuns(
  * and outside inline code. Zulip has no backslash escape for a bracket, so a
  * backslash before a token changes nothing.
  */
-function messageTokens(text: string): MessageToken[] {
+function messageTokens(text: string, legacy = false): MessageToken[] {
   if (!text.includes('[[msg:')) return [];
   const raw = text.split('\n');
   const starts: number[] = [];
@@ -160,7 +161,7 @@ function messageTokens(text: string): MessageToken[] {
   const tokens: MessageToken[] = [];
   let line = 0;
   let span = 0;
-  for (const m of text.matchAll(TOKEN)) {
+  for (const m of text.matchAll(legacy ? LEGACY_TOKEN : TOKEN)) {
     const start = m.index;
     const end = start + m[0].length;
     while (line + 1 < starts.length && starts[line + 1]! <= start) line += 1;
@@ -174,20 +175,16 @@ function messageTokens(text: string): MessageToken[] {
 
 /** Validate all active tokens before any destination lookup or upload. */
 export function validateMessageLinks(text: string, ids: MessageIds = LEGACY_IDS, bare?: () => void): void {
+  if (ids.mode === 'legacy') return;
   for (const token of messageTokens(text)) {
     // An odd backslash escapes a literal token; code spans were excluded by the scanner.
     let slashes = 0;
     for (let i = token.start - 1; i >= 0 && text[i] === '\\'; i--) slashes++;
     if (slashes % 2 && !/^[0-9]+$/.test(token.digits)) continue;
-    if (ids.mode === 'legacy') {
-      if (!/^[0-9]+$/.test(token.digits) || !Number.isSafeInteger(Number(token.digits)) || Number(token.digits) <= 0)
-        throw new CallerValidationError('Invalid message-link token: use [[msg:ID]] with a positive message ID; escape a literal token with a backslash: \\[[msg:...]].');
-    } else {
-      try { ids.parse(token.digits, bare); }
-      catch (error) {
-        if (!(error instanceof CallerValidationError)) throw error;
-        throw new CallerValidationError(`${error.message}. Escape a literal token with a backslash: \\[[msg:...]].`);
-      }
+    try { ids.parse(token.digits, bare); }
+    catch (error) {
+      if (!(error instanceof CallerValidationError)) throw error;
+      throw new CallerValidationError(`${error.message}. Escape a literal token with a backslash: \\[[msg:...]].`);
     }
   }
 }
@@ -303,7 +300,7 @@ export async function linkMessages(
   ids: MessageIds = LEGACY_IDS,
 ): Promise<string> {
   validateMessageLinks(text, ids);
-  const tokens = messageTokens(text).filter(token => {
+  const tokens = messageTokens(text, ids.mode === 'legacy').filter(token => {
     let slashes = 0;
     for (let i = token.start - 1; i >= 0 && text[i] === '\\'; i--) slashes++;
     return slashes % 2 === 0 || /^[0-9]+$/.test(token.digits);
@@ -359,7 +356,7 @@ export async function linkMessages(
     return { reason: `message ${id} is in a private stream, and a link would show that stream's and topic's names to this conversation's readers` };
   };
 
-  const keyOf = (digits: string) => ids.mode === 'legacy' ? digits : ids.parse(digits);
+  const keyOf = (digits: string) => ids.mode === 'legacy' ? (Number.isSafeInteger(Number(digits)) ? Number(digits) : digits) : ids.parse(digits);
   const outcomes = new Map<number | string, { digits: string; outcome: Outcome | null }>();
   let answered = true;
   for (const token of tokens) {

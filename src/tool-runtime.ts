@@ -1,3 +1,4 @@
+import { toolEnabled } from './features.js';
 import { CallerValidationError, StreamPolicyError, subscribedError } from './tool-errors.js';
 import type { StreamReadGate } from './stream-read-gate.js';
 /**
@@ -542,6 +543,7 @@ export class ZulipToolRuntime {
   }
 
   private async handleScopedCall(name: string, args: any): Promise<any> {
+    if (!toolEnabled(name)) throw new Error(`Unknown tool: ${name}`);
     this.purgeUnavailable();
     args = { ...(args ?? {}) };
     let warned = false;

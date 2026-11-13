@@ -71,3 +71,34 @@ test('invalid realm config fails before profile, settings or password exchange',
   await assert.rejects(initializeZulipClient({ ZULIP_REALM: 'https://alpha.example.invalid', ZULIP_EMAIL: 'bot@example.invalid', ZULIP_PASSWORD: 'test', ZULIP_ID_MODE: 'bad' }), /ZULIP_ID_MODE/);
   assert.equal(calls, 0);
 });
+
+test('channel publishing enforces realm tokens before any GET, POST or upload', async t => {
+  const { ZulipAdapter } = await import('../src/platforms/zulip.ts');
+  const { StreamDirectory } = await import('../src/stream-directory.ts');
+  const { streamKey } = await import('../src/channel-key.ts');
+  for (const mode of ['strict', 'compat'] as const) {
+    const { api, calls } = standInApi({
+      'GET /messages/:id': { result: 'success', message },
+      'POST /messages': { result: 'success', id: 8 },
+    });
+    const directory = new StreamDirectory(); directory.list([{ stream_id: 12, name: 'general' }]);
+    let uploads = 0;
+    const adapter = new ZulipAdapter(api, 1, 'test', {
+      directory, messageIds: new MessageIds('alpha', mode),
+      uploader: { upload: async () => { uploads++; throw new Error('unexpected upload'); } } as any,
+      uploadPolicy: { maxBytes: 10000, maxTotalBytes: 10000, maxCount: 4, roots: new Map() },
+    });
+    const publish = (text: string) => adapter.publish(streamKey(12), undefined, [{ type: 'text', text }]);
+    await assert.rejects(adapter.publish(streamKey(12), undefined, [{ type: 'text', text: '[[msg:beta:7]]' }, { type: 'image', mimeType: 'image/png', data: 'aGVsbG8=' }]), /differs/);
+    if (mode === 'strict') await assert.rejects(publish('[[msg:7]]'), /bare/);
+    assert.equal(calls.length, 0, 'invalid tokens trigger no reads or writes');
+    assert.equal(uploads, 0);
+    for (const token of mode === 'strict' ? ['[[msg:alpha:7]]'] : ['[[msg:7]]', '[[msg:alpha:7]]']) {
+      const result = await publish(token);
+      assert.equal(result.delivered, true);
+      assert.equal(calls.at(-1)?.method, 'POST');
+      assert.match(String(calls.at(-1)?.params.content), /near\/7/);
+    }
+    assert.equal(calls.filter(c => c.method !== 'GET').length, mode === 'strict' ? 1 : 2);
+  }
+});

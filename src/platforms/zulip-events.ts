@@ -1,3 +1,4 @@
+import { pollsEnabled } from '../features.js';
 import type { SubscriptionEvent, StreamsMode } from '../subscriptions.js';
 import type { WidgetSubmessage } from '../polls.js';
 /**
@@ -255,7 +256,9 @@ export class ZulipEventLoop {
     // is this queue's first event id.
     this.options.beforeRegister?.();
     const registration = await api.requestAnswer<{ queue_id?: unknown; last_event_id: number; streams?: unknown }>('POST', '/register', {
-      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'stream', 'submessage', 'subscription'],
+      event_types: ['message', 'reaction', 'update_message', 'delete_message', 'stream',
+        ...(pollsEnabled() ? ['submessage'] : []),
+        ...(['subscribed', 'public'].includes(this.options.streamsMode ?? '') ? ['subscription'] : [])],
       all_public_streams: this.options.streamsMode !== 'subscribed',
       apply_markdown: false,
       client_capabilities: { notification_settings_null: false, bulk_message_deletion: true },
@@ -360,7 +363,7 @@ export class ZulipEventLoop {
           }
 
           if (event.type === 'submessage') {
-            if (onSubmessage && event.msg_type === 'widget') {
+            if (pollsEnabled() && onSubmessage && event.msg_type === 'widget') {
               try { await onSubmessage({ readEpoch, id: event.submessage_id!, message_id: event.message_id, sender_id: event.sender_id!, msg_type: event.msg_type, content: event.content! }); }
               catch { console.error('[zulip-mcp] poll event handler failed'); }
             }

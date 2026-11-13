@@ -1,3 +1,5 @@
+import { pollsEnabled } from '../features.js';
+import { validateMessageLinks } from '../message-links.js';
 import type { StreamReadGate } from '../stream-read-gate.js';
 import { PollLookups, PollUsers, reconstructPoll, applyPollUpdate, parsePollSubmessage, countPollDrop, type WidgetSubmessage } from '../polls.js';
 /**
@@ -257,9 +259,9 @@ export class ZulipAdapter implements PlatformAdapter {
     sessionId: string,
     options: ZulipAdapterOptions = {},
   ) {
-    this.activeTopicsConfig = options;
+    this.activeTopicsConfig = { ...options, activeTopics: process.env.ZULIP_ACTIVE_TOPICS === '1' ? options.activeTopics ?? 6 : 0 };
     this.originalApi = api;
-    this.activeTopics = new ActiveTopicsCache(this.api, options.activeTopics, Date.now, options.activeTopicsTtlMs);
+    this.activeTopics = new ActiveTopicsCache(this.api, this.activeTopicsConfig.activeTopics, Date.now, options.activeTopicsTtlMs);
     this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.identity = { selfUserId, sessionId };
     this.backscrollDefault = options.backscrollDefault ?? DEFAULT_BACKSCROLL;
@@ -806,6 +808,7 @@ export class ZulipAdapter implements PlatformAdapter {
       .filter((c): c is TextContent => c.type === 'text')
       .map(c => c.text)
       .join('\n');
+    validateMessageLinks(textContent, this.messageIds);
     // Image and audio blocks ride along as uploads, linked after the text
     // (Zulip's own attachment form). Uploads happen before the send, so a
     // failed upload fails the publish whole; a send that fails after them
@@ -846,6 +849,7 @@ export class ZulipAdapter implements PlatformAdapter {
     try {
       const { chunks } = await sendMessage(this.api, destination, textContent, {
         limit: this.maxMessageLength,
+        messageIds: this.messageIds,
         unlinkable: 'as-typed',
         ...(upload ? { upload } : {}),
         onChunk: (chunk) => {
@@ -1318,6 +1322,7 @@ export class ZulipAdapter implements PlatformAdapter {
 
   private async onPollSubmessage(s: WidgetSubmessage): Promise<{ message: KeyedMessage; newChannel?: ChannelDescriptor } | null> {
     if (!Number.isSafeInteger(s.message_id) || s.message_id! <= 0 || !Number.isSafeInteger(s.id) || s.id <= 0) return null;
+    if (!pollsEnabled()) return null;
     const epoch = s.readEpoch ?? this.streamGate?.checkpoint();
     const update = parsePollSubmessage(s);
     if (update?.type !== 'vote') return null;

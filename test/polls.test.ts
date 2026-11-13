@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -99,3 +99,8 @@ test('poll voting respects stream/DM visibility and muted streams', async t => {
   await assert.rejects(f.tools.handleToolCall('vote_poll', { message_id: 'alpha:77', option: 'Yes' }), /DM read policy/);
   assert.equal(f.calls.filter(c => c.method === 'POST').length, 0);
 });
+
+// These tests explicitly exercise the opt-in surface, never the default one.
+const previousFlag = process.env.ZULIP_POLLS;
+before(() => { process.env.ZULIP_POLLS = '1'; });
+after(() => { if (previousFlag === undefined) delete process.env.ZULIP_POLLS; else process.env.ZULIP_POLLS = previousFlag; });

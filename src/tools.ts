@@ -1,3 +1,4 @@
+import { toolEnabled } from './features.js';
 /**
  * MCP tool definitions for the Zulip server. Handlers live in tool-runtime.ts.
  */
@@ -575,7 +576,6 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        message_id: { type: "number", description: "Source message ID; required for subscribed-mode attachment provenance." },
         path: {
           type: "string",
           description: "Attachment path (e.g. '/user_uploads/2/Ab/cd/screenshot.png') or full Zulip URL.",
@@ -586,10 +586,12 @@ export const toolDefinitions: ToolDefinition[] = [
   },
 ];
 
+const optionalToolDefinitions: ToolDefinition[] = [];
+
 // Share the send destination contract, but never expose attachments/content:
 // a poll is one exact /poll message, not chunked Markdown.
 const sendDestination = toolDefinitions.find(t => t.name === 'send_message')!.inputSchema.properties as Record<string, unknown>;
-toolDefinitions.push({
+optionalToolDefinitions.push({
   name: 'send_poll',
   description: 'Send a Zulip /poll with a question and at least two options. Destination and receipt match send_message (stream/topic, reply_to, or private DM). Poll votes arrive as data-only zulip:poll-vote events; votes on this bot’s polls are addressed. Polls cannot be split.',
   inputSchema: {
@@ -607,7 +609,7 @@ toolDefinitions.push({
   inputSchema: { type: 'object', properties: { message_id: { type: 'number', description: 'Poll message ID.' } }, required: ['message_id'] },
 });
 
-toolDefinitions.push({
+optionalToolDefinitions.push({
   name: 'vote_poll',
   description: 'Vote in any readable Zulip poll (including human or other bot polls). Use an option key or exact text from get_poll_results; ambiguous or unknown options fail without voting. Omit vote to toggle this bot’s vote, or set true/false for explicit state. Returns message_id, key, text and vote (this bot’s resulting boolean state).',
   inputSchema: {
@@ -620,3 +622,15 @@ toolDefinitions.push({
     required: ['message_id', 'option'],
   },
 });
+
+/** Subscribed reads need attachment provenance; other modes keep the upstream schema. */
+export function toolDefinitionsForEnv(env: NodeJS.ProcessEnv = process.env, streamsMode = env.ZULIP_STREAMS_MODE): ToolDefinition[] {
+  const definitions = [...toolDefinitions, ...optionalToolDefinitions.filter(t => toolEnabled(t.name, env))];
+  if (streamsMode !== 'subscribed') return definitions;
+  return definitions.map(t => t.name !== 'fetch_attachment' ? t : {
+    ...t, inputSchema: { ...t.inputSchema, properties: {
+      ...(t.inputSchema.properties as Record<string, unknown>),
+      message_id: { type: 'number', description: 'Source message ID; required for subscribed-mode attachment provenance.' },
+    } },
+  });
+}
