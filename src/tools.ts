@@ -548,6 +548,7 @@ export const toolDefinitions: ToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
+        message_id: { type: "number", description: "Source message ID; required for subscribed-mode attachment provenance." },
         path: {
           type: "string",
           description: "Attachment path (e.g. '/user_uploads/2/Ab/cd/screenshot.png') or full Zulip URL.",

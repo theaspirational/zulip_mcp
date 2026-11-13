@@ -103,6 +103,12 @@ export class DeliveryState {
     if (this.unresolved.size > 0) void this.directory.whenFilled().then(() => this.resolveByName());
   }
 
+  purgeUnavailable(allows: (key: ChannelKey) => boolean): void {
+    for (const map of [this.watermarks, this.missed, this.held, this.reached]) for (const key of map.keys()) if (!allows(key)) map.delete(key);
+    for (const key of this.lastOpen) if (!allows(key)) this.lastOpen.delete(key);
+    this.unresolved.clear();
+  }
+
   private file(): string | null {
     return this.stateDir ? join(this.stateDir, `${this.sessionId}.delivery.json`) : null;
   }

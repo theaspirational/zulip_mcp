@@ -628,3 +628,17 @@ for placement and content, including after a move. Bounded lookup budgets drop
 notifications on failure rather than trusting cached placement. Poll events do
 not move conversation routing hints or history watermarks. User names fall
 back to `user <id>` when the directory is unavailable.
+
+### Stream scope modes
+
+`ZULIP_STREAMS_MODE=list` (default) keeps upstream allowlist behavior.
+`subscribed` confines stream reads/delivery to current subscriptions, intersected
+with the stream allowlist and mutes; unknown membership fails closed. `public`
+ignores the stream list but keeps mutes and DM restrictions. Public mode cannot
+promise complete live coverage of unsubscribed streams.
+
+Subscribed mode purges revoked stream caches, queued events, monitoring and
+routing hints, and fences asynchronous reads by immutable stream ID through
+final return—even across unsubscribe/regrant. `fetch_attachment` additionally
+requires the source `message_id`. `channels/open` never silently subscribes.
+See [read boundaries](docs/stream-read-emissions.md) for the surface inventory.

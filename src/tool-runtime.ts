@@ -1,3 +1,4 @@
+import type { StreamReadGate } from './stream-read-gate.js';
 /**
  * Tool handlers and MCP resources — the stateful tool layer of this server.
  *
@@ -16,6 +17,7 @@ import { homedir } from "node:os";
 import type { ContentBlock } from "@animalabs/mcpl-core";
 import {
   cleanContent,
+  extractZulipAttachments,
   fetchAttachmentBytes,
   parseZulipAttachmentUrl,
   toFetchResult,
@@ -82,6 +84,8 @@ export function stripSuppressedReactions<T extends { reactions?: unknown }>(mess
 }
 
 export interface ChannelState {
+  streamId?: number;
+  readEpoch?: number;
   channelName: string;
   lastReadMessageId: number | string;
   subscribed: boolean;
@@ -229,7 +233,8 @@ export function toToolCallResult(result: unknown): ToolCallResult {
 
 export class ZulipToolRuntime {
   readonly messageIds: MessageIds;
-  private readonly api: ZulipApi;
+  private api: ZulipApi;
+  private streamGate?: StreamReadGate;
   private readonly sessionId: string;
   private readonly monitoredChannels = new Map<string, ChannelState>();
 
@@ -247,6 +252,7 @@ export class ZulipToolRuntime {
    *  they can be registered without waiting for a refresh or an event (#20).
    *  Awaited, and its result is reported by `listen`: an announcement the
    *  host did not confirm is the agent's business, not a stderr line. */
+  onSubscriptionChanged: (() => Promise<void>) | null = null;
   onSubscribed: ((streams: string[]) => SubscriptionRegistration | Promise<SubscriptionRegistration | void> | void) | null = null;
 
   private pollVoteFilters?: { streamAllowed(name: string): boolean; streamMuted(name: string): boolean; dmAllowed(user: { id: number; email: string }): boolean };
@@ -304,6 +310,27 @@ export class ZulipToolRuntime {
     if (Array.isArray(args.attachments) && args.attachments.length === 0) return [];
     const uploader = this.requireUploader();
     return uploadPrepared(uploader, await prepareAttachments(args.attachments, this.uploadPolicy), this.uploadPolicy);
+  }
+
+  setStreamReadPolicy(gate: StreamReadGate): void {
+    this.streamGate = gate; this.api = gate.api(this.api);
+    // Persisted names are not identity or read authority. Resolve after fresh membership arrives.
+  }
+  purgeUnavailable(): void {
+    if (!this.streamGate) return;
+    for (const [name, state] of this.monitoredChannels) {
+      if (state.streamId === undefined) state.streamId = this.streamGate.allowed(this.streamGateId(name)) ? this.streamGateId(name) : undefined;
+      if (state.streamId === undefined || !this.streamGate.fresh(state.streamId, state.readEpoch)) this.monitoredChannels.delete(name);
+    }
+  }
+  private streamGateId(name: string): number | undefined {
+    try { return this.streamGate?.named(name); } catch { return undefined; }
+  }
+  private monitoredOperand(name: string): string | number {
+    if (!this.streamGate) return name;
+    const state = this.monitoredChannels.get(name);
+    if (state) { this.streamGate.assertFresh(state.streamId, state.readEpoch ?? this.streamGate.checkpoint()); return state.streamId!; }
+    return this.streamGate.named(name);
   }
 
   /** Reaction suppression for history rendering (the filters plane). */
@@ -422,7 +449,7 @@ export class ZulipToolRuntime {
 
       const state: SessionState = {
         sessionId: this.sessionId,
-        monitoredChannels: Object.fromEntries(this.monitoredChannels),
+        monitoredChannels: Object.fromEntries([...this.monitoredChannels].map(([name, { readEpoch: _epoch, ...state }]) => [name, state])),
       };
 
       writeFileSync(this.stateFile(), JSON.stringify(state, null, 2));
@@ -435,13 +462,18 @@ export class ZulipToolRuntime {
 
   /** Execute a tool. Returns the raw handler result; see toToolCallResult. */
   async handleToolCall(name: string, args: any): Promise<any> {
+    return this.streamGate ? this.streamGate.run(() => this.handleScopedCall(name, args)) : this.handleScopedCall(name, args);
+  }
+
+  private async handleScopedCall(name: string, args: any): Promise<any> {
+    this.purgeUnavailable();
     args = { ...(args ?? {}) };
     let warned = false;
     const warning = `Warning: bare message_id accepted; use ${this.messageIds.tag}:<n>.`;
     const bare = () => { if (!warned) { warned = true; console.error(`[zulip-mcp] ${warning}`); } };
     if (this.messageIds.mode !== 'legacy') {
       const fields = ['send_message', 'send_poll'].includes(name) ? ['reply_to'] : name === 'fetch_history' ? ['before', 'after']
-        : ['edit_message', 'move_messages', 'delete_message', 'add_reaction', 'remove_reaction', 'fetch_around', 'get_poll_results', 'vote_poll'].includes(name) ? ['message_id'] : [];
+        : ['edit_message', 'move_messages', 'delete_message', 'add_reaction', 'remove_reaction', 'fetch_around', 'get_poll_results', 'vote_poll', 'fetch_attachment'].includes(name) ? ['message_id'] : [];
       for (const field of fields) if (args[field] !== undefined) args[field] = this.messageIds.parse(args[field], bare);
     }
     if (['send_message', 'send_dm', 'edit_message'].includes(name) && typeof args.content === 'string') validateMessageLinks(args.content, this.messageIds, bare);
@@ -451,6 +483,10 @@ export class ZulipToolRuntime {
 
   private async handleValidatedCall(name: string, args: any): Promise<any> {
     const api = this.api;
+    if (this.streamGate && ["start_monitoring", "get_channel_history", "get_unread_messages"].includes(name)) {
+      const channels = args.channels ?? (args.channel ? [args.channel] : [...this.monitoredChannels.keys()]);
+      for (const channel of channels) this.monitoredOperand(channel);
+    }
     const monitoredChannels = this.monitoredChannels;
     args = args ?? {};
 
@@ -466,7 +502,7 @@ export class ZulipToolRuntime {
               anchor: "newest",
               num_before: 1,
               num_after: 0,
-              narrow: [["stream", channelName]],
+              narrow: [["stream", this.monitoredOperand(channelName)]],
             });
 
             const lastMessageId = messages.messages.length > 0
@@ -475,6 +511,7 @@ export class ZulipToolRuntime {
 
             monitoredChannels.set(channelName, {
               channelName,
+              ...(this.streamGate ? { streamId: this.streamGate.named(channelName), readEpoch: this.streamGate.checkpoint() } : {}),
               lastReadMessageId: lastMessageId,
               subscribed: true,
             });
@@ -545,6 +582,7 @@ export class ZulipToolRuntime {
           // A stream the bot just joined is not in the host's channel list
           // yet; registering it here is what makes it openable without a
           // refresh or a restart (#20).
+          if (result.result === "success") await this.onSubscriptionChanged?.();
           const unauthorized: string[] = Array.isArray(result?.unauthorized) ? result.unauthorized : [];
           const joined = channels.filter((name) => !unauthorized.includes(name));
           const registration = result?.result === "success" && joined.length > 0
@@ -586,6 +624,7 @@ export class ZulipToolRuntime {
           const result = await api.requestAnswer<any>("DELETE", "/users/me/subscriptions", {
             subscriptions: channels,
           });
+          if (result.result === "success") await this.onSubscriptionChanged?.();
           return {
             result: result?.result,
             removed: result?.removed ?? [],
@@ -623,7 +662,7 @@ export class ZulipToolRuntime {
         const endTimestamp = Math.floor(endDate.getTime() / 1000);
 
         // Build narrow filters
-        const narrow: any[] = [["stream", args.channel]];
+        const narrow: any[] = [["stream", this.monitoredOperand(args.channel)]];
         if (args.topic) {
           narrow.push(["topic", args.topic]);
         }
@@ -652,6 +691,7 @@ export class ZulipToolRuntime {
           if (!monitoredChannels.has(args.channel)) {
             monitoredChannels.set(args.channel, {
               channelName: args.channel,
+            ...(this.streamGate ? { streamId: this.streamGate.named(args.channel), readEpoch: this.streamGate.checkpoint() } : {}),
               lastReadMessageId: latestMessageId,
               subscribed: true,
             });
@@ -715,7 +755,7 @@ export class ZulipToolRuntime {
               anchor: "newest",
               num_before: 200,
               num_after: 0,
-              narrow: [["stream", channelName]],
+              narrow: [["stream", this.monitoredOperand(channelName)]],
             });
 
             const unreadMessages = result.messages.filter((msg: any) =>
@@ -1119,6 +1159,13 @@ export class ZulipToolRuntime {
         // dot-segment normalization invariant) lives in parseZulipAttachmentUrl.
         const url = parseZulipAttachmentUrl(String(args.path || ""), this.session.realm);
 
+        if (this.streamGate) {
+          const id = positiveIdArg('message_id', args.message_id);
+          const { message } = await api.request<{ message?: any }>('GET', `/messages/${id}`, 'attachment provenance', { apply_markdown: false });
+          if (message?.id !== id || !extractZulipAttachments(message.content ?? '').some(ref => {
+            try { return parseZulipAttachmentUrl(ref.path, this.session.realm).href === url.href; } catch { return false; }
+          })) throw new Error('Attachment read refused by subscribed-stream policy: attachment not in message');
+        }
         const headers: Record<string, string> = {};
         if (this.session.authHeader) headers["Authorization"] = this.session.authHeader;
         const name = decodeURIComponent(url.pathname.split("/").pop() || "attachment");
@@ -1195,6 +1242,7 @@ export class ZulipToolRuntime {
   // ── Resources ──
 
   listResources(): ResourceDescriptor[] {
+    this.purgeUnavailable();
     const resources: ResourceDescriptor[] = [
       {
         uri: "zulip://unread/summary",
@@ -1224,6 +1272,10 @@ export class ZulipToolRuntime {
   }
 
   async readResource(uri: string): Promise<ResourceContents> {
+    this.purgeUnavailable();
+    return this.streamGate ? this.streamGate.run(() => this.readScopedResource(uri)) : this.readScopedResource(uri);
+  }
+  private async readScopedResource(uri: string): Promise<ResourceContents> {
     const api = this.api;
     const monitoredChannels = this.monitoredChannels;
 
@@ -1238,7 +1290,7 @@ export class ZulipToolRuntime {
             anchor: "newest",
             num_before: 50,
             num_after: 0,
-            narrow: [["stream", channelName]],
+            narrow: [["stream", this.monitoredOperand(channelName)]],
           });
 
           const unread = result.messages.filter((msg: any) => msg.id > state.lastReadMessageId);
@@ -1288,7 +1340,7 @@ export class ZulipToolRuntime {
           anchor: "newest",
           num_before: 50,
           num_after: 0,
-          narrow: [["stream", channelName]],
+          narrow: [["stream", this.monitoredOperand(channelName)]],
         });
 
         const unread = result.messages.filter((msg: any) => msg.id > state.lastReadMessageId);

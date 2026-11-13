@@ -385,6 +385,18 @@ export class ChannelManager {
     this.ids.forget(channelId);
   }
 
+  purgeUnavailable(allows: (key: ChannelKey) => boolean): void {
+    for (const [id, descriptor] of this.allChannels) {
+      const key = this.ids.keyOfDescriptor(descriptor);
+      if (key !== null && !allows(key)) this.retireId(id);
+    }
+    for (const map of [this.batchBuffer, this.lastIncoming, this.typingTopic]) for (const key of map.keys()) if (!allows(key)) map.delete(key);
+    for (const [id, descriptor] of this.unannounced) {
+      const key = this.ids.keyOfDescriptor(descriptor);
+      if (key !== null && !allows(key)) this.unannounced.delete(id);
+    }
+  }
+
   retireId(channelId: string): boolean {
     const wasOpen = this.openChannels.has(channelId);
     this.unannounced.delete(channelId);
