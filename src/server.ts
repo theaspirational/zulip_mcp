@@ -1,3 +1,4 @@
+import { StreamReadGate } from './stream-read-gate.js';
 /**
  * ZulipMcplServer — the JSON-RPC main loop over an `McplConnection`.
  *
@@ -190,6 +191,7 @@ interface CatchUpRead {
 }
 
 export class ZulipMcplServer {
+  private readonly streamGate?: StreamReadGate;
   private readonly messageIds: MessageIds;
   private conn: McplConnection | null = null;
   private mcplActive = false;
@@ -312,6 +314,45 @@ export class ZulipMcplServer {
     this.contextProvider = new ContextProvider(this.channelManager, this.grant, options.contextHistorySize, {
       excludeChannel: (key) => this.isMuted(key) || !this.isAllowed(key),
     });
+    if (this.filters?.subscriptions.mode === 'subscribed') {
+      const plane = this.filters;
+      this.streamGate = new StreamReadGate({
+        allows: id => plane.streamReadAllowed(id), resolveName: name => plane.subscriptions.resolveName(name),
+        known: () => plane.subscriptions.status().known, ids: () => plane.subscriptions.status().streams.map(s => s.id),
+      });
+      this.tools.setStreamReadPolicy(this.streamGate);
+      this.adapter.setStreamReadPolicy?.(this.streamGate);
+      const changed = () => {
+        // Authorization changes synchronously; cleanup is a writer job on the
+        // very same lane as a held read, a message, reaction, or poll vote.
+        this.streamGate!.policyChanged();
+        const keys = new Set<ChannelKey>(this.lanes?.keys() ?? []);
+        for (const key of delivery.watermarkedChannels()) keys.add(key);
+        for (const d of this.channelManager.listChannels().channels) {
+          const key = this.ids.keyOfDescriptor(d);
+          if (key) keys.add(key);
+        }
+        for (const key of keys) {
+          if (isDmKey(key) || this.streamGate!.allowed(streamIdOfKey(key)!)) continue;
+          const purge = () => {
+            const keep = (other: ChannelKey) => other !== key;
+            this.renamedUnannounced.delete(key);
+            this.toldAgent.delete(key);
+            for (const [id, changes] of this.changesOnTurn) {
+              const kept = changes.filter(c => c.key !== key);
+              if (kept.length) this.changesOnTurn.set(id, kept); else this.changesOnTurn.delete(id);
+            }
+            this.channelManager.purgeUnavailable(keep);
+            delivery.purgeUnavailable(keep);
+            this.tools.purgeUnavailable(key);
+            this.adapter.purgeUnavailable?.(key);
+          };
+          const lane = this.lanes?.lane(key);
+          if (lane) lane.host(purge); else purge();
+        }
+      };
+      plane.subscriptions.onChange(changed); plane.onChange(changed);
+    }
     // Sends made through the tool surface and through publish are part of the rollback record.
     this.tools.onSent = (sent) => this.stateTracker.recordSent(sent.messageId, sent.channelId, sent.content);
     this.adapter.onSent = (sent) => this.stateTracker.recordSent(sent.messageId, sent.channelId, sent.content);
@@ -319,6 +360,7 @@ export class ZulipMcplServer {
     // the host can open it without waiting for a message or a refresh (#20).
     // Only those streams: a realm enumeration here would cost a full stream
     // list plus a DM-history fetch to announce what the caller already named.
+    this.tools.onSubscriptionChanged = () => this.adapter.refreshSubscriptions?.() ?? Promise.resolve();
     this.tools.onSubscribed = (streams) => this.registerSubscribed(streams);
     // A deletion made through the tool surface echoes back as a delete event
     // without an actor; the adapter recognises its own.
@@ -507,8 +549,11 @@ export class ZulipMcplServer {
     this.lanes?.lane(key).host(async (ctx) => {
       if (conn.isClosed) return;
       try {
-        const result = await serve(ctx);
-        if (!conn.isClosed) conn.sendResponse(req.id, result);
+        const result = await this.scopedRead(async () => {
+          if (this.streamGate && !isDmKey(key)) this.streamGate.assert(streamIdOfKey(key)!);
+          return serve(ctx);
+        });
+        if (!conn.isClosed) conn.sendResponse(req.id, this.messageIds.project(result));
       } catch (err) {
         if (!conn.isClosed) this.answerError(conn, req, err);
       }
@@ -637,6 +682,22 @@ export class ZulipMcplServer {
 
   // ── Requests ──
 
+  private async scopedRead<T>(read: () => Promise<T>): Promise<T> { return this.streamGate ? this.streamGate.run(read) : read(); }
+  private visibleChannels() {
+    const list = this.channelManager.listChannels();
+    return { ...list, channels: this.visibleDescriptors(list.channels) };
+  }
+  private visibleDescriptors(channels: ChannelDescriptor[]): ChannelDescriptor[] {
+    if (!this.streamGate) return channels;
+    return channels.filter(d => {
+      const key = this.ids.keyOfDescriptor(d);
+      const id = key === null ? null : streamIdOfKey(key);
+      if (key === null || (id !== null && !this.streamGate!.fresh(id, (d.metadata as any)?.readEpoch))) return false;
+      if (id !== null) this.streamGate!.assert(id);
+      return true;
+    });
+  }
+
   private async handleRequest(conn: McplConnection, req: JsonRpcRequest): Promise<void> {
     const params = (req.params ?? {}) as Record<string, unknown>;
     try {
@@ -664,7 +725,7 @@ export class ZulipMcplServer {
         case 'resources/read': {
           const uri = String(params.uri ?? '');
           try {
-            conn.sendResponse(req.id, await this.tools.readResource(uri));
+            conn.sendResponse(req.id, await this.scopedRead(() => this.tools.readResource(uri)));
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             throw new McplRpcError(-32602, `Failed to read resource: ${message}`);
@@ -701,16 +762,14 @@ export class ZulipMcplServer {
 
         case method.CONTEXT_BEFORE_INFERENCE: {
           this.requireMcpl();
-          const result = await this.contextProvider.handleBeforeInference(
-            params as unknown as ContextBeforeInferenceParams,
-          );
+          const result = await this.scopedRead(() => this.contextProvider.handleBeforeInference(params as unknown as ContextBeforeInferenceParams));
           conn.sendResponse(req.id, result);
           break;
         }
 
         case method.CHANNELS_LIST:
           this.requireMcpl();
-          conn.sendResponse(req.id, this.channelManager.listChannels());
+          conn.sendResponse(req.id, this.visibleChannels());
           break;
 
         case method.CHANNELS_OPEN: {
@@ -736,7 +795,7 @@ export class ZulipMcplServer {
           // No checkpoint is minted here: the publish result has no field to
           // carry one (§14.6), so a host can only learn checkpoints from tool
           // results — see callTool.
-          const result = await this.channelManager.publish(publish);
+          const result = await this.scopedRead(() => this.channelManager.publish(publish));
           conn.sendResponse(req.id, this.messageIds.project({ delivered: result.delivered, ...(result.messageId ? { messageId: result.messageId } : {}) }));
           break;
         }
@@ -837,20 +896,21 @@ export class ZulipMcplServer {
 
   private async openTarget(params: ChannelsOpenParams): Promise<{ descriptor: ChannelDescriptor; key: ChannelKey }> {
     if (!this.grant.has('channels.lifecycle')) throw capabilityDenied('channels.lifecycle');
-    if (this.messageIds.mode !== 'legacy' && params.history?.beforeMessageId !== undefined) {
-      params = { ...params, history: { ...params.history, beforeMessageId: String(this.messageIds.parse(params.history.beforeMessageId)) } };
-    }
     if (params.channelId) {
       const answer = await this.ids.keyOf(params.channelId);
       if ('refusal' in answer) throw new McplRpcError(ERR_UNKNOWN_CHANNEL, answer.refusal, { channelId: params.channelId });
     }
     const descriptor = await this.findChannelRediscovering(params);
     const key = this.ids.keyOfDescriptor(descriptor);
+    if (this.streamGate && key !== null && !isDmKey(key)) this.streamGate.assert(streamIdOfKey(key)!);
     if (key === null) throw new McplRpcError(ERR_UNKNOWN_CHANNEL, `Unknown channel: ${descriptor.id}`, { channelId: descriptor.id });
     return { descriptor, key };
   }
 
   private async openChannel(ctx: Ctx, params: ChannelsOpenParams, descriptor: ChannelDescriptor, key: ChannelKey, conn: McplConnection): Promise<ChannelsOpenResult> {
+    if (this.messageIds.mode !== 'legacy' && params.history?.beforeMessageId !== undefined) {
+      params = { ...params, history: { ...params.history, beforeMessageId: String(this.messageIds.parse(params.history.beforeMessageId)) } };
+    }
     if (!this.grant.has('channels.lifecycle')) throw capabilityDenied('channels.lifecycle');
     // Opening a channel is proof the host knows it — the only proof available
     // when the answer to its announcement cannot reach us (#20 review).
@@ -1004,10 +1064,15 @@ export class ZulipMcplServer {
    * has not described is left to the per-message check in the adapter.
    */
   private isAllowed(key: ChannelKey, message?: KeyedMessage): boolean {
+    if (this.streamGate && !isDmKey(key)) {
+      const meta = message?.metadata as Record<string, any> | undefined;
+      if (!this.streamGate.fresh(streamIdOfKey(key)!, meta?.readEpoch)) return false;
+      for (const id of meta?.readStreamIds ?? []) if (!this.streamGate.fresh(id, meta?.readEpoch)) return false;
+    }
     if (!this.filters) return true;
     if (!isDmKey(key)) {
       const name = this.streamNameOf(key);
-      return name !== null && this.filters.streamAllowed(name);
+      return name !== null && this.filters.streamAllowed(name, streamIdOfKey(key) ?? undefined);
     }
     const sender = message ? senderOf(message) : null;
     if (sender) return this.senderAllowed(sender);
@@ -1030,7 +1095,7 @@ export class ZulipMcplServer {
   private mayDeliver(message: KeyedMessage): boolean {
     if (!this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) return false;
     const meta = (typeof message.metadata === 'object' && message.metadata !== null ? message.metadata : {}) as Record<string, unknown>;
-    if (meta.system === true) return true;
+    if (meta.system === true) return !this.streamGate || this.isAllowed(message.key, message);
     return !this.isMuted(message.key) && this.isAllowed(message.key, message);
   }
 
@@ -1217,6 +1282,8 @@ export class ZulipMcplServer {
       if (blocks.length > 0) message = { ...message, content: [...message.content, ...blocks] };
     }
 
+    if (this.streamGate && !this.isAllowed(key, message)) return;
+
     // Who said it, where and when, in the body the model reads. The
     // structured fields stay; this is what a host that renders only the
     // content blocks shows the model (the Discord surface does the same).
@@ -1386,6 +1453,7 @@ export class ZulipMcplServer {
   private async pushEvent(message: KeyedMessage, eventId: string, extraOrigin: Record<string, unknown> = {}, beforeOffer?: () => void): Promise<boolean> {
     const conn = this.conn;
     if (!conn || !this.mcplActive) return false;
+    if (this.streamGate && !this.isAllowed(message.key, message)) return false;
     const channelId = this.ids.channelIdOf(message.key);
     if (channelId === null) return false;
     if (!this.grant.has('pushEvents') || !this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) {
@@ -1729,6 +1797,7 @@ export class ZulipMcplServer {
    * messages as a `<missed>` push, as after a restart.
    */
   private onSystemEvent(event: PlatformSystemEvent): void {
+    if (this.streamGate) event = { kind: event.kind, text: `Zulip event delivery ${event.kind}; consult permitted channel history for continuity.`, metadata: { readEpoch: this.streamGate.checkpoint() } };
     const lanes = this.lanes;
     const tally: GapTally = { recovered: 0, caughtUp: new Set() };
     if (event.kind !== 'gap' || !lanes || !this.adapter.fetchHistory) {
@@ -2188,6 +2257,12 @@ export class ZulipMcplServer {
    * MCP clients are not subject to a grant — there is none to consult.
    */
   private async callTool(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
+    if (!this.streamGate) return this.callGatedTool(name, args);
+    try { return await this.streamGate.run(() => this.callGatedTool(name, args)); }
+    catch { return { content: [{ type: 'text', text: 'Read refused by subscribed-stream policy' }], isError: true }; }
+  }
+
+  private async callGatedTool(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     if (this.mcplActive) {
       if (!this.grant.has('tools')) throw capabilityDenied('tools');
       const owner = featureSetForTool(name);
@@ -2200,6 +2275,7 @@ export class ZulipMcplServer {
     }
     try {
       const own = await this.serverTool(name, args);
+      this.streamGate?.recheck();
       const result = toToolCallResult(own !== undefined ? this.messageIds.project(own) : await this.tools.handleToolCall(name, args));
       // §8: a tool of the rollback-capable feature set mints a checkpoint and
       // hands it back in `state`, which is the only way a host ever learns
@@ -2215,7 +2291,7 @@ export class ZulipMcplServer {
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { content: [{ type: 'text' as const, text: `Error: ${message}` }], isError: true };
+      return { content: [{ type: 'text' as const, text: this.streamGate ? 'Operation refused by subscribed-stream policy' : `Error: ${message}` }], isError: true };
     }
   }
 
@@ -2300,16 +2376,27 @@ export class ZulipMcplServer {
   }
 
   /** Tools that read the server's own delivery state. undefined = not ours. */
+  private visibleNames(names: string[]): string[] { return this.streamGate ? this.streamGate.visibleNames(names) : names; }
+  private visibleChannelIds(ids: string[]): string[] {
+    return ids.filter(id => isDmChannelId(id) || this.visibleNames([id.replace(/^zulip:/, '')]).length > 0);
+  }
   private async serverTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    if (this.streamGate) {
+      if (['filters_get', 'refresh_channels'].includes(name)) this.streamGate.requireKnown();
+      if (['channel_missed', 'mute_channel', 'unmute_channel', 'set_reaction_visibility'].includes(name) && typeof args.channel === 'string' && !isDmChannelId(args.channel)) this.streamGate.named(args.channel.replace(/^zulip:/, '').replace(/^#/, ''));
+      if (name === 'filters_update') for (const value of [...(Array.isArray(args.addStreams) ? args.addStreams : []), ...(Array.isArray(args.removeStreams) ? args.removeStreams : [])]) this.streamGate.named(String(value).replace(/^#/, ''));
+    }
     switch (name) {
       case 'filters_get': {
         const plane = this.requireFilters();
         const f = plane.current();
         return {
-          streams: f.streams ?? null,
+          streams: plane.subscriptions.mode === 'public' ? null : f.streams ? this.visibleNames(f.streams) : null,
+          streamsMode: plane.subscriptions.mode,
+          ...(this.streamGate ? { subscriptions: { ...plane.subscriptions.status(), streams: plane.subscriptions.status().streams.filter(s => this.streamGate!.allowed(s.id)) }, effectiveSubscribedStreams: plane.subscriptions.status().streams.filter(s => this.streamGate!.allowed(s.id)) } : {}),
           dmUsers: f.dmUsers ?? null,
-          mutedStreams: f.mutedStreams ?? [],
-          reactionChannels: f.reactionChannels ?? [],
+          mutedStreams: this.visibleNames(f.mutedStreams ?? []),
+          reactionChannels: this.visibleChannelIds(f.reactionChannels ?? []),
           plane: plane.planeStatus(),
           reactionSuppression: plane.suppressionStatus(),
           note: 'null = unrestricted. Filters gate delivery only; the bot must also be able to see a stream. ' +
@@ -2359,7 +2446,7 @@ export class ZulipMcplServer {
         if (!result.ok) throw new Error(`filters_update refused: ${result.reason}`);
         const { added } = await this.applyFilterChange();
         return {
-          streams: result.filters.streams ?? null,
+          streams: result.filters.streams ? this.visibleNames(result.filters.streams) : null,
           dmUsers: result.filters.dmUsers ?? null,
           registered: added,
           note: [
@@ -2385,7 +2472,7 @@ export class ZulipMcplServer {
         return {
           channelId: `zulip:${stream}`,
           muted: mute,
-          mutedStreams: result.filters.mutedStreams ?? [],
+          mutedStreams: this.visibleNames(result.filters.mutedStreams ?? []),
           note: mute
             ? 'Nothing from this stream reaches you now — not even mentions — and nothing is tallied. Persisted; reverse with unmute_channel.'
             : 'Messages from this stream reach you again by the usual rules (addressed messages always; ambient when the channel is open).',
@@ -2515,6 +2602,10 @@ export class ZulipMcplServer {
    * id exists, so a suppressed reaction leaves no glyph or name anywhere.
    */
   private async onReaction(w: DeliveryWriter, ev: ReactionEvent): Promise<void> {
+    if (this.streamGate) {
+      if (!isDmKey(ev.key) && !this.streamGate.fresh(streamIdOfKey(ev.key)!, ev.readEpoch)) return;
+      for (const id of ev.readStreamIds ?? []) if (!this.streamGate.fresh(id, ev.readEpoch)) return;
+    }
     if (!this.reactionShown(ev)) return;
     const verb = ev.action === 'add' ? 'reacted' : 'removed a reaction';
     const target = ev.onOwnMessage ? 'your message' : `message ${this.messageIds.format(ev.messageId)}`;
@@ -2532,6 +2623,7 @@ export class ZulipMcplServer {
         action: ev.action,
         emoji: ev.emoji,
         ...(ev.emojiCode ? { emojiCode: ev.emojiCode } : {}),
+        ...(this.streamGate ? { readEpoch: ev.readEpoch, readStreamIds: ev.readStreamIds } : {}),
         targetMessageId: ev.messageId,
         onOwnMessage: ev.onOwnMessage,
         isDM: false,
@@ -2578,6 +2670,10 @@ export class ZulipMcplServer {
    * watermark; the line carries the message's own id for fetch_around.
    */
   private async onMessageChange(ctx: Ctx, ev: MessageChangeEvent, announce = true, silent = false): Promise<void> {
+    if (this.streamGate) {
+      if (!isDmKey(ev.key) && !this.streamGate.fresh(streamIdOfKey(ev.key)!, ev.readEpoch)) return;
+      for (const id of ev.readStreamIds ?? []) if (!this.streamGate.fresh(id, ev.readEpoch)) return;
+    }
     if (ev.previousTopic !== null && !ev.leftChannel) ctx.w.channels.followMove(ev.key, ev.messageIds, ev.topic);
     if (ev.byBot) return;
     if (ev.kind === 'edit' && ev.replyToSelf === false && ev.replyToSelfVerified === true) ctx.w.delivery.forgetReply(ev.key, Number(ev.messageId));
@@ -2661,6 +2757,7 @@ export class ZulipMcplServer {
       ],
       metadata: {
         change: ev.kind,
+        ...(this.streamGate ? { readEpoch: ev.readEpoch, readStreamIds: ev.readStreamIds } : {}),
         targetMessageId: ev.messageId,
         targetMessageIds: ev.messageIds,
         ...(ev.actorId !== null ? { actorId: ev.actorId } : {}),
@@ -2689,6 +2786,7 @@ export class ZulipMcplServer {
     } else {
       void this.pushEvent(message, `zulip_${ev.kind}_${ev.messageId}_${stamp}`, {
         change: ev.kind,
+        ...(this.streamGate ? { readEpoch: ev.readEpoch, readStreamIds: ev.readStreamIds } : {}),
         targetMessageId: ev.messageId,
       });
     }
@@ -2711,12 +2809,14 @@ export class ZulipMcplServer {
   private async registerChannelsWithHost(channels: ChannelDescriptor[]): Promise<ChannelsRegisterResult | undefined> {
     const conn = this.conn;
     if (!conn) throw new Error('not connected');
+    channels = this.visibleDescriptors(channels);
     return (await this.outToHost(conn.sendRequest(method.CHANNELS_REGISTER, { channels }))) as ChannelsRegisterResult | undefined;
   }
 
   private async channelsChangedWithHost(params: ChannelsChangedParams, timeoutMs = this.announceTimeoutMs): Promise<ChannelsRegisterResult | undefined> {
     const conn = this.conn;
     if (!conn) throw new Error('not connected');
+    params = { ...params, added: this.visibleDescriptors(params.added ?? []) };
     const answer = this.outToHost(conn.sendRequest(method.CHANNELS_CHANGED, params, timeoutMs));
     for (const descriptor of params.added ?? []) {
       const key = this.ids.keyOfDescriptor(descriptor);
@@ -2735,6 +2835,10 @@ export class ZulipMcplServer {
   private async sendIncomingToHost(messages: IncomingChannelMessage[]): Promise<ChannelsIncomingResult | undefined> {
     const conn = this.conn;
     if (!conn) throw new Error('not connected');
+    if (this.streamGate) messages = messages.filter(m => {
+      const key = this.channelManager.keyOfHeld(m.channelId);
+      return key !== null && this.isAllowed(key, { ...m, key });
+    });
     const result = (await conn.sendRequest(method.CHANNELS_INCOMING, this.messageIds.project({ messages }))) as ChannelsIncomingResult | undefined;
     if (this.messageIds.mode !== 'legacy' && result?.results) {
       return { ...result, results: result.results.map(r => ({ ...r, messageId: r.messageId.startsWith(`${this.messageIds.tag}:`) ? String(this.messageIds.parse(r.messageId)) : r.messageId })) };

@@ -89,6 +89,8 @@ export type OnSystemEvent = (event: PlatformSystemEvent) => void;
 
 /** A reaction added to or removed from a message, resolved to its channel. */
 export interface ReactionEvent {
+  readEpoch?: number;
+  readStreamIds?: number[];
   action: 'add' | 'remove';
   key: ChannelKey;
   messageId: string;
@@ -123,6 +125,8 @@ export type OnReaction = (entry: ReactionEntry) => void;
  * bot's message is news (`onOwnMessage`).
  */
 export interface MessageChangeEvent {
+  readEpoch?: number;
+  readStreamIds?: number[];
   kind: 'edit' | 'move' | 'delete';
   key: ChannelKey;
   /** The changed message; a move or bulk delete names the one acted on and
@@ -214,6 +218,9 @@ export interface ChannelHistoryPage {
 }
 
 export interface PlatformAdapter {
+  purgeUnavailable?(key?: ChannelKey): void;
+  refreshSubscriptions?(): Promise<void>;
+  setStreamReadPolicy?(gate: import("../stream-read-gate.js").StreamReadGate): void;
   /** Channel ID prefix and ChannelDescriptor.type, e.g. 'zulip'. */
   readonly type: string;
 

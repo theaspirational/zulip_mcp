@@ -40,6 +40,7 @@
  *   MCPL_CONTEXT_HISTORY_SIZE                   - messages injected per open channel (20)
  */
 
+import { parseStreamsMode } from './subscriptions.js';
 import { MessageIds } from './message-ids.js';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
@@ -99,6 +100,7 @@ export function parseBackscrollLimits(raw: string | undefined): Map<string, numb
 }
 
 async function main(): Promise<void> {
+  parseStreamsMode(process.env.ZULIP_STREAMS_MODE);
   const args = process.argv.slice(2);
   const tcpIdx = args.indexOf('--tcp');
   const tcpPort = tcpIdx >= 0 ? parseInt(args[tcpIdx + 1], 10) : undefined;

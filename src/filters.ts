@@ -1,3 +1,4 @@
+import { Subscriptions } from './subscriptions.js';
 /**
  * The filters plane — which streams and people can reach the agent, which
  * streams are muted, and (for the reactions surface) which channels show
@@ -241,6 +242,7 @@ export interface ReactionSuppressionStatus {
  * `onChange` to react to reloads.
  */
 export class FiltersPlane {
+  readonly subscriptions: Subscriptions;
   private effective: ZulipFilters;
   private digest: string | null = null;
   private loadedAt: string | null = null;
@@ -256,6 +258,7 @@ export class FiltersPlane {
     private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly options: { pollMs?: number } = {},
   ) {
+    this.subscriptions = new Subscriptions(env.ZULIP_STREAMS_MODE);
     this.effective = parseFiltersFromEnv(env);
     this.baseline = parseBaselineFromEnv(env);
   }
@@ -367,9 +370,14 @@ export class FiltersPlane {
 
   // ── queries ──
 
-  streamAllowed(streamName: string): boolean {
-    const allow = this.effective.streams;
-    return !allow || allow.includes(streamName);
+  streamReadAllowed(id: number | undefined): boolean {
+    const name = id === undefined ? undefined : this.subscriptions.name(id);
+    return this.subscriptions.allows(id) && name !== undefined && (!this.effective.streams || this.effective.streams.includes(name)) && !this.streamMuted(name);
+  }
+
+  streamAllowed(streamName: string, streamId?: number): boolean {
+    if (this.subscriptions.mode === 'subscribed') return this.streamReadAllowed(streamId ?? this.subscriptions.resolveName(streamName));
+    return this.subscriptions.mode === 'public' || !this.effective.streams || this.effective.streams.includes(streamName);
   }
 
   streamMuted(streamName: string): boolean {
