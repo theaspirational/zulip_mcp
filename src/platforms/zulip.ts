@@ -36,6 +36,7 @@ import type {
 import { ZulipEventLoop, type ZulipMessageChange } from './zulip-events.js';
 import { cleanMarkdown } from '../content.js';
 import { NothingToSend, SendRefused, sendMessage, ZULIP_MAX_MESSAGE_LENGTH, type Destination } from '../outgoing.js';
+import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 import { messageLineHead } from '../message-line.js';
 import { agentLineTimeFormatter } from '../timezone.js';
 import { uploadBlocks, type UploadPolicy, type Uploader } from '../uploads.js';
@@ -158,6 +159,7 @@ export interface FilterView {
 const ALLOW_ALL: FilterView = { streamAllowed: () => true, dmAllowed: () => true };
 
 export interface ZulipAdapterOptions {
+  messageIds?: MessageIds;
   /** Backscroll cap advertised per channel and enforced on channels/open. */
   backscrollDefault?: number;
   /** Per-stream overrides of the backscroll cap. */
@@ -228,6 +230,7 @@ export class ZulipAdapter implements PlatformAdapter {
   private listRead: Promise<boolean> | null = null;
   /** Messages just moved to a stream the bot cannot see, by id → when: the
    *  delete event Zulip sends for lost visibility is a vanishing, not a deletion. */
+  private readonly messageIds: MessageIds;
   private movedAway = new Map<number, number>();
 
   constructor(
@@ -236,6 +239,7 @@ export class ZulipAdapter implements PlatformAdapter {
     sessionId: string,
     options: ZulipAdapterOptions = {},
   ) {
+    this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.identity = { selfUserId, sessionId };
     this.backscrollDefault = options.backscrollDefault ?? DEFAULT_BACKSCROLL;
     this.backscrollLimits = options.backscrollLimits ?? new Map();
@@ -897,7 +901,7 @@ export class ZulipAdapter implements PlatformAdapter {
     // The shared line shape, so injected history reads like live delivery
     // and every line carries an id the agent can fetch_around.
     const formatted = messages.map((m) => messageLineHead({
-      id: m.id,
+      id: this.messageIds.format(m.id),
       time: Number.isNaN(m.timestamp.getTime()) ? '' : this.formatTime(m.timestamp),
       stream: parsed.kind === 'dm' ? null : m.streamNameShown ?? streamName,
       topic: m.topic,
@@ -1016,7 +1020,7 @@ export class ZulipAdapter implements PlatformAdapter {
     onReaction?: OnReaction,
     onMessageChange?: OnMessageChange,
   ): void {
-    const loop = this.eventLoop = new ZulipEventLoop({ directory: this.directory });
+    const loop = this.eventLoop = new ZulipEventLoop({ directory: this.directory, messageIds: this.messageIds });
     // Changes are placed asynchronously (a cache miss costs one GET) but must
     // reach the server in queue order: an edit followed by a deletion of the
     // same message reads backwards otherwise. Every await in the chain is

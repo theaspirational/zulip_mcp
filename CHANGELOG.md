@@ -10,3 +10,7 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 `git log`.
 
 ## Unreleased
+
+## Unreleased (fork ports)
+
+- Add opt-in realm-tagged message IDs (`ZULIP_REALM_TAG`, `ZULIP_ID_MODE`).

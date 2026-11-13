@@ -3,6 +3,7 @@
  * (attachments), bot identity for the self-filter, and startup subscriptions.
  */
 
+import { MessageIds } from './message-ids.js';
 import { readFileSync } from 'node:fs';
 import { parse as parseIni } from 'ini';
 import { httpTransport, LONG_TIMEOUT_MS, zulipApi, type ZulipApi } from './zulip-api.js';
@@ -69,6 +70,8 @@ export async function initializeZulipClient(env: NodeJS.ProcessEnv = process.env
     }
     apiUrl = realm.endsWith("/api") ? `${realm}/v1` : `${realm}/api/v1`;
   }
+
+  MessageIds.fromEnv(realm, env); // validate before any request
 
   if (!apiKey && password) {
     const exchange = zulipApi(httpTransport({ apiUrl, authHeader: "", timeoutMs: options.timeoutMs }));

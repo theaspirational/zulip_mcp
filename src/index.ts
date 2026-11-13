@@ -40,6 +40,7 @@
  *   MCPL_CONTEXT_HISTORY_SIZE                   - messages injected per open channel (20)
  */
 
+import { MessageIds } from './message-ids.js';
 import * as net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -106,6 +107,7 @@ async function main(): Promise<void> {
   }
 
   const session = await initializeZulipClient();
+  const messageIds = MessageIds.fromEnv(session.realm);
   const stateDir = process.env.ZULIP_STATE_DIR || join(homedir(), '.zulip_mcp_state');
   const filters = new FiltersPlane(process.env.ZULIP_FILTERS_FILE || join(stateDir, `${session.sessionId}.filters.json`));
   filters.start();
@@ -123,6 +125,7 @@ async function main(): Promise<void> {
   void subscribeConfigured(session.api, directory, process.env.ZULIP_SUBSCRIBE);
   const adapter = new ZulipAdapter(session.api, session.selfUserId, session.sessionId, {
     directory,
+    messageIds,
     formatTime,
     uploader,
     uploadPolicy,
@@ -131,7 +134,7 @@ async function main(): Promise<void> {
     filters,
     maxMessageLength,
   });
-  const tools = new ZulipToolRuntime(session, stateDir, { uploader, uploadPolicy, formatTime, maxMessageLength });
+  const tools = new ZulipToolRuntime(session, stateDir, { uploader, uploadPolicy, formatTime, maxMessageLength, messageIds });
   tools.setReactionPolicy({
     suppressed: (name, code, type) => filters.reactionSuppressed(name, code, type),
   });
@@ -148,6 +151,7 @@ async function main(): Promise<void> {
     formatTime,
     filters,
     directory,
+    messageIds,
     attachments: {
       // Same validation as fetch_attachment: only /user_uploads/ on the realm
       // host may ever see the bot's credentials.

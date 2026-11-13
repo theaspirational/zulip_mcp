@@ -593,3 +593,11 @@ catch-up, and the tools — the fastest way to see the wire behaviour.
 ## License
 
 MIT
+
+### Realm-tagged IDs
+
+Optional `ZULIP_ID_MODE=compat|strict` and `ZULIP_REALM_TAG=alpha` prevent
+cross-realm message-ID confusion. Default `legacy` keeps upstream behavior.
+Compat accepts bare IDs with a warning; strict requires `alpha:123`, including
+`[[msg:alpha:123]]` links. Stream/user/channel IDs and saved cursors stay unchanged.
+See [realm IDs](docs/realm-ids.md).
