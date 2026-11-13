@@ -194,6 +194,7 @@ export interface ChannelHistoryPage {
 
 export interface PlatformAdapter {
   refreshSubscriptions?(): Promise<void>;
+  noteSelfMoved?(move: import("../moves.js").ConfirmedMove): void;
   setStreamReadPolicy?(gate: import("../stream-read-gate.js").StreamReadGate): void;
   /** Channel ID prefix and ChannelDescriptor.type, e.g. 'zulip'. */
   readonly type: string;

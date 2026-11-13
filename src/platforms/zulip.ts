@@ -1,3 +1,4 @@
+import { moveCovers, type ConfirmedMove } from '../moves.js';
 import type { StreamReadGate } from '../stream-read-gate.js';
 import { PollLookups, PollUsers, reconstructPoll, applyPollUpdate, parsePollSubmessage, countPollDrop, type WidgetSubmessage } from '../polls.js';
 /**
@@ -844,6 +845,16 @@ export class ZulipAdapter implements PlatformAdapter {
 
   /** A message the bot deleted through another path (the delete tool): its
    *  delete event is the bot's own doing and must not surface. */
+  noteSelfMoved(move: ConfirmedMove): void {
+    this.activeTopics.invalidate(move.source.streamId);
+    if (move.destination) this.activeTopics.invalidate(move.destination.streamId);
+    for (const [id, m] of this.seen) {
+      if (!moveCovers(move, id, streamIdOfKey(m.key) ?? 0, m.topic)) continue;
+      if (move.destination) this.seen.set(id, { ...m, key: streamKey(move.destination.streamId), topic: move.destination.topic });
+      else this.seen.delete(id);
+    }
+  }
+
   noteSelfDeleted(messageId: number): void {
     if (!Number.isFinite(messageId)) return;
     const now = Date.now();

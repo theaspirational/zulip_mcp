@@ -593,3 +593,15 @@ toolDefinitions.push({
     required: ['message_id', 'option'],
   },
 });
+
+
+toolDefinitions.push({
+  name: 'move_messages',
+  description: "Rename a topic or move messages by message ID. Provide topic or stream_id; change_one is the default, change_later moves this and later messages in the original topic, change_all moves the whole topic. Realm permissions/time limits apply. Content edits use edit_message. A move can post a Zulip breadcrumb. Confirm with send_message using reply_to after cross-stream moves; channels/publish never retargets a destination channel's newer conversation.",
+  inputSchema: { type: 'object', properties: {
+    message_id: { type: 'number', description: 'Anchor message ID.' },
+    topic: { type: 'string', description: 'New topic; empty string is a real empty topic, not a placeholder.' },
+    stream_id: { type: 'integer', minimum: 1, description: 'Destination stream ID from list_streams.' },
+    propagate_mode: { type: 'string', enum: ['change_one', 'change_later', 'change_all'], description: "Scope in the anchor's original topic." },
+  }, required: ['message_id'] },
+});

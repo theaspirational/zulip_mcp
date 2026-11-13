@@ -1,3 +1,6 @@
+import { moveCovers, type ConfirmedMove } from './moves.js';
+import { streamIdOfKey } from './channel-key.js';
+import { CallerValidationError } from './validation-errors.js';
 /**
  * Channel Manager — Maps platform channels to MCPL channels.
  *
@@ -104,6 +107,7 @@ export class ChannelManager {
    *  took, so publishes can land in the active thread/topic, with the id of
    *  the message they came from, so an older message delivered late doesn't
    *  move them back. */
+  private moveRefusals = new Map<ChannelKey, number>();
   private lastIncoming = new Map<ChannelKey, { hints: RoutingHints; from?: number }>();
   /** Per-channel topic the current typing run started in, so a refresh that
    *  moves to a newer topic, and the final stop, cancel it there. */
@@ -390,7 +394,7 @@ export class ChannelManager {
       const key = this.ids.keyOfDescriptor(descriptor);
       if (key !== null && !allows(key)) this.retireId(id);
     }
-    for (const map of [this.batchBuffer, this.lastIncoming, this.typingTopic]) for (const key of map.keys()) if (!allows(key)) map.delete(key);
+    for (const map of [this.batchBuffer, this.lastIncoming, this.typingTopic, this.moveRefusals]) for (const key of map.keys()) if (!allows(key)) map.delete(key);
     for (const [id, descriptor] of this.unannounced) {
       const key = this.ids.keyOfDescriptor(descriptor);
       if (key !== null && !allows(key)) this.unannounced.delete(id);
@@ -586,12 +590,32 @@ export class ChannelManager {
    * must not retarget the reply the agent is composing in `support`. Returns
    * whether the hints moved.
    */
+  moveSnapshot(): ReadonlyMap<ChannelKey, unknown> { return new Map(this.lastIncoming); }
+
+  noteMove(move: ConfirmedMove): void {
+    for (const [key, saved] of move.snapshot ?? this.moveSnapshot()) {
+      const current = this.lastIncoming.get(key);
+      if (!current || current !== saved || !moveCovers(move, current.from, streamIdOfKey(key) ?? 0, current.hints.threadId ?? (current.hints.metadata?.topic as string | undefined))) continue;
+      if (move.destination?.streamId === move.source.streamId) {
+        this.lastIncoming.set(key, { ...current, hints: { threadId: move.destination.topic, metadata: { ...current.hints.metadata, topic: move.destination.topic } } });
+      } else {
+        // Cross-stream moves cannot choose a destination channel's newer conversation.
+        // Keep an observed-ID floor so an old replay cannot clear this refusal.
+        this.moveRefusals.set(key, Math.max(this.moveRefusals.get(key) ?? 0, current.from ?? move.messageId));
+      }
+    }
+  }
+
   noteConversation(key: ChannelKey, message: Pick<KeyedMessage, 'messageId' | 'threadId' | 'metadata'>): boolean {
     const meta = isRecord(message.metadata) ? message.metadata : undefined;
+    const blocked = this.moveRefusals.get(key);
+    const incomingId = Number(message.messageId);
+    if (blocked !== undefined && (!Number.isFinite(incomingId) || incomingId <= blocked)) return false;
     if (meta?.pollVote === true || meta?.reaction === true || typeof meta?.change === 'string') return false;
     const id = Number(message.messageId);
     const from = this.lastIncoming.get(key)?.from;
     if (Number.isFinite(id) && from !== undefined && id < from) return false;
+    this.moveRefusals.delete(key);
     this.lastIncoming.set(key, {
       hints: { threadId: message.threadId, metadata: meta },
       ...(Number.isFinite(id) ? { from: id } : {}),
@@ -659,6 +683,7 @@ export class ChannelManager {
     }
     const target = await this.resolveTarget(channelId);
     if (typeof target !== 'string') return adapter.publish(target, undefined, params.content, undefined);
+    if (this.moveRefusals.has(target)) throw new CallerValidationError('Publish refused after a move: use send_message with reply_to to choose a fresh destination. Nothing was sent.');
     return adapter.publish(
       target,
       this.allChannels.get(this.ids.channelIdOf(target) ?? channelId),
@@ -697,6 +722,7 @@ export class ChannelManager {
     // The host may send refreshes and the stop with the channel alone, so a run
     // that a newer message moved must be stopped where it started, or it
     // lingers there.
+    if (op !== 'stop' && this.moveRefusals.has(key) && typeof metadata?.topic !== 'string') return;
     const hostTopic = metadata?.topic;
     const named = typeof hostTopic === 'string';
     const at = (topic: string | undefined) => (topic === undefined ? metadata : { ...metadata, topic });
@@ -793,6 +819,7 @@ export class ChannelManager {
     this.openChannels.clear();
     this.batchBuffer.clear();
     this.lastIncoming.clear();
+    this.moveRefusals.clear();
     this.typingTopic.clear();
     // Announcement bookkeeping belongs to the peer that was there: a backlog
     // carried across would announce to the NEXT host a channel this server

@@ -18,3 +18,4 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 - Port `send_poll`, `get_poll_results`, fresh-placement vote events, and `vote_poll` to upstream's native API; preserve feature-set and comms classifications.
 - Port `ZULIP_STREAMS_MODE=list|subscribed|public`, subscription refresh/events, ID-pinned StreamReadGate and revocation purge across tool, resource, context and delivery boundaries.
 - Fix subscribed-mode errors: typed policy refusals retain their wording; caller validation (including literal-token escaping) stays actionable; remote/transport/internal failures use non-leaking categories.
+- Port the missing `move_messages` tool with native PATCH, fresh source/placement reads, propagation-aware routing snapshots and conservative source-publish fences; do not transplant the old fork's name-keyed reconciliation machinery.

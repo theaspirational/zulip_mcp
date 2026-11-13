@@ -649,3 +649,20 @@ and tell you to escape a literal with a backslash (`\[[msg:literal]]`), or put
 it in code. Upstream numeric-token backslash behavior is unchanged. Remote
 failures expose only safe Zulip code/HTTP status, network, timeout or internal
 categories—not response text, stream identities, topics or content.
+
+### Moving messages
+
+`move_messages(message_id, topic?, stream_id?, propagate_mode?)` uses upstream's
+native API. Scope is `change_one` by default, `change_later` for this and later
+messages in the original topic, or `change_all` for the entire topic. Use
+`edit_message` separately for content. Empty topics are real values, not strict
+schema placeholders. Realm permissions, move limits and Zulip breadcrumbs apply.
+
+The port requires a fresh readable source. The receipt's `moved_to` comes from
+a fresh placement read, never the requested topic (which Zulip may normalize).
+A failed confirmation does not fail/retry an already successful PATCH: it returns
+an unresolved receipt and a routing note. A confirmed same-stream move updates
+only the affected conversation snapshot. Cross-stream/unresolved/ambiguous moves
+fence old source publishing until a newer real message arrives; old replay and
+synthetic events cannot clear that fence. Use `send_message` with `reply_to` to
+reply explicitly. Destination-channel conversation routing is never overwritten.

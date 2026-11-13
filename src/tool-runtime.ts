@@ -1,3 +1,5 @@
+import { moveDestination, type ConfirmedMove } from './moves.js';
+import type { ChannelKey } from './channel-key.js';
 import { CallerValidationError, StreamPolicyError, subscribedError } from './tool-errors.js';
 import type { StreamReadGate } from './stream-read-gate.js';
 /**
@@ -243,6 +245,8 @@ export class ZulipToolRuntime {
 
   /** Set by the MCPL server: every message sent by a tool is reported here
    *  so a rollback checkpoint can undo it. */
+  onMoveStarted: (() => ReadonlyMap<ChannelKey, unknown>) | null = null;
+  onMoved: ((move: ConfirmedMove) => void) | null = null;
   onSent: ((sent: SentRecord) => void) | null = null;
   /** Called BEFORE delete_message is sent (the delete event can arrive before
    *  the response does), so the adapter recognises the echo as its own. */
@@ -917,8 +921,44 @@ export class ZulipToolRuntime {
         }
       }
 
+      case "move_messages": {
+        const id = positiveIdArg('message_id', args.message_id);
+        if (args.content !== undefined) throw new CallerValidationError('use edit_message for content edits');
+        if (args.topic !== undefined && typeof args.topic !== 'string') throw new CallerValidationError('topic must be a string');
+        if (args.stream_id !== undefined) positiveIdArg('stream_id', args.stream_id);
+        if (args.propagate_mode !== undefined && !['change_one', 'change_later', 'change_all'].includes(args.propagate_mode)) throw new CallerValidationError('propagate_mode must be change_one, change_later, or change_all');
+        if (args.topic === undefined && args.stream_id === undefined) throw new CallerValidationError('topic or stream_id is required');
+        const snapshot = this.onMoveStarted?.();
+        // Source placement is fresh, not inferred from a previous tool/event/cache.
+        const before = await api.request<{ message?: import('./history.js').ZulipRawMessage }>('GET', `/messages/${id}`, 'reading move source', { apply_markdown: false }, { timeoutMs: 3000 });
+        const original = before.message;
+        if (original?.id !== id || original.type !== 'stream' || !Number.isSafeInteger(original.stream_id) || typeof original.subject !== 'string') throw new CallerValidationError('move source is not a readable stream message');
+        if (args.stream_id !== undefined) this.streamGate?.assert(Number(args.stream_id));
+        const unresolvedMove: ConfirmedMove = { messageId: id, source: { streamId: original.stream_id!, topic: original.subject }, propagateMode: args.propagate_mode ?? 'change_one', destination: null, snapshot };
+        let result;
+        try { result = await api.request('PATCH', `/messages/${id}`, 'moving message', {
+          ...(args.topic !== undefined ? { topic: args.topic } : {}),
+          ...(args.stream_id !== undefined ? { stream_id: Number(args.stream_id) } : {}),
+          ...(args.propagate_mode !== undefined ? { propagate_mode: args.propagate_mode } : {}),
+        }); } catch (error) { if (mayHaveBeenApplied(error)) this.onMoved?.(unresolvedMove); throw error; }
+        // A successful write is never retried merely because confirmation failed.
+        let destination: ConfirmedMove['destination'] = null;
+        if (!Array.isArray(result.ignored_parameters_unsupported) || result.ignored_parameters_unsupported.length === 0) {
+          try {
+            const placed = await api.request<{ message?: import('./history.js').ZulipRawMessage }>('GET', `/messages/${id}`, 'confirming move placement', { apply_markdown: false }, { timeoutMs: 3000 });
+            if (placed.message?.id === id) destination = moveDestination(placed.message, args.stream_id === undefined ? original.stream_id : Number(args.stream_id));
+          } catch (error) { if (error instanceof StreamPolicyError) { this.onMoved?.(unresolvedMove); throw error; } }
+        }
+        this.onMoved?.({ messageId: id, source: { streamId: original.stream_id!, topic: original.subject },
+          propagateMode: args.propagate_mode ?? 'change_one', destination, snapshot });
+        const channelId = destination ? this.channelIds?.channelIdOf(streamKey(destination.streamId)) ?? (this.channelIds ? null : `zulip:${destination.stream}`) : null;
+        return { ...result, moved_to: { channelId, stream: destination?.stream ?? null, topic: destination?.topic ?? null },
+          ...(!destination ? { routing_note: 'Move request succeeded, but placement is unconfirmed. Do not repeat the move automatically; inspect current placement or use send_message with reply_to before replying.' } : {}) };
+      }
+
       case "edit_message": {
         const messageId = positiveIdArg("message_id", args.message_id);
+        if (args.topic !== undefined || args.stream_id !== undefined || args.propagate_mode !== undefined) throw new CallerValidationError("use move_messages for topic or stream moves");
         if (typeof args.content !== "string") throw new CallerValidationError("content must be a string");
         const edited = async (): Promise<Audience> => {
           const { message } = await api.request<{ message?: { type?: unknown; stream_id?: unknown } }>("GET", `/messages/${messageId}`, `reading message ${messageId}`, { apply_markdown: false, allow_empty_topic_name: true });

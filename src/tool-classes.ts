@@ -44,6 +44,7 @@ export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
   send_poll: ['comms'],
   get_poll_results: ['comms'],
   vote_poll: ['comms'],
+  move_messages: ['comms'],
   edit_message: ['comms'],
   delete_message: ['comms'],
   add_reaction: ['comms'],

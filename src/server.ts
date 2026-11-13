@@ -281,6 +281,8 @@ export class ZulipMcplServer {
       plane.subscriptions.onChange(changed); plane.onChange(changed);
     }
     // Sends made through the tool surface and through publish are part of the rollback record.
+    this.tools.onMoveStarted = () => this.channelManager.moveSnapshot();
+    this.tools.onMoved = move => { this.adapter.noteSelfMoved?.(move); this.channelManager.noteMove(move); };
     this.tools.onSent = (sent) => this.stateTracker.recordSent(sent.messageId, sent.channelId, sent.content);
     this.adapter.onSent = (sent) => this.stateTracker.recordSent(sent.messageId, sent.channelId, sent.content);
     // A stream `listen` just subscribed the bot to is registered at once, so
