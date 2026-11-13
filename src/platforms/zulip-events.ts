@@ -129,6 +129,7 @@ export interface ZulipRetrieveResponse {
 }
 
 export interface ZulipEventLoopOptions {
+  messageIds?: import("../message-ids.js").MessageIds;
   /** First retry delay after a poll failure. Default 2000ms. */
   baseBackoffMs?: number;
   /** Upper bound for the exponential backoff. Default 60000ms. */
@@ -177,7 +178,7 @@ export class ZulipEventLoop {
   private readonly pollTimeoutMs: number;
   private readonly directory: StreamDirectory | null;
 
-  constructor(options: ZulipEventLoopOptions = {}) {
+  constructor(private readonly options: ZulipEventLoopOptions = {}) {
     this.directory = options.directory ?? null;
     this.baseBackoffMs = options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS;
     this.maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
@@ -277,7 +278,7 @@ export class ZulipEventLoop {
       const gap = this.pendingGap;
       this.pendingGap = null;
       const since = gap.lastMessageId != null
-        ? `after message id ${gap.lastMessageId}` +
+        ? `after message id ${this.options.messageIds?.format(gap.lastMessageId) ?? gap.lastMessageId}` +
           (gap.lastMessageTimestamp != null
             ? ` (${new Date(gap.lastMessageTimestamp * 1000).toISOString()})`
             : '')

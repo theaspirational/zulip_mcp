@@ -1,3 +1,4 @@
+import { LEGACY_IDS, type MessageIds } from './message-ids.js';
 import { isRefusal, type ZulipApi, type ZulipRefusal, type ZulipSuccess } from './zulip-api.js';
 import { withAttachmentLinks, type UploadedFile } from './uploads.js';
 import { blankLineAboveTables } from './tables.js';
@@ -87,13 +88,14 @@ export async function sendMessage(
   destination: Destination,
   content: string,
   opts: {
+    messageIds?: MessageIds;
     limit: number;
     unlinkable: Unlinkable;
     upload?: () => Promise<UploadedFile[]>;
     onChunk?: (chunk: SentChunk) => void;
   },
 ): Promise<SendResult> {
-  const prepared = await linkMessages(api, prepareOutgoing(content), async () => audienceOf(destination), opts.unlinkable);
+  const prepared = await linkMessages(api, prepareOutgoing(content), async () => audienceOf(destination), opts.unlinkable, opts.messageIds ?? LEGACY_IDS);
   const uploaded = (await opts.upload?.()) ?? [];
   const parts = chunkMessage(withAttachmentLinks(prepared, uploaded), opts.limit);
   if (parts.length === 0) throw new NothingToSend();

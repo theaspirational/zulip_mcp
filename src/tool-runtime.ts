@@ -7,6 +7,8 @@
  * are the plain-MCP surface every client gets.
  */
 
+import { LEGACY_IDS, type MessageIds } from "./message-ids.js";
+import { validateMessageLinks } from "./message-links.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -149,9 +151,9 @@ export function parseDate(dateStr: string | undefined, defaultDate: Date): Date 
 }
 
 // Helper function to format messages
-export function formatMessages(messages: any[], format: string): string {
+export function formatMessages(messages: any[], format: string, ids: MessageIds = LEGACY_IDS): string {
   if (format === 'raw') {
-    return JSON.stringify(messages, null, 2);
+    return JSON.stringify(ids.project(messages.map(m => ({ ...m, id: ids.format(m.id) }))), null, 2);
   }
 
   if (format === 'summary') {
@@ -209,11 +211,12 @@ export function formatHistoryLines(
   policy: ReactionPolicy = SHOW_ALL,
   selfUserId: number | null = null,
   formatTime: (d: Date) => string = utcLineTime,
+  ids: MessageIds = LEGACY_IDS,
 ): string {
   if (messages.length === 0) return "(no messages)";
   return messages.map((m) => {
     const head = messageLineHead({
-      id: m.id,
+      id: ids.format(m.id),
       time: Number.isNaN(m.timestamp.getTime()) ? "" : formatTime(m.timestamp),
       stream: m.isDm ? null : (m.streamNameShown ?? ""),
       topic: m.topic,
@@ -239,6 +242,7 @@ export function toToolCallResult(result: unknown): ToolCallResult {
 }
 
 export class ZulipToolRuntime {
+  readonly messageIds: MessageIds;
   private readonly api: ZulipApi;
   private readonly sessionId: string;
   private readonly monitoredChannels = new Map<string, ChannelState>();
@@ -343,8 +347,9 @@ export class ZulipToolRuntime {
   constructor(
     private readonly session: ZulipSession,
     private readonly stateDir: string = STATE_DIR,
-    options: { uploader?: Uploader; uploadPolicy?: UploadPolicy; formatTime?: (d: Date) => string; maxMessageLength?: number } = {},
+    options: { messageIds?: MessageIds; uploader?: Uploader; uploadPolicy?: UploadPolicy; formatTime?: (d: Date) => string; maxMessageLength?: number } = {},
   ) {
+    this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.api = session.api;
     this.sessionId = session.sessionId;
     this.formatTime = options.formatTime ?? agentLineTimeFormatter();
@@ -376,6 +381,7 @@ export class ZulipToolRuntime {
     const posted: number[] = [];
     try {
       return await sendMessage(this.api, destination, content, {
+        messageIds: this.messageIds,
         limit: this.maxMessageLength,
         unlinkable: "refuse",
         upload: () => this.uploadFor(args),
@@ -501,6 +507,21 @@ export class ZulipToolRuntime {
 
   /** Execute a tool. Returns the raw handler result; see toToolCallResult. */
   async handleToolCall(name: string, args: any): Promise<any> {
+    args = { ...(args ?? {}) };
+    let warned = false;
+    const warning = `Warning: bare message_id accepted; use ${this.messageIds.tag}:<n>.`;
+    const bare = () => { if (!warned) { warned = true; console.error(`[zulip-mcp] ${warning}`); } };
+    if (this.messageIds.mode !== 'legacy') {
+      const fields = name === 'send_message' ? ['reply_to'] : name === 'fetch_history' ? ['before', 'after']
+        : ['edit_message', 'move_messages', 'delete_message', 'add_reaction', 'remove_reaction', 'fetch_around', 'get_poll_results', 'vote_poll'].includes(name) ? ['message_id'] : [];
+      for (const field of fields) if (args[field] !== undefined) args[field] = this.messageIds.parse(args[field], bare);
+    }
+    if (['send_message', 'send_dm', 'edit_message'].includes(name) && typeof args.content === 'string') validateMessageLinks(args.content, this.messageIds, bare);
+    const result = this.messageIds.project(await this.handleValidatedCall(name, args), ['send_message', 'send_dm', 'send_poll'].includes(name));
+    return warned ? { ...result, warnings: [warning] } : result;
+  }
+
+  private async handleValidatedCall(name: string, args: any): Promise<any> {
     const api = this.api;
     const monitoredChannels = this.monitoredChannels;
     args = args ?? {};
@@ -721,7 +742,7 @@ export class ZulipToolRuntime {
 
         // Format output — suppressed reaction markers never reach the model, raw format included.
         const format = args.format || "detailed";
-        const formattedOutput = formatMessages(stripSuppressedReactions(filteredMessages, this.reactionPolicy), format);
+        const formattedOutput = formatMessages(stripSuppressedReactions(filteredMessages, this.reactionPolicy), format, this.messageIds);
 
         return {
           channel: args.channel,
@@ -808,7 +829,7 @@ export class ZulipToolRuntime {
 
         // Format output — suppressed reaction markers never reach the model, raw format included.
         const format = args.format || "detailed";
-        const formattedOutput = formatMessages(stripSuppressedReactions(allUnreadMessages, this.reactionPolicy), format);
+        const formattedOutput = formatMessages(stripSuppressedReactions(allUnreadMessages, this.reactionPolicy), format, this.messageIds);
 
         return {
           total_unread: allUnreadMessages.length,
@@ -889,7 +910,7 @@ export class ZulipToolRuntime {
         const tabled = prepareOutgoing(args.content);
         let content: string;
         try {
-          content = await linkMessages(api, tabled, edited, "refuse");
+          content = await linkMessages(api, tabled, edited, "refuse", this.messageIds);
         } catch (err) {
           if (err instanceof MessageLinkRefused) throw new Error(`${err.message} The message wasn't edited.`);
           throw err;
@@ -996,7 +1017,7 @@ export class ZulipToolRuntime {
         const topics = result.topics || [];
         const shown = limit === undefined ? topics : topics.slice(0, limit);
         const formatted = shown
-          .map((t: any, idx: number) => `${idx + 1}. **${t.name}** (latest msg: ${t.max_id})`)
+          .map((t: any, idx: number) => `${idx + 1}. **${t.name}** (latest msg: ${this.messageIds.format(t.max_id)})`)
           .join("\n");
         const heading = shown.length < topics.length
           ? `${topics.length} Topics, the newest ${shown.length} shown`
@@ -1118,7 +1139,7 @@ export class ZulipToolRuntime {
           newest_id: page.messages[page.messages.length - 1]?.id ?? null,
           reached_oldest: page.foundOldest,
           reached_newest: page.foundNewest,
-          formatted_history: formatHistoryLines(page.messages, undefined, this.reactionPolicy, this.session.selfUserId, this.formatTime),
+          formatted_history: formatHistoryLines(page.messages, undefined, this.reactionPolicy, this.session.selfUserId, this.formatTime, this.messageIds),
         };
       }
 
@@ -1139,7 +1160,7 @@ export class ZulipToolRuntime {
           count: page.messages.length,
           oldest_id: page.messages[0]?.id ?? null,
           newest_id: page.messages[page.messages.length - 1]?.id ?? null,
-          formatted_history: formatHistoryLines(page.messages, messageId, this.reactionPolicy, this.session.selfUserId, this.formatTime),
+          formatted_history: formatHistoryLines(page.messages, messageId, this.reactionPolicy, this.session.selfUserId, this.formatTime, this.messageIds),
         };
       }
 
@@ -1299,7 +1320,7 @@ export class ZulipToolRuntime {
         })),
       };
 
-      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(status, null, 2) }] };
+      return { contents: [{ uri, mimeType: "application/json", text: JSON.stringify(this.messageIds.project(status), null, 2) }] };
     }
 
     // Handle individual channel unread count
