@@ -58,7 +58,7 @@ export interface RoutingHints {
  * when it routes the message, if the host holds no id for that channel.
  */
 export interface IncomingEntry {
-  /** null reserves all current channel frontiers until placement is read. */
+  /** null resolves placement outside lanes, then joins the target tail (best-effort ordering). */
   key: ChannelKey | null;
   messageId: string;
   ready(changes?: readonly ChangeEntry[]): Promise<{ message: KeyedMessage; newChannel?: ChannelDescriptor } | null>;

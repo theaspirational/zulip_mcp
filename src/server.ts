@@ -1,4 +1,5 @@
 import { AsyncResource } from 'node:async_hooks';
+import { boundedPollRead, POLL_PLACEMENT_WAIT_MS } from './polls.js';
 import { subscribedError } from './tool-errors.js';
 import { StreamReadGate } from './stream-read-gate.js';
 /**
@@ -1216,36 +1217,19 @@ export class ZulipMcplServer {
     }, id === null ? { kind: 'other' } : { kind: 'message', id });
   }
 
-  /** No routing hint: reserve every existing frontier before reading placement.
-   * Rare (a vote for a never-seen/evicted message); known votes use one lane.
-   * Each reservation routes in place, so later messages cannot overtake it.
+  /** Unknown/evicted votes have best-effort ordering. Resolve outside all
+   * lanes, with one bounded placement wait, then join the resolved lane at
+   * its current tail. Never reserve another channel's frontier: even a held
+   * or stuck lane elsewhere must not delay placement or target delivery.
+   * A moved hint above likewise joins its destination without another wait.
    */
   private onUnplacedIncoming(entry: IncomingEntry): void {
     const lanes = this.lanes!;
-    const keys = new Set([...lanes.keys(), ...this.directory.ids().map(streamKey)]);
-    const active = [...keys].filter(key => !lanes.lane(key).isEnded);
-    let remaining = active.length;
-    let resolve!: () => void;
-    const frontier = new Promise<void>(done => { resolve = done; });
-    if (remaining === 0) resolve();
-    const ready = frontier.then(() => entry.ready());
-    let handed = false;
-    if (active.length === 0) {
-      void ready.then(result => {
-        if (result) this.onIncoming({ ...entry, key: result.message.key, ready: async () => result });
-      }).catch(error => console.error('[zulip-mcp] unplaced event failed:', error));
-      return;
-    }
-    for (const key of active) lanes.lane(key).enter(async ctx => {
-      if (--remaining === 0) resolve();
-      const result = await ready;
-      if (!result || ctx.ended) return;
-      if (result.message.key === key) return this.route(ctx, result.message, result.newChannel);
-      if (!keys.has(result.message.key) && !handed) {
-        handed = true;
-        this.onIncoming({ ...entry, key: result.message.key, ready: async () => result });
-      }
-    });
+    void boundedPollRead(entry.ready(), POLL_PLACEMENT_WAIT_MS).then(result => {
+      // Detached placement must not cross a disconnect/reconnect or shutdown.
+      if (!result || this.lanes !== lanes || lanes.lane(result.message.key).isEnded) return;
+      this.onIncoming({ ...entry, key: result.message.key, ready: async () => result });
+    }).catch(error => console.error('[zulip-mcp] unplaced event failed:', error));
   }
 
   private letGo(w: DeliveryWriter, key: ChannelKey, id: number): void {

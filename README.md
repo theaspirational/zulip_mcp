@@ -679,6 +679,16 @@ notifications on failure rather than trusting cached placement. Poll events do
 not move conversation routing hints or history watermarks. User names fall
 back to `user <id>` when the directory is unavailable.
 
+Vote ordering is **best-effort**: a known channel hint queues the vote in that
+channel's arrival order. Unknown/evicted placement is resolved independently
+with a total wait of at most 3 seconds (failed lookups drop the notification).
+A resolved vote, or a vote whose fresh placement differs from its hint, joins
+the resolved channel's lane behind whatever is queued then, without any extra
+ordering wait. Rare moves/evictions can therefore reorder votes relative to
+messages. No other channel is reserved or blocked; a stuck unrelated lane
+cannot delay them. Work already held on the resolved channel still precedes
+the vote, and delivery always rechecks visibility/revocation.
+
 ### Stream scope modes
 
 Unset `ZULIP_STREAMS_MODE` keeps upstream behavior exactly, including the

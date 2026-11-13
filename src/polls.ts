@@ -115,10 +115,13 @@ export function pollContent(question: unknown, options: unknown): string {
   return `/poll ${question}\n${options.join('\n')}`;
 }
 
+/** Total budget for resolving an unplaced vote; never wait for lane frontiers. */
+export const POLL_PLACEMENT_WAIT_MS = 3000;
+
 export class PollLookupTimeout extends Error {}
 
 /** Bounds callers; native transport also aborts timed-out GETs. */
-export async function boundedPollRead<T>(read: Promise<T>, ms = 3000): Promise<T> {
+export async function boundedPollRead<T>(read: Promise<T>, ms = POLL_PLACEMENT_WAIT_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([read, new Promise<never>((_, reject) => {
@@ -160,7 +163,7 @@ export class PollLookups {
   private inFlight = 0;
   private tokens: number = POLL_LIMITS.lookups;
   private refilled: number;
-  constructor(private now = Date.now, private timeoutMs = 3000) { this.refilled = now(); }
+  constructor(private now = Date.now, private timeoutMs = POLL_PLACEMENT_WAIT_MS) { this.refilled = now(); }
   async fetch(api: ZulipApi, id: number): Promise<ZulipRawMessage | null> {
     const now = this.now();
     this.tokens = Math.min(POLL_LIMITS.lookups, this.tokens + Math.max(0, now - this.refilled) / 3000);

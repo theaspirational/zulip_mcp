@@ -1216,9 +1216,9 @@ export class ZulipAdapter implements PlatformAdapter {
       });
     }, onSystemEvent, reactionHandler, changeHandler, s => {
       if (!pollsEnabled() || parsePollSubmessage(s)?.type !== 'vote') return;
-      // No locate(), users lookup or content read on arrival. Even an expired
-      // hint is enough to reserve a lane; ready resolves current placement and
-      // the server hands moves to the destination under its normal rules.
+      // A known hint reserves only its own lane. With no hint the server
+      // resolves placement independently, never reserving other frontiers.
+      // Moves and evictions therefore have best-effort notification ordering.
       onMessage({
         key: this.placementHints.get(s.message_id!) ?? null,
         messageId: `poll:${s.message_id}:${s.id}`,

@@ -12,6 +12,7 @@ import { FiltersPlane } from '../src/filters.ts';
 import { StreamDirectory } from '../src/stream-directory.ts';
 import { streamKey } from '../src/channel-key.ts';
 import { MessageIds } from '../src/message-ids.ts';
+import { POLL_PLACEMENT_WAIT_MS } from '../src/polls.ts';
 import { standInApi } from '../test/zulip-stand-in.ts';
 
 const turn = () => new Promise<void>(r => setImmediate(r));
@@ -93,9 +94,9 @@ async function fixture(t: any, { scoped = false, open = true, active = false, pr
 
 
 // The event loop applies policy synchronously; no event callback may read
-// placement before the channel's held read (even after multiple regrants).
+// stale data after regrants. Unplaced votes use best-effort lane ordering.
 const nativeStart = ZulipEventLoop.prototype.start;
-for (const moved of [false, true]) test(`uncached vote reserves arrival order through regrants, moved=${moved}`, async t => {
+for (const moved of [false, true]) test(`uncached vote survives regrants with best-effort ordering, moved=${moved}`, async t => {
   const f = await fixture(t, { scoped: true });
   const held = deferred<void>(); f.releaseOnShutdown(() => held.resolve());
   f.lanes.lane(streamKey(12)).enterRead(async () => { await held.promise; });
@@ -116,14 +117,14 @@ for (const moved of [false, true]) test(`uncached vote reserves arrival order th
       polled = true; return { events };
     },
   });
-  await nativeStart.call(f.eventLoop, api, ...f.hooks.slice(1));
-  assert.equal(f.calls.filter(c => c.path === '/messages/77').length, 0, 'no placement or content GET at enqueue');
-  assert.equal(f.incoming.length, 0);
   const destination = deferred<void>(); f.releaseOnShutdown(() => destination.resolve());
   if (moved) {
     f.set(raw(77, 13, { subject: 'moved' }));
     f.lanes.lane(streamKey(13)).enterRead(async () => { await destination.promise; });
   }
+  await nativeStart.call(f.eventLoop, api, ...f.hooks.slice(1));
+  // Unknown placement may be read without waiting for the revoked source lane.
+  assert.equal(f.incoming.length, 0);
   f.lanes.lane(streamKey(12)).host(async () => {
     await f.server.channelManager.registerChannels();
     f.server.channelManager.markOpen('zulip:general');
@@ -137,9 +138,9 @@ for (const moved of [false, true]) test(`uncached vote reserves arrival order th
     destination.resolve();
   }
   await f.flush();
-  assert.deepEqual(f.incoming.map(m => m.messageId), moved ? ['alpha:99', 'poll:77:20'] : ['poll:77:20', 'alpha:99']);
+  assert.deepEqual(f.incoming.map(m => m.messageId).sort(), ['alpha:99', 'poll:77:20'].sort());
   assert.equal(f.server.delivery.watermark(streamKey(12)), 99);
-  if (moved) assert.equal(f.incoming[1].channelId, 'zulip:other');
+  if (moved) assert.equal(f.incoming.find(m => m.messageId === 'poll:77:20').channelId, 'zulip:other');
 });
 
 for (const args of [{ channels: ['nonexistent'] }, {}, { channels: ['general'] }]) {
@@ -208,7 +209,7 @@ for (const name of ['mute_channel', 'set_reaction_visibility', 'filters_update']
   });
 }
 
-test('a vote without any placement hint reserves frontiers without eager I/O', async t => {
+test('a vote without any placement hint uses best-effort ordering', async t => {
   const f = await fixture(t, { scoped: true });
   (f.adapter as any).placementHints.clear();
   (f.adapter as any).seen.clear();
@@ -217,9 +218,8 @@ test('a vote without any placement hint reserves frontiers without eager I/O', a
   await turn();
   f.poll(); f.message(99);
   await turn();
-  assert.equal(f.calls.filter(c => c.path === '/messages/77').length, 0);
-  held.resolve(); await f.flush();
-  assert.deepEqual(f.incoming.map(m => m.messageId), ['poll:77:2', 'alpha:99']);
+  held.resolve(); await turn(); await f.flush();
+  assert.deepEqual(f.incoming.map(m => m.messageId).sort(), ['poll:77:2', 'alpha:99'].sort());
 });
 
 
@@ -247,7 +247,7 @@ for (const name of ['start_monitoring', 'get_channel_history', 'get_unread_messa
   });
 }
 
-test('unplaced votes and multi-channel filter turns reserve synchronously without deadlock', { timeout: 5000 }, async t => {
+test('unplaced votes and multi-channel filter turns complete without deadlock', { timeout: 5000 }, async t => {
   const f = await fixture(t, { scoped: true });
   (f.adapter as any).placementHints.clear();
   const held = deferred<void>(); f.releaseOnShutdown(() => held.resolve());
@@ -257,7 +257,8 @@ test('unplaced votes and multi-channel filter turns reserve synchronously withou
   const pending = (f.server as any).serverTool('filters_update', { addStreams: ['general', 'other'], setDmUsers: ['9'] });
   f.poll(3); f.message(99);
   held.resolve(); await pending; await f.flush();
-  assert.deepEqual(f.incoming.map(m => m.messageId), ['poll:77:2', 'poll:77:3', 'alpha:99']);
+  await turn(); await f.flush();
+  assert.deepEqual(f.incoming.map(m => m.messageId).sort(), ['poll:77:2', 'poll:77:3', 'alpha:99'].sort());
 });
 
 
@@ -313,4 +314,101 @@ test('all retained channel lists and unread resources use the authorized project
   assert.equal(f.calls.length, readsBefore, 'revoked reads never reach the API');
   assert.equal(retained.get('general'), state, 'none of the views mutate retained state');
   held.resolve(); await f.lanes.quiet();
+});
+
+
+// Review 3 probes: the unrelated lane stays held throughout the assertions.
+async function promptly(check: (expired: () => boolean) => Promise<void>) {
+  let expired = false;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([check(() => expired), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('delivery exceeded 3 s bound')), 3000);
+    })]);
+  } finally { expired = true; clearTimeout(timer); }
+}
+
+for (const unknown of [true, false]) test(`vote placement never waits on unrelated held lane, unknown=${unknown}`, async t => {
+  const f = await fixture(t);
+  if (unknown) { (f.adapter as any).placementHints.clear(); (f.adapter as any).seen.clear(); }
+  const held = deferred<void>(); f.releaseOnShutdown(() => held.resolve());
+  f.lanes.lane(streamKey(12)).enterRead(async () => { await held.promise; });
+  await turn();
+  f.set(raw(77, 13, { subject: 'resolved' }));
+  if (!unknown) {
+    // The known hint uses 13, with 12 stuck elsewhere.
+    (f.adapter as any).placementHints.set(77, streamKey(13));
+  }
+  f.poll(); f.message(99, 13);
+  await promptly(async expired => {
+    while (!expired() && f.incoming.length < 2) { await turn(); await f.server.channelManager.flush(); }
+  });
+  assert.deepEqual(f.incoming.map(m => m.messageId).sort(), ['alpha:99', 'poll:77:2'].sort());
+  assert.equal(f.incoming.find(m => m.messageId === 'poll:77:2').channelId, 'zulip:other');
+  assert.equal(f.server.delivery.watermark(streamKey(12)), undefined);
+});
+
+test('moved vote at a held destination completes without a circular frontier wait', async t => {
+  const f = await fixture(t);
+  const held = deferred<void>(); f.releaseOnShutdown(() => held.resolve());
+  f.lanes.lane(streamKey(13)).enterRead(async () => { await held.promise; });
+  await turn();
+  f.set(raw(77, 13, { subject: 'moved' }));
+  f.poll(); f.message(99, 13);
+  await turn(); await turn();
+  assert.equal(f.incoming.length, 0);
+  held.resolve();
+  await promptly(() => f.flush());
+  assert.deepEqual(f.incoming.map(m => m.messageId).sort(), ['alpha:99', 'poll:77:2'].sort());
+});
+
+for (const moved of [false, true]) test(`best-effort vote still checks revocation after placement, moved=${moved}`, async t => {
+  const f = await fixture(t, { scoped: true });
+  if (!moved) { (f.adapter as any).placementHints.clear(); (f.adapter as any).seen.clear(); }
+  const held = deferred<void>(); f.releaseOnShutdown(() => held.resolve());
+  f.lanes.lane(streamKey(13)).enterRead(async () => { await held.promise; });
+  await turn();
+  f.set(raw(77, 13)); f.poll();
+  for (let i = 0; i < 5; i++) await turn();
+  assert.equal(f.calls.filter(c => c.path === '/messages/77').length, 1, 'placement resolved while destination held');
+  f.filters.subscriptions.apply({ op: 'remove', stream_ids: [13] });
+  f.filters.subscriptions.apply({ op: 'add', subscriptions: [streams[1]] });
+  held.resolve(); await turn(); await f.flush();
+  assert.deepEqual(f.incoming, []);
+  assert.deepEqual(f.pushed, []);
+});
+
+test('a stuck unknown placement lookup never delays messages on any lane', async t => {
+  const f = await fixture(t);
+  (f.adapter as any).placementHints.clear(); (f.adapter as any).seen.clear();
+  const lookup = deferred<any>(); f.releaseOnShutdown(() => lookup.resolve({ result: 'success', message: raw(77, 13) }));
+  f.get(() => lookup.promise);
+  f.poll();
+  await turn();
+  f.message(98, 12); f.message(99, 13);
+  await promptly(async expired => {
+    while (!expired() && f.incoming.length < 2) { await turn(); await f.server.channelManager.flush(); }
+  });
+  assert.deepEqual(f.incoming.map(m => m.messageId).sort(), ['alpha:98', 'alpha:99']);
+});
+
+
+test('unknown placement has one named total budget and cannot deliver a late result', async t => {
+  const f = await fixture(t);
+  assert.ok(POLL_PLACEMENT_WAIT_MS > 0 && POLL_PLACEMENT_WAIT_MS <= 3000);
+  (f.adapter as any).placementHints.clear(); (f.adapter as any).seen.clear();
+  const lookup = deferred<any>();
+  f.get(() => lookup.promise);
+  // Advance only placement timers, not wall time or unrelated lane scheduling.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.method(console, 'error', () => {});
+  try {
+    f.poll(); await turn();
+    t.mock.timers.tick(POLL_PLACEMENT_WAIT_MS);
+    await turn();
+    lookup.resolve({ result: 'success', message: raw(77, 13) });
+    await turn(); await f.flush();
+    assert.deepEqual(f.incoming, []);
+    assert.deepEqual(f.pushed, []);
+  } finally { t.mock.timers.reset(); }
 });

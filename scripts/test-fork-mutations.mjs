@@ -8,9 +8,26 @@ const evidence = process.env.ORGASMIC_EVIDENCE_DIR ?? '.tmp/mutations';
 mkdirSync(evidence, { recursive: true });
 const mutants = [
   {
+    name: 'unplaced-reserves-frontiers', file: 'src/server.ts', test: 'test/fixRound2.test.ts',
+    from: 'void boundedPollRead(entry.ready(), POLL_PLACEMENT_WAIT_MS).then(result => {',
+    to: `const frontier = Promise.all([...lanes.keys()].map(key => new Promise<void>(resolve => lanes.lane(key).enter(() => resolve()))));
+    void boundedPollRead(frontier.then(() => entry.ready()), POLL_PLACEMENT_WAIT_MS).then(result => {`,
+    killedBy: 'best-effort vote still checks revocation after placement, moved=false',
+    pattern: 'best-effort vote still checks revocation after placement, moved=false',
+  },
+  {
     name: 'vote-bypasses-lane', file: 'src/platforms/zulip.ts', test: 'test/forkLanes.test.ts',
-    from: 'const enter = (key: ChannelKey) => onMessage({ key, messageId: `poll:${s.message_id}:${s.id}`, ready: () => this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s)) });',
-    to: 'const eager = this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s)); const enter = (key: ChannelKey) => onMessage({ key, messageId: `poll:${s.message_id}:${s.id}`, ready: () => eager });',
+    from: `onMessage({
+        key: this.placementHints.get(s.message_id!) ?? null,
+        messageId: \`poll:\${s.message_id}:\${s.id}\`,
+        ready: () => this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s)),
+      });`,
+    to: `const eager = this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s));
+      onMessage({
+        key: this.placementHints.get(s.message_id!) ?? null,
+        messageId: \`poll:\${s.message_id}:\${s.id}\`,
+        ready: () => eager,
+      });`,
     killedBy: 'a poll vote waits behind its channel read',
   },
   {
@@ -36,7 +53,7 @@ for (const mutant of mutants) {
   let result;
   try {
     writeFileSync(mutant.file, original.replace(mutant.from, mutant.to));
-    result = spawnSync(process.execPath, ['--import', 'tsx', '--test', mutant.test], { encoding: 'utf8', timeout: 30000 });
+    result = spawnSync(process.execPath, ['--import', 'tsx', '--test', ...(mutant.pattern ? ['--test-name-pattern', mutant.pattern] : []), mutant.test], { encoding: 'utf8', timeout: 30000 });
   } finally {
     writeFileSync(mutant.file, original);
   }
