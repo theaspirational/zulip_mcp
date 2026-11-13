@@ -1,4 +1,5 @@
 import { ZulipRefused, statusOfAnswer } from './zulip-api.js';
+import { StreamPolicyError } from './validation-errors.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /** Explicit audit inventory. New registrations must choose a read contract. */
@@ -54,7 +55,7 @@ export class StreamReadGate {
     return this.allowed(id) && this.unchanged(id, checkpoint);
   }
   assertFresh(id: number | undefined, checkpoint: number): void {
-    if (!this.fresh(id, checkpoint)) throw new Error('Read refused by subscribed-stream policy: revoked snapshot');
+    if (!this.fresh(id, checkpoint)) throw new StreamPolicyError('revoked snapshot');
     this.assert(id);
   }
 
@@ -75,10 +76,10 @@ export class StreamReadGate {
     return this.select(names, name => this.policy.resolveName(name));
   }
   assert(id: number | undefined): void {
-    if (id === undefined || !this.allowed(id)) throw new Error('Read refused by subscribed-stream policy');
+    if (id === undefined || !this.allowed(id)) throw new StreamPolicyError();
     const reads = this.reads.getStore();
     const epoch = reads?.get(id) ?? this.clock;
-    if (!this.fresh(id, epoch)) throw new Error('Read refused by subscribed-stream policy: revoked snapshot');
+    if (!this.fresh(id, epoch)) throw new StreamPolicyError('revoked snapshot');
     reads?.set(id, epoch);
   }
   named(name: string): number {
@@ -87,7 +88,7 @@ export class StreamReadGate {
     return id!;
   }
   requireKnown(): void {
-    if (!this.policy.known()) throw new Error('Read refused by subscribed-stream policy: unknown state');
+    if (!this.policy.known()) throw new StreamPolicyError('unknown state');
   }
   recheck(): void {
     for (const [id, epoch] of this.reads.getStore() ?? []) this.assertFresh(id, epoch);
@@ -150,7 +151,7 @@ export class StreamReadGate {
       }
       if (path === '/get_stream_id') {
         gate.assertFresh(result.stream_id, epoch);
-        if (gate.named(String(params.stream)) !== result.stream_id) throw new Error('Read refused by subscribed-stream policy: address changed');
+        if (gate.named(String(params.stream)) !== result.stream_id) throw new StreamPolicyError('address changed');
       }
       const id = /^\/(?:users\/me\/(\d+)\/topics|streams\/(\d+))$/.exec(path);
       if (id) gate.assertFresh(Number(id[1] ?? id[2]), epoch);

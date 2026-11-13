@@ -59,11 +59,14 @@ export function refusalText(answer: ZulipRefusal): string {
   return answer.msg ? `${answer.msg}${answer.code ? ` (${answer.code})` : ''}` : answer.code ?? 'unknown error';
 }
 
+const HTTP_STATUS = Symbol('zulip-http-status');
+export function statusOfAnswer(answer: object): number | undefined { return (answer as any)[HTTP_STATUS]; }
+
 export class ZulipRefused extends Error {
   readonly code: string | undefined;
   readonly retryAfterSeconds: number | undefined;
 
-  constructor(what: string, answer: ZulipRefusal, readonly mayHaveBeenApplied = false) {
+  constructor(what: string, answer: ZulipRefusal, readonly mayHaveBeenApplied = false, readonly status: number | undefined = statusOfAnswer(answer)) {
     super(`Zulip refused ${what}: ${answer.msg ?? answer.code ?? 'unknown error'}`);
     this.code = typeof answer.code === 'string' ? answer.code : undefined;
     const after = answer['retry-after'];
@@ -78,20 +81,23 @@ export function mayHaveBeenApplied(err: unknown): boolean {
 export function zulipApi(transport: Transport): ZulipApi {
   const answer = async (method: Method, path: string, params?: Record<string, unknown>, opts?: RequestOptions) => {
     const { status, body } = await transport(method, path, params, opts);
+    if (typeof body === 'object' && body !== null) Object.defineProperty(body, HTTP_STATUS, { value: status, configurable: true });
     if (method !== 'GET' && status >= 500 && isRefusal(body)) {
       const text = body.msg || body.code || 'unknown error';
-      return { body: { ...body, msg: `${text}${/[.!?]$/.test(text) ? '' : '.'} ${WRITE_MAY_HAVE_BEEN_APPLIED}` }, serverError: true };
+      return { body: { ...body, msg: `${text}${/[.!?]$/.test(text) ? '' : '.'} ${WRITE_MAY_HAVE_BEEN_APPLIED}` }, serverError: true, status };
     }
-    return { body, serverError: false };
+    return { body, serverError: false, status };
   };
   return {
     async request<T extends object>(method: Method, path: string, what: string, params?: Record<string, unknown>, opts?: RequestOptions) {
-      const { body, serverError } = await answer(method, path, params, opts);
-      if (isRefusal(body)) throw new ZulipRefused(what, body, serverError);
+      const { body, serverError, status } = await answer(method, path, params, opts);
+      if (isRefusal(body)) throw new ZulipRefused(what, body, serverError, status);
       return body as ZulipSuccess<T>;
     },
     async requestAnswer<T extends object>(method: Method, path: string, params?: Record<string, unknown>, opts?: RequestOptions) {
-      return (await answer(method, path, params, opts)).body as ZulipSuccess<T> | ZulipRefusal;
+      const result = await answer(method, path, params, opts);
+      if (typeof result.body === 'object' && result.body !== null) Object.defineProperty(result.body, HTTP_STATUS, { value: result.status, configurable: true });
+      return result.body as ZulipSuccess<T> | ZulipRefusal;
     },
   };
 }

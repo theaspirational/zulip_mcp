@@ -17,3 +17,4 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 - Restore bounded active-topic hints on incoming events without replacing upstream `get_stream_topics`.
 - Port `send_poll`, `get_poll_results`, fresh-placement vote events, and `vote_poll` to upstream's native API; preserve feature-set and comms classifications.
 - Port `ZULIP_STREAMS_MODE=list|subscribed|public`, subscription refresh/events, ID-pinned StreamReadGate and revocation purge across tool, resource, context and delivery boundaries.
+- Fix subscribed-mode errors: typed policy refusals retain their wording; caller validation (including literal-token escaping) stays actionable; remote/transport/internal failures use non-leaking categories.

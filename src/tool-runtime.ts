@@ -1,3 +1,4 @@
+import { CallerValidationError, StreamPolicyError, subscribedError } from './tool-errors.js';
 import type { StreamReadGate } from './stream-read-gate.js';
 /**
  * Tool handlers and MCP resources — the stateful tool layer of this server.
@@ -23,7 +24,7 @@ import {
   toFetchResult,
 } from "./content.js";
 import type { ZulipSession } from "./zulip-client.js";
-import { mayHaveBeenApplied, ZulipNoAnswer, type ZulipApi } from "./zulip-api.js";
+import { mayHaveBeenApplied, ZulipNoAnswer, ZulipRefused, statusOfAnswer, type ZulipApi } from "./zulip-api.js";
 import { dmChannelIdFor, dmCounterparts, fetchAround, fetchHistory, parseDmChannelId, renderReactions, type HistoryQuery, type ReactionSummary, type ZulipMessage, type ZulipRecipient, editedTrailer } from './history.js';
 import { namePosted, prepareOutgoing, SendRefused, sendMessage, ZULIP_MAX_MESSAGE_LENGTH, type Destination } from "./outgoing.js";
 import type { SentRecord } from "./platforms/adapter.js";
@@ -189,7 +190,7 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
 
 function positiveIdArg(name: string, value: unknown): number {
   const id = typeof value === "string" && /^[0-9]+$/.test(value) ? Number(value) : value;
-  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new Error(`${name} must be a positive integer`);
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new CallerValidationError(`${name} must be a positive integer`);
   return id;
 }
 
@@ -369,7 +370,7 @@ export class ZulipToolRuntime {
   }
 
   private requireUploader(): Uploader {
-    if (!this.uploader) throw new Error("file uploads need the realm URL and bot credentials (ZULIP_REALM + ZULIP_EMAIL/ZULIP_API_KEY, or a zuliprc)");
+    if (!this.uploader) throw new CallerValidationError("file uploads need the realm URL and bot credentials (ZULIP_REALM + ZULIP_EMAIL/ZULIP_API_KEY, or a zuliprc)");
     return this.uploader;
   }
 
@@ -422,9 +423,9 @@ export class ZulipToolRuntime {
       });
     } catch (err) {
       if (err instanceof SendRefused) {
-        throw namePosted(new Error(`${posted.length > 0 ? "Zulip: " : ""}${err.answer.msg ?? "Zulip refused the message"}`), posted);
+        throw namePosted(new Error(`${posted.length > 0 ? "Zulip: " : ""}${err.answer.msg ?? "Zulip refused the message"}`, { cause: err }), posted);
       }
-      if (err instanceof MessageLinkRefused) throw new Error(`${err.message} Nothing was sent.`);
+      if (err instanceof MessageLinkRefused) throw new Error(`${err.message} Nothing was sent.`, { cause: err });
       throw err instanceof Error ? namePosted(err, posted) : err;
     }
   }
@@ -432,20 +433,20 @@ export class ZulipToolRuntime {
   /** Resolve and check a reply before uploading files or sending any chunks. */
   private async replyDestination(args: Record<string, any>) {
     const id = numberOrUndefined(args.reply_to);
-    if (!Number.isSafeInteger(id)) throw new Error("reply_to must be an integer message id");
-    if (args.to !== undefined) throw new Error("reply_to sets the destination; omit to");
+    if (!Number.isSafeInteger(id)) throw new CallerValidationError("reply_to must be an integer message id");
+    if (args.to !== undefined) throw new CallerValidationError("reply_to sets the destination; omit to");
     const result = await this.api.requestAnswer<{ message?: any }>("GET", `/messages/${id}`);
     if (result.result === "error") {
       // Keep the API code as well as its wording: missing/deleted/inaccessible
       // messages must never fall back to a caller-supplied destination.
-      throw new Error(`Zulip refused reply_to ${id}${result.code ? ` (${result.code})` : ""}: ${result.msg ?? "unknown error"}`);
+      throw new ZulipRefused(`reply_to ${id}${result.code ? ` (${result.code})` : ""}`, result, false, statusOfAnswer(result));
     }
     const message = result.message;
     const unreadable = () => new Error(`reply_to ${id} has no readable destination`);
     if (!message || !["stream", "private"].includes(message.type)) throw unreadable();
     const type = args.type === "direct" ? "private" : args.type === "channel" ? "stream" : args.type;
     if (type !== undefined && type !== message.type) {
-      throw new Error(`reply_to ${id}: type disagrees with the referenced message`);
+      throw new CallerValidationError("reply_to type disagrees with the referenced message");
     }
     if (message.type === "stream") {
       const name = message.display_recipient;
@@ -458,7 +459,7 @@ export class ZulipToolRuntime {
         ? { type: message.type, to: message.stream_id ?? name, topic: message.subject, channelId: channelId ?? named, receipt: { channelId, channel: name, topic: message.subject } }
         : { type: message.type, to: message.stream_id ?? name, topic: args.topic, channelId: channelId ?? named, receipt: { channelId, channel: name } };
     }
-    if (args.topic !== undefined) throw new Error(`reply_to ${id} is a direct message, which has no topic; omit topic`);
+    if (args.topic !== undefined) throw new CallerValidationError("reply_to is a direct message, which has no topic; omit topic");
 
     const recipients: ZulipRecipient[] = message.display_recipient;
     if (!Array.isArray(recipients) || recipients.length === 0 || recipients.some((r) => !Number.isSafeInteger(r?.id))) {
@@ -600,7 +601,7 @@ export class ZulipToolRuntime {
             results.push({
               channel: channelName,
               status: "error",
-              error: error instanceof Error ? error.message : String(error),
+              error: this.streamGate ? subscribedError(error) : error instanceof Error ? error.message : String(error),
             });
           }
         }
@@ -684,7 +685,7 @@ export class ZulipToolRuntime {
           };
         } catch (error) {
           return {
-            error: error instanceof Error ? error.message : String(error),
+            error: this.streamGate ? subscribedError(error) : error instanceof Error ? error.message : String(error),
           };
         }
       }
@@ -708,7 +709,7 @@ export class ZulipToolRuntime {
           };
         } catch (error) {
           return {
-            error: error instanceof Error ? error.message : String(error),
+            error: this.streamGate ? subscribedError(error) : error instanceof Error ? error.message : String(error),
           };
         }
       }
@@ -857,7 +858,7 @@ export class ZulipToolRuntime {
             channelResults.push({
               channel: channelName,
               status: "error",
-              error: error instanceof Error ? error.message : String(error),
+              error: this.streamGate ? subscribedError(error) : error instanceof Error ? error.message : String(error),
             });
           }
         }
@@ -884,30 +885,30 @@ export class ZulipToolRuntime {
       case "get_poll_results": {
         const id = positiveIdArg("message_id", args.message_id);
         const { message } = await api.request<{ message?: any }>("GET", `/messages/${id}`, "reading poll", { apply_markdown: false }, { timeoutMs: 3000 });
-        if (message?.id !== id) throw new Error("response contained a different message id");
+        if (message?.id !== id) throw new CallerValidationError("response contained a different message id");
         const state = reconstructPoll(message.submessages);
-        if (!state) throw new Error("message has no supported poll widget");
+        if (!state) throw new CallerValidationError("message has no supported poll widget");
         return pollResults(id, state, await new PollUsers().get(api));
       }
       case "vote_poll": {
         const id = positiveIdArg("message_id", args.message_id);
-        if (typeof args.option !== "string" || !args.option) throw new Error("option must be a nonempty option key or exact text");
-        if (args.vote !== undefined && typeof args.vote !== "boolean") throw new Error("vote must be a boolean");
+        if (typeof args.option !== "string" || !args.option) throw new CallerValidationError("option must be a nonempty option key or exact text");
+        if (args.vote !== undefined && typeof args.vote !== "boolean") throw new CallerValidationError("vote must be a boolean");
         const self = this.session.selfUserId;
-        if (!Number.isSafeInteger(self) || self === null || self <= 0) throw new Error("this bot's user id is unavailable");
+        if (!Number.isSafeInteger(self) || self === null || self <= 0) throw new CallerValidationError("this bot's user id is unavailable");
         const { message } = await api.request<{ message?: any }>("GET", `/messages/${id}`, "reading poll", { apply_markdown: false }, { timeoutMs: 3000 });
-        if (message?.id !== id) throw new Error("response contained a different message id");
+        if (message?.id !== id) throw new CallerValidationError("response contained a different message id");
         if (message.type === 'stream') {
           if (!Number.isSafeInteger(message.stream_id) || typeof message.display_recipient !== 'string' ||
-              (this.pollVoteFilters && (!this.pollVoteFilters.streamAllowed(message.display_recipient) || this.pollVoteFilters.streamMuted(message.display_recipient)))) throw new Error('poll conversation is not visible under the stream read policy');
+              (this.pollVoteFilters && (!this.pollVoteFilters.streamAllowed(message.display_recipient) || this.pollVoteFilters.streamMuted(message.display_recipient)))) throw new CallerValidationError('poll conversation is not visible under the stream read policy');
         } else if (message.type === 'private') {
           const parties = message.display_recipient;
-          if (!Array.isArray(parties) || !parties.some(r => r.id === self)) throw new Error('poll conversation is not visible');
+          if (!Array.isArray(parties) || !parties.some(r => r.id === self)) throw new CallerValidationError('poll conversation is not visible');
           const others = parties.filter(r => r.id !== self);
-          if (this.pollVoteFilters && others.length && !others.some(r => this.pollVoteFilters!.dmAllowed({ id: r.id, email: r.email ?? '' }))) throw new Error('poll conversation is not visible under the DM read policy');
-        } else throw new Error('poll conversation is not visible');
+          if (this.pollVoteFilters && others.length && !others.some(r => this.pollVoteFilters!.dmAllowed({ id: r.id, email: r.email ?? '' }))) throw new CallerValidationError('poll conversation is not visible under the DM read policy');
+        } else throw new CallerValidationError('poll conversation is not visible');
         const state = reconstructPoll(message.submessages, self);
-        if (!state) throw new Error("message has no supported poll widget");
+        if (!state) throw new CallerValidationError("message has no supported poll widget");
         const option = resolvePollOption(state, args.option);
         const current = option.voters.has(self);
         const vote = args.vote ?? !current;
@@ -921,17 +922,17 @@ export class ZulipToolRuntime {
         const isPoll = name === "send_poll";
         if (isPoll) {
           const content = pollContent(args.question, args.options);
-          if ([...content].length > this.maxMessageLength) throw new Error("poll exceeds the message length limit; polls cannot be split");
+          if ([...content].length > this.maxMessageLength) throw new CallerValidationError("poll exceeds the message length limit; polls cannot be split");
           args = { type: args.type, to: args.to, topic: args.topic, reply_to: args.reply_to, content };
         }
         args = { ...args, reply_to: args.reply_to ?? undefined, to: args.to ?? undefined,
           topic: args.topic ?? undefined, type: args.type ?? undefined };
-        if (args.reply_to === undefined && (args.to === undefined || args.type === undefined)) throw new Error("type and to are required without reply_to");
+        if (args.reply_to === undefined && (args.to === undefined || args.type === undefined)) throw new CallerValidationError("type and to are required without reply_to");
         const hasText = typeof args.content === "string" && args.content.trim() !== "";
         const hasFiles = Array.isArray(args.attachments) && args.attachments.length > 0;
-        if (!hasText && !hasFiles) throw new Error("content is required (or at least one attachment)");
+        if (!hasText && !hasFiles) throw new CallerValidationError("content is required (or at least one attachment)");
         if (args.reply_to === undefined && args.topic === undefined && (args.type === "stream" || args.type === "channel")) {
-          throw new Error("topic is required for a stream message: name one, or use reply_to to answer a message where it is");
+          throw new CallerValidationError("topic is required for a stream message: name one, or use reply_to to answer a message where it is");
         }
         const reply = args.reply_to !== undefined ? await this.replyDestination(args) : undefined;
         if (reply) args = { ...args, type: reply.type, to: reply.to, topic: reply.topic };
@@ -964,10 +965,10 @@ export class ZulipToolRuntime {
 
       case "send_dm": {
         const wanted: string[] = Array.isArray(args.to) ? args.to.map(String) : [String(args.to ?? "")];
-        if (wanted.length === 0 || wanted.some((w) => !w.trim())) throw new Error("to must name at least one recipient");
+        if (wanted.length === 0 || wanted.some((w) => !w.trim())) throw new CallerValidationError("to must name at least one recipient");
         const hasText = typeof args.content === "string" && args.content.trim() !== "";
         const hasFiles = Array.isArray(args.attachments) && args.attachments.length > 0;
-        if (!hasText && !hasFiles) throw new Error("content is required (or at least one attachment)");
+        if (!hasText && !hasFiles) throw new CallerValidationError("content is required (or at least one attachment)");
         const ids = await Promise.all(wanted.map((w) => this.resolveUserId(w)));
         const { chunks, last: result, uploaded } = await this.send({ type: "private", to: ids }, hasText ? args.content : "", args, dmChannelIdFor(ids));
         const sent = chunks.map((c) => c.id);
@@ -993,7 +994,7 @@ export class ZulipToolRuntime {
 
       case "edit_message": {
         const messageId = positiveIdArg("message_id", args.message_id);
-        if (typeof args.content !== "string") throw new Error("content must be a string");
+        if (typeof args.content !== "string") throw new CallerValidationError("content must be a string");
         const edited = async (): Promise<Audience> => {
           const { message } = await api.request<{ message?: { type?: unknown; stream_id?: unknown } }>("GET", `/messages/${messageId}`, `reading message ${messageId}`, { apply_markdown: false, allow_empty_topic_name: true });
           return message?.type === "stream" && typeof message.stream_id === "number" ? { kind: "stream", id: message.stream_id } : { kind: "direct" };
@@ -1003,7 +1004,7 @@ export class ZulipToolRuntime {
         try {
           content = await linkMessages(api, tabled, edited, "refuse", this.messageIds);
         } catch (err) {
-          if (err instanceof MessageLinkRefused) throw new Error(`${err.message} The message wasn't edited.`);
+          if (err instanceof MessageLinkRefused) throw new Error(`${err.message} The message wasn't edited.`, { cause: err });
           throw err;
         }
         const length = [...content].length;
@@ -1095,12 +1096,12 @@ export class ZulipToolRuntime {
       case "get_stream_topics": {
         const byName = args.stream !== undefined && args.stream !== null;
         const byId = args.stream_id !== undefined && args.stream_id !== null;
-        if (byName === byId) throw new Error("Give exactly one of stream and stream_id.");
-        if (byName && (typeof args.stream !== "string" || args.stream === "")) throw new Error("stream must be a stream's name.");
+        if (byName === byId) throw new CallerValidationError("Give exactly one of stream and stream_id.");
+        if (byName && (typeof args.stream !== "string" || args.stream === "")) throw new CallerValidationError("stream must be a stream's name.");
         const givenId = byId ? positiveIdArg("stream_id", args.stream_id) : undefined;
         const limit = args.limit ?? undefined;
         if (limit !== undefined && !(typeof limit === "number" && Number.isInteger(limit) && limit > 0)) {
-          throw new Error("limit must be a positive integer.");
+          throw new CallerValidationError("limit must be a positive integer.");
         }
         const streamId = byName ? await this.streamIdForName(args.stream) : givenId;
         const result = await api.request<{ topics?: any[] }>("GET", `/users/me/${streamId}/topics`, `topics of stream ${streamId}`);
@@ -1211,7 +1212,7 @@ export class ZulipToolRuntime {
 
       case "fetch_history": {
         const channel = String(args.channel ?? "").trim().replace(/^#/, "");
-        if (!channel) throw new Error("channel is required");
+        if (!channel) throw new CallerValidationError("channel is required");
         const target = await this.historyTarget(channel);
         const limit = clampInt(args.limit, 50, 1, 1000);
         const page = await fetchHistory(api, {
@@ -1236,7 +1237,7 @@ export class ZulipToolRuntime {
 
       case "fetch_around": {
         const messageId = numberOrUndefined(args.message_id);
-        if (messageId === undefined) throw new Error("message_id must be a number");
+        if (messageId === undefined) throw new CallerValidationError("message_id must be a number");
         const limit = clampInt(args.limit, 50, 1, 200);
         const page = await fetchAround(api, messageId, limit);
         const anchor = page.messages.find((m) => m.id === messageId);
@@ -1265,7 +1266,7 @@ export class ZulipToolRuntime {
           const { message } = await api.request<{ message?: any }>('GET', `/messages/${id}`, 'attachment provenance', { apply_markdown: false });
           if (message?.id !== id || !extractZulipAttachments(message.content ?? '').some(ref => {
             try { return parseZulipAttachmentUrl(ref.path, this.session.realm).href === url.href; } catch { return false; }
-          })) throw new Error('Attachment read refused by subscribed-stream policy: attachment not in message');
+          })) throw new StreamPolicyError('attachment not in message');
         }
         const headers: Record<string, string> = {};
         if (this.session.authHeader) headers["Authorization"] = this.session.authHeader;
@@ -1296,7 +1297,7 @@ export class ZulipToolRuntime {
    *  needs its code and type; anything else is tried as unicode by name. */
   private async resolveEmoji(raw: string): Promise<{ emoji_name: string; emoji_code?: string; reaction_type: string }> {
     const name = raw.trim().replace(/^:|:$/g, "");
-    if (!name) throw new Error("emoji_name is required");
+    if (!name) throw new CallerValidationError("emoji_name is required");
     try {
       const realm = Object.values(await this.realmEmoji()).find((e) => e.name === name && !e.deactivated);
       if (realm) return { emoji_name: name, emoji_code: realm.id, reaction_type: "realm_emoji" };
@@ -1453,7 +1454,7 @@ export class ZulipToolRuntime {
 
         return { contents: [{ uri, mimeType: "text/plain", text }] };
       } catch (error) {
-        return { contents: [{ uri, mimeType: "text/plain", text: `Error checking #${channelName}: ${error}` }] };
+        return { contents: [{ uri, mimeType: "text/plain", text: this.streamGate ? subscribedError(error) : `Error checking #${channelName}: ${error}` }] };
       }
     }
 
