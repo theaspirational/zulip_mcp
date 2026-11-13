@@ -199,6 +199,7 @@ export class ZulipMcplServer {
     this.attributeDelivery = options.attributeDelivery !== false;
     this.announceTimeoutMs = options.announceTimeoutMs ?? ANNOUNCE_TIMEOUT_MS;
     this.filters = options.filters ?? null;
+    if (this.filters) this.tools.setPollVoteFilters?.(this.filters);
     this.directory = options.directory ?? new StreamDirectory();
     this.ids = new ChannelIds(this.directory, (why) => this.adapter.refreshStreams?.(why) ?? Promise.resolve());
     this.delivery = new DeliveryState(options.stateDir ?? null, options.sessionId ?? 'default', this.directory);
@@ -1036,6 +1037,13 @@ export class ZulipMcplServer {
     // and push alike. Not watermarked: the host asked not to hear it now,
     // which is not the same as having heard it.
     if (!this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) return;
+    if (meta.pollVote === true) {
+      if (newChannel) await this.channelManager.registerAdditional([newChannel]);
+      if (this.channelManager.isKeyOpen(message.key)) this.channelManager.onIncomingMessage(message.key, message);
+      else if (meta.onOwnMessage === true) await this.pushEvent(message, `zulip_${message.messageId}`, meta);
+      return;
+    }
+
 
     // A channel the host has never seen — a DM from someone new, or a stream
     // the bot was added to after startup (#20): make it a registered channel
@@ -1222,6 +1230,7 @@ export class ZulipMcplServer {
         // names its author.
         ...(meta.attributed === true ? { attributed: true, attributionHeader: meta.attributionHeader } : {}),
         ...(missed ? { missedMessages: missed.messages, missedCharacters: missed.characters } : {}),
+        ...(Array.isArray(meta.activeTopics) ? { activeTopics: meta.activeTopics } : {}),
         ...extraOrigin,
       },
       tags: message.tags,
@@ -2273,7 +2282,7 @@ function numericId(m: { messageId: string }): number | null {
 /** The human sender of a real message; null for synthetic ones (system markers, reactions, catch-up blocks). */
 function senderOf(m: KeyedMessage): { id: number; email: string } | null {
   const meta = (typeof m.metadata === 'object' && m.metadata !== null ? m.metadata : {}) as Record<string, unknown>;
-  if (meta.system === true || meta.reaction === true || meta.missed === true || typeof meta.change === 'string') return null;
+  if (meta.system === true || meta.pollVote === true || meta.reaction === true || meta.missed === true || typeof meta.change === 'string') return null;
   const id = Number(m.author?.id);
   if (!Number.isFinite(id)) return null;
   return { id, email: typeof meta.senderEmail === 'string' ? meta.senderEmail : '' };

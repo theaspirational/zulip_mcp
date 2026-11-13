@@ -576,7 +576,7 @@ export class ChannelManager {
    */
   noteConversation(key: ChannelKey, message: Pick<KeyedMessage, 'messageId' | 'threadId' | 'metadata'>): boolean {
     const meta = isRecord(message.metadata) ? message.metadata : undefined;
-    if (meta?.reaction === true || typeof meta?.change === 'string') return false;
+    if (meta?.pollVote === true || meta?.reaction === true || typeof meta?.change === 'string') return false;
     const id = Number(message.messageId);
     const from = this.lastIncoming.get(key)?.from;
     if (Number.isFinite(id) && from !== undefined && id < from) return false;

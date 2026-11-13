@@ -7,6 +7,7 @@
  * are the plain-MCP surface every client gets.
  */
 
+import { pollContent, reconstructPoll, pollResults, PollUsers, resolvePollOption } from "./polls.js";
 import { LEGACY_IDS, type MessageIds } from "./message-ids.js";
 import { validateMessageLinks } from "./message-links.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -248,6 +249,8 @@ export class ZulipToolRuntime {
    *  host did not confirm is the agent's business, not a stderr line. */
   onSubscribed: ((streams: string[]) => SubscriptionRegistration | Promise<SubscriptionRegistration | void> | void) | null = null;
 
+  private pollVoteFilters?: { streamAllowed(name: string): boolean; streamMuted(name: string): boolean; dmAllowed(user: { id: number; email: string }): boolean };
+  setPollVoteFilters(filters: NonNullable<ZulipToolRuntime['pollVoteFilters']>): void { this.pollVoteFilters = filters; }
   channelIds: ChannelIds | null = null;
 
   private async streamIdsByName(names: string[]): Promise<Map<string, number>> {
@@ -437,7 +440,7 @@ export class ZulipToolRuntime {
     const warning = `Warning: bare message_id accepted; use ${this.messageIds.tag}:<n>.`;
     const bare = () => { if (!warned) { warned = true; console.error(`[zulip-mcp] ${warning}`); } };
     if (this.messageIds.mode !== 'legacy') {
-      const fields = name === 'send_message' ? ['reply_to'] : name === 'fetch_history' ? ['before', 'after']
+      const fields = ['send_message', 'send_poll'].includes(name) ? ['reply_to'] : name === 'fetch_history' ? ['before', 'after']
         : ['edit_message', 'move_messages', 'delete_message', 'add_reaction', 'remove_reaction', 'fetch_around', 'get_poll_results', 'vote_poll'].includes(name) ? ['message_id'] : [];
       for (const field of fields) if (args[field] !== undefined) args[field] = this.messageIds.parse(args[field], bare);
     }
@@ -763,7 +766,49 @@ export class ZulipToolRuntime {
         };
       }
 
+      case "get_poll_results": {
+        const id = positiveIdArg("message_id", args.message_id);
+        const { message } = await api.request<{ message?: any }>("GET", `/messages/${id}`, "reading poll", { apply_markdown: false }, { timeoutMs: 3000 });
+        if (message?.id !== id) throw new Error("response contained a different message id");
+        const state = reconstructPoll(message.submessages);
+        if (!state) throw new Error("message has no supported poll widget");
+        return pollResults(id, state, await new PollUsers().get(api));
+      }
+      case "vote_poll": {
+        const id = positiveIdArg("message_id", args.message_id);
+        if (typeof args.option !== "string" || !args.option) throw new Error("option must be a nonempty option key or exact text");
+        if (args.vote !== undefined && typeof args.vote !== "boolean") throw new Error("vote must be a boolean");
+        const self = this.session.selfUserId;
+        if (!Number.isSafeInteger(self) || self === null || self <= 0) throw new Error("this bot's user id is unavailable");
+        const { message } = await api.request<{ message?: any }>("GET", `/messages/${id}`, "reading poll", { apply_markdown: false }, { timeoutMs: 3000 });
+        if (message?.id !== id) throw new Error("response contained a different message id");
+        if (message.type === 'stream') {
+          if (!Number.isSafeInteger(message.stream_id) || typeof message.display_recipient !== 'string' ||
+              (this.pollVoteFilters && (!this.pollVoteFilters.streamAllowed(message.display_recipient) || this.pollVoteFilters.streamMuted(message.display_recipient)))) throw new Error('poll conversation is not visible under the stream read policy');
+        } else if (message.type === 'private') {
+          const parties = message.display_recipient;
+          if (!Array.isArray(parties) || !parties.some(r => r.id === self)) throw new Error('poll conversation is not visible');
+          const others = parties.filter(r => r.id !== self);
+          if (this.pollVoteFilters && others.length && !others.some(r => this.pollVoteFilters!.dmAllowed({ id: r.id, email: r.email ?? '' }))) throw new Error('poll conversation is not visible under the DM read policy');
+        } else throw new Error('poll conversation is not visible');
+        const state = reconstructPoll(message.submessages, self);
+        if (!state) throw new Error("message has no supported poll widget");
+        const option = resolvePollOption(state, args.option);
+        const current = option.voters.has(self);
+        const vote = args.vote ?? !current;
+        if (vote !== current) await api.request("POST", "/submessage", "voting in poll", {
+          message_id: id, msg_type: "widget", content: JSON.stringify({ type: "vote", key: option.key, vote: vote ? 1 : -1 }),
+        });
+        return { message_id: id, key: option.key, text: option.text, vote };
+      }
+      case "send_poll":
       case "send_message": {
+        const isPoll = name === "send_poll";
+        if (isPoll) {
+          const content = pollContent(args.question, args.options);
+          if ([...content].length > this.maxMessageLength) throw new Error("poll exceeds the message length limit; polls cannot be split");
+          args = { type: args.type, to: args.to, topic: args.topic, reply_to: args.reply_to, content };
+        }
         args = { ...args, reply_to: args.reply_to ?? undefined, to: args.to ?? undefined,
           topic: args.topic ?? undefined, type: args.type ?? undefined };
         if (args.reply_to === undefined && (args.to === undefined || args.type === undefined)) throw new Error("type and to are required without reply_to");
@@ -786,7 +831,13 @@ export class ZulipToolRuntime {
             args = { ...args, to: streamId };
           }
         }
-        const { chunks, last, uploaded } = await this.send({ type: args.type, to: args.to, topic: args.topic }, hasText ? args.content : "", args, channelId);
+        const { chunks, last, uploaded } = isPoll
+          ? await (async () => {
+              const last = await api.request<{ id: number }>("POST", "/messages", "sending poll", { type: args.type, to: args.to, topic: args.topic, content: args.content });
+              this.onSent?.({ messageId: String(last.id), channelId, content: args.content });
+              return { chunks: [{ id: last.id, content: args.content }], last, uploaded: [] };
+            })()
+          : await this.send({ type: args.type, to: args.to, topic: args.topic }, hasText ? args.content : "", args, channelId);
         const ids = chunks.map((c) => c.id);
         return {
           ...last,

@@ -610,3 +610,21 @@ and `metadata.activeTopics` after the cache warms. The default is six topics;
 refresh/repeat suppression (default 60000). Delivery never waits for the
 background topics GET. Moves invalidate snapshots. `get_stream_topics` remains
 the upstream tool for an explicit fresh topic listing.
+
+### Polls
+
+- `send_poll`: `question`, at least two single-line `options`, and the same
+  `type`/`to`/`topic` or `reply_to` destination as upstream `send_message`.
+  Posts one exact `/poll` message; oversized polls are refused, never split.
+- `get_poll_results(message_id)`: reconstructs current widget submessages,
+  returning question, option keys/text/counts and voter IDs/names.
+- `vote_poll(message_id, option, vote?)`: option key or unambiguous exact text.
+  Omit `vote` to toggle; explicit true/false is idempotent against a fresh read.
+
+Poll IDs support realm tags. Allowlist users should retain these exact tool names.
+Votes emit data-only `zulip:poll-vote` notifications; votes on this bot's polls
+are addressed, others ambient. Every notification requires its own fresh GET
+for placement and content, including after a move. Bounded lookup budgets drop
+notifications on failure rather than trusting cached placement. Poll events do
+not move conversation routing hints or history watermarks. User names fall
+back to `user <id>` when the directory is unavailable.
