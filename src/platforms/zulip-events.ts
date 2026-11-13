@@ -317,7 +317,7 @@ export class ZulipEventLoop {
     await this.options.afterRegister?.();
     while (!this.stopped) {
       try {
-        const readEpoch = this.options.readEpoch?.();
+        let readEpoch = this.options.readEpoch?.();
         const response = await api.requestAnswer<ZulipRetrieveResponse>(
           'GET', '/events', { queue_id: this.queueId, last_event_id: lastEventId }, { timeoutMs: this.pollTimeoutMs },
         );
@@ -355,10 +355,17 @@ export class ZulipEventLoop {
           if (this.stopped) return;
           lastEventId = event.id;
 
-          if (event.type === 'subscription') { this.options.onSubscription?.(event as unknown as SubscriptionEvent); continue; }
+          if (event.type === 'subscription') {
+            this.options.onSubscription?.(event as unknown as SubscriptionEvent);
+            // Deliveries after this policy event belong to the new epoch, not
+            // the snapshot from before the GET (or a preceding revocation).
+            readEpoch = this.options.readEpoch?.();
+            continue;
+          }
           if (event.type === 'stream') {
             this.options.onSubscription?.(event as unknown as SubscriptionEvent);
             this.directory?.applyEvent(event as ZulipStreamEvent);
+            readEpoch = this.options.readEpoch?.();
             continue;
           }
 

@@ -82,8 +82,10 @@ export class StreamReadGate {
     if (!this.fresh(id, epoch)) throw new StreamPolicyError('revoked snapshot');
     reads?.set(id, epoch);
   }
+  /** Display/address identity only; callers must separately check freshness. */
+  resolveName(name: string): number | undefined { return this.policy.resolveName(name); }
   named(name: string): number {
-    const id = this.policy.resolveName(name);
+    const id = this.resolveName(name);
     this.assert(id);
     return id!;
   }

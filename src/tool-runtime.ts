@@ -387,26 +387,31 @@ export class ZulipToolRuntime {
     this.streamGate = gate; this.api = gate.api(this.api);
     // Persisted names are not identity or read authority. Resolve after fresh membership arrives.
   }
-  purgeUnavailable(key?: import("./channel-key.js").ChannelKey): void {
+  /** Only the server's channel-owned cleanup job may delete revoked state. */
+  purgeUnavailable(key: import("./channel-key.js").ChannelKey): void {
     if (!this.streamGate) return;
     for (const [name, state] of this.monitoredChannels) {
-      if (key) {
-        // A lane-owned purge must not mutate another channel's retained state
-        // while that other lane still has a read in flight.
-        if (state.streamId !== undefined && streamKey(state.streamId) === key) this.monitoredChannels.delete(name);
-        continue;
-      }
-      if (state.streamId === undefined) state.streamId = this.streamGate.allowed(this.streamGateId(name)) ? this.streamGateId(name) : undefined;
-      if (state.streamId === undefined || !this.streamGate.fresh(state.streamId, state.readEpoch)) this.monitoredChannels.delete(name);
+      const id = state.streamId ?? this.streamGate.resolveName(name);
+      if (id !== undefined && streamKey(id) === key) this.monitoredChannels.delete(name);
     }
   }
+  /** Views hide unavailable snapshots without writing across channel lanes. */
+  private visibleMonitoredChannels(): Map<string, ChannelState> {
+    if (!this.streamGate) return this.monitoredChannels;
+    return new Map([...this.monitoredChannels].filter(([name, state]) =>
+      this.streamGate!.fresh(state.streamId ?? this.streamGateId(name), state.readEpoch ?? 0)));
+  }
   private streamGateId(name: string): number | undefined {
-    try { return this.streamGate?.named(name); } catch { return undefined; }
+    return this.streamGate?.resolveName(name);
   }
   private monitoredOperand(name: string): string | number {
     if (!this.streamGate) return name;
     const state = this.monitoredChannels.get(name);
-    if (state) { this.streamGate.assertFresh(state.streamId, state.readEpoch ?? this.streamGate.checkpoint()); return state.streamId!; }
+    if (state) {
+      const id = state.streamId ?? this.streamGateId(name);
+      this.streamGate.assertFresh(id, state.readEpoch ?? 0);
+      return id!;
+    }
     return this.streamGate.named(name);
   }
 
@@ -446,14 +451,14 @@ export class ZulipToolRuntime {
     if (result.result === "error") {
       // Keep the API code as well as its wording: missing/deleted/inaccessible
       // messages must never fall back to a caller-supplied destination.
-      throw new ZulipRefused(`reply_to ${id}${result.code ? ` (${result.code})` : ""}`, result, false, statusOfAnswer(result));
+      throw new ZulipRefused(`reply_to ${id}${result.code ? ` (${result.code})` : ""}`, { ...result, msg: result.msg ?? "unknown error" }, false, statusOfAnswer(result));
     }
     const message = result.message;
     const unreadable = () => new Error(`reply_to ${id} has no readable destination`);
     if (!message || !["stream", "private"].includes(message.type)) throw unreadable();
     const type = args.type === "direct" ? "private" : args.type === "channel" ? "stream" : args.type;
     if (type !== undefined && type !== message.type) {
-      throw new CallerValidationError("reply_to type disagrees with the referenced message");
+      throw new CallerValidationError(this.streamGate || this.messageIds.mode !== "legacy" ? "reply_to type disagrees with the referenced message" : `reply_to ${id}: type disagrees with the referenced message`);
     }
     if (message.type === "stream") {
       const name = message.display_recipient;
@@ -466,7 +471,7 @@ export class ZulipToolRuntime {
         ? { type: message.type, to: message.stream_id ?? name, topic: message.subject, channelId: channelId ?? named, receipt: { channelId, channel: name, topic: message.subject } }
         : { type: message.type, to: message.stream_id ?? name, topic: args.topic, channelId: channelId ?? named, receipt: { channelId, channel: name } };
     }
-    if (args.topic !== undefined) throw new CallerValidationError("reply_to is a direct message, which has no topic; omit topic");
+    if (args.topic !== undefined) throw new CallerValidationError(this.streamGate || this.messageIds.mode !== "legacy" ? "reply_to is a direct message, which has no topic; omit topic" : `reply_to ${id} is a direct message, which has no topic; omit topic`);
 
     const recipients: ZulipRecipient[] = message.display_recipient;
     if (!Array.isArray(recipients) || recipients.length === 0 || recipients.some((r) => !Number.isSafeInteger(r?.id))) {
@@ -550,7 +555,6 @@ export class ZulipToolRuntime {
 
   private async handleScopedCall(name: string, args: any): Promise<any> {
     if (!toolEnabled(name)) throw new Error(`Unknown tool: ${name}`);
-    this.purgeUnavailable();
     args = { ...(args ?? {}) };
     let warned = false;
     const warning = `Warning: bare message_id accepted; use ${this.messageIds.tag}:<n>.`;
@@ -568,7 +572,7 @@ export class ZulipToolRuntime {
   private async handleValidatedCall(name: string, args: any): Promise<any> {
     const api = this.api;
     if (this.streamGate && ["start_monitoring", "get_channel_history", "get_unread_messages"].includes(name)) {
-      const channels = args.channels ?? (args.channel ? [args.channel] : [...this.monitoredChannels.keys()]);
+      const channels = args.channels ?? (args.channel ? [args.channel] : [...this.visibleMonitoredChannels().keys()]);
       for (const channel of channels) this.monitoredOperand(channel);
     }
     const monitoredChannels = this.monitoredChannels;
@@ -618,7 +622,7 @@ export class ZulipToolRuntime {
 
         return {
           session_id: this.sessionId,
-          monitored_count: monitoredChannels.size,
+          monitored_count: this.visibleMonitoredChannels().size,
           channels: results,
         };
       }
@@ -723,7 +727,7 @@ export class ZulipToolRuntime {
       }
 
       case "get_monitored_channels": {
-        const channels = Array.from(monitoredChannels.values());
+        const channels = Array.from(this.visibleMonitoredChannels().values());
         return {
           monitored_count: channels.length,
           channels: channels.map(c => ({
@@ -809,7 +813,7 @@ export class ZulipToolRuntime {
       }
 
       case "get_unread_messages": {
-        const channelsToCheck = args.channels || Array.from(monitoredChannels.keys());
+        const channelsToCheck = args.channels || Array.from(this.visibleMonitoredChannels().keys());
 
         if (channelsToCheck.length === 0) {
           return {
@@ -1359,7 +1363,6 @@ export class ZulipToolRuntime {
   // ── Resources ──
 
   listResources(): ResourceDescriptor[] {
-    this.purgeUnavailable();
     const resources: ResourceDescriptor[] = [
       {
         uri: "zulip://unread/summary",
@@ -1376,7 +1379,7 @@ export class ZulipToolRuntime {
     ];
 
     // Add a resource for each monitored Zulip channel
-    for (const channel of this.monitoredChannels.keys()) {
+    for (const channel of this.visibleMonitoredChannels().keys()) {
       resources.push({
         uri: `zulip://channel/${channel}/unread`,
         name: `Zulip #${channel} - Unread Messages`,
@@ -1389,12 +1392,11 @@ export class ZulipToolRuntime {
   }
 
   async readResource(uri: string): Promise<ResourceContents> {
-    this.purgeUnavailable();
     return this.streamGate ? this.streamGate.run(() => this.readScopedResource(uri)) : this.readScopedResource(uri);
   }
   private async readScopedResource(uri: string): Promise<ResourceContents> {
     const api = this.api;
-    const monitoredChannels = this.monitoredChannels;
+    const monitoredChannels = this.visibleMonitoredChannels();
 
     // Handle unread summary
     if (uri === "zulip://unread/summary") {
