@@ -160,7 +160,7 @@ export function parseDate(dateStr: string | undefined, defaultDate: Date): Date 
 // Helper function to format messages
 export function formatMessages(messages: any[], format: string, ids: MessageIds = LEGACY_IDS): string {
   if (format === 'raw') {
-    return JSON.stringify(ids.project(messages.map(m => ({ ...m, id: ids.format(m.id) }))), null, 2);
+    return JSON.stringify(ids.mode === 'legacy' ? messages : ids.project(messages.map(m => ({ ...m, id: ids.format(m.id) }))), null, 2);
   }
 
   if (format === 'summary') {
@@ -308,7 +308,7 @@ export class ZulipToolRuntime {
     } catch (err) {
       if (err instanceof ZulipNoAnswer) throw err;
       const text = (err as Error).message;
-      throw new Error(`${text}${/[.!?]$/.test(text) ? "" : "."} list_streams gives each stream's name.`);
+      throw new Error(`${text}${/[.!?]$/.test(text) ? "" : "."} list_streams gives each stream's name.`, { cause: err });
     }
     if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) throw new Error(`Zulip's answer to looking up stream ${JSON.stringify(name)} gave no stream id.`);
     return id;
@@ -390,8 +390,14 @@ export class ZulipToolRuntime {
   purgeUnavailable(key?: import("./channel-key.js").ChannelKey): void {
     if (!this.streamGate) return;
     for (const [name, state] of this.monitoredChannels) {
+      if (key) {
+        // A lane-owned purge must not mutate another channel's retained state
+        // while that other lane still has a read in flight.
+        if (state.streamId !== undefined && streamKey(state.streamId) === key) this.monitoredChannels.delete(name);
+        continue;
+      }
       if (state.streamId === undefined) state.streamId = this.streamGate.allowed(this.streamGateId(name)) ? this.streamGateId(name) : undefined;
-      if ((key && state.streamId !== undefined && streamKey(state.streamId) === key) || state.streamId === undefined || !this.streamGate.fresh(state.streamId, state.readEpoch)) this.monitoredChannels.delete(name);
+      if (state.streamId === undefined || !this.streamGate.fresh(state.streamId, state.readEpoch)) this.monitoredChannels.delete(name);
     }
   }
   private streamGateId(name: string): number | undefined {
@@ -1038,12 +1044,18 @@ export class ZulipToolRuntime {
         const messageId = positiveIdArg("message_id", args.message_id);
         const topic = args.topic ?? undefined;
         const stream = args.stream ?? undefined;
-        if (topic === undefined && stream === undefined) throw new Error("Give a topic, a stream, or both.");
-        if (topic !== undefined && typeof topic !== "string") throw new Error("topic must be a string.");
-        if (stream !== undefined && (typeof stream !== "string" || stream === "")) throw new Error("stream must be a stream's name.");
+        if (topic === undefined && stream === undefined) throw new CallerValidationError("Give a topic, a stream, or both.");
+        if (topic !== undefined && typeof topic !== "string") throw new CallerValidationError("topic must be a string.");
+        if (stream !== undefined && (typeof stream !== "string" || stream === "")) throw new CallerValidationError("stream must be a stream's name.");
         const scope = args.scope;
-        if (typeof scope !== "string" || !Object.hasOwn(MOVE_SCOPES, scope)) throw new Error("scope must be one, later or all.");
+        if (typeof scope !== "string" || !Object.hasOwn(MOVE_SCOPES, scope)) throw new CallerValidationError("scope must be one, later or all.");
         const streamId = stream === undefined ? undefined : await this.streamIdForName(stream);
+        if (this.streamGate) {
+          // Keep upstream's move contract and routing hints; add only read
+          // authorization for the source and the resolved destination.
+          await api.request("GET", `/messages/${messageId}`, 'reading move source', { apply_markdown: false });
+          if (streamId !== undefined) this.streamGate.assert(streamId);
+        }
         await api.request("PATCH", `/messages/${messageId}`, `moving message ${messageId}`, {
           propagate_mode: MOVE_SCOPES[scope],
           ...(topic !== undefined ? { topic } : {}),
@@ -1054,11 +1066,12 @@ export class ZulipToolRuntime {
         try {
           message = (await api.request<{ message?: any }>("GET", `/messages/${messageId}`, `reading message ${messageId} back`)).message;
         } catch (err) {
-          return { moved: true, asked, readBackError: (err as Error).message, note: MOVE_NOTE };
+          if (err instanceof StreamPolicyError) throw err;
+          return { moved: true, asked, readBackError: this.streamGate ? subscribedError(err) : (err as Error).message, note: MOVE_NOTE };
         }
         const name = message?.display_recipient;
         if (message?.type !== "stream" || typeof name !== "string" || name === "" || typeof message.subject !== "string" || !Number.isSafeInteger(message.stream_id) || message.stream_id <= 0) {
-          return { moved: true, asked, readBackError: `Zulip's answer gave no stream and topic for message ${messageId}.`, note: MOVE_NOTE };
+          return { moved: true, asked, readBackError: `Zulip's answer gave no stream and topic for message ${this.messageIds.format(messageId)}.`, note: MOVE_NOTE };
         }
         const answersFollow = stream === undefined && (await this.followOwnMove(messageId, message.stream_id, message.subject, scope));
         return {

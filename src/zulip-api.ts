@@ -59,8 +59,8 @@ export function refusalText(answer: ZulipRefusal): string {
   return answer.msg ? `${answer.msg}${answer.code ? ` (${answer.code})` : ''}` : answer.code ?? 'unknown error';
 }
 
-const HTTP_STATUS = Symbol('zulip-http-status');
-export function statusOfAnswer(answer: object): number | undefined { return (answer as any)[HTTP_STATUS]; }
+const HTTP_STATUS = new WeakMap<object, number>();
+export function statusOfAnswer(answer: object): number | undefined { return HTTP_STATUS.get(answer); }
 
 export class ZulipRefused extends Error {
   readonly code: string | undefined;
@@ -81,7 +81,6 @@ export function mayHaveBeenApplied(err: unknown): boolean {
 export function zulipApi(transport: Transport): ZulipApi {
   const answer = async (method: Method, path: string, params?: Record<string, unknown>, opts?: RequestOptions) => {
     const { status, body } = await transport(method, path, params, opts);
-    if (typeof body === 'object' && body !== null) Object.defineProperty(body, HTTP_STATUS, { value: status, configurable: true });
     if (method !== 'GET' && status >= 500 && isRefusal(body)) {
       const text = body.msg || body.code || 'unknown error';
       return { body: { ...body, msg: `${text}${/[.!?]$/.test(text) ? '' : '.'} ${WRITE_MAY_HAVE_BEEN_APPLIED}` }, serverError: true, status };
@@ -96,7 +95,7 @@ export function zulipApi(transport: Transport): ZulipApi {
     },
     async requestAnswer<T extends object>(method: Method, path: string, params?: Record<string, unknown>, opts?: RequestOptions) {
       const result = await answer(method, path, params, opts);
-      if (typeof result.body === 'object' && result.body !== null) Object.defineProperty(result.body, HTTP_STATUS, { value: result.status, configurable: true });
+      if (typeof result.body === 'object' && result.body !== null) HTTP_STATUS.set(result.body, result.status);
       return result.body as ZulipSuccess<T> | ZulipRefusal;
     },
   };

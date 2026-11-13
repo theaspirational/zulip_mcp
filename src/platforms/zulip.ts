@@ -1091,7 +1091,7 @@ export class ZulipAdapter implements PlatformAdapter {
     const messages = page.messages
       .filter((m) => this.identity.selfUserId === null || m.authorId !== this.identity.selfUserId)
       .filter((m) => this.allowed(m))
-      .map((m) => toIncoming(key, m, this.identity, { backscroll: true, ...(this.streamGate ? { readEpoch: epoch, streamId: m.streamId } : {}) }));
+      .map((m) => toIncoming(key, m, this.identity, { backscroll: true, ...(this.streamGate ? { readEpoch: epoch, streamId: m.streamId, readStreamIds: this.streamGate.dependencies() } : {}) }));
     return {
       messages,
       scannedThrough: page.messages.length > 0 ? page.messages[page.messages.length - 1].id : null,
@@ -1208,6 +1208,7 @@ export class ZulipAdapter implements PlatformAdapter {
         if (placed !== null && current()) this.handOn(raw, m, placed, onMessage);
       });
     }, onSystemEvent, reactionHandler, changeHandler, s => {
+      if (!pollsEnabled() || parsePollSubmessage(s)?.type !== 'vote') return;
       const known = this.cached(s.message_id!);
       const enter = (key: ChannelKey) => onMessage({ key, messageId: `poll:${s.message_id}:${s.id}`, ready: () => this.scopedEntry(s.readEpoch, () => this.onPollSubmessage(s)) });
       if (known && this.placing === 0) return enter(known.key);
@@ -1230,6 +1231,7 @@ export class ZulipAdapter implements PlatformAdapter {
         if (!result) return null;
         const message = ('message' in result ? result.message : result) as KeyedMessage | MessageChangeEvent;
         if (!isDmKey(message.key)) gate.assertFresh(streamIdOfKey(message.key)!, epoch!);
+        if ('movedToKey' in result && result.movedToKey && !isDmKey(result.movedToKey)) gate.assertFresh(streamIdOfKey(result.movedToKey)!, epoch!);
         const fields = { readEpoch: epoch, readStreamIds: gate.dependencies() };
         if ('message' in result) result.message = { ...result.message, metadata: { ...result.message.metadata as object, ...fields } };
         else Object.assign(result, fields);
@@ -1243,7 +1245,17 @@ export class ZulipAdapter implements PlatformAdapter {
     // Remember our own messages too: reactions to them are the ones that
     // matter most ("someone reacted to your message").
     this.remember(key, m);
-    if (this.identity.selfUserId !== null && m.authorId === this.identity.selfUserId) return;
+    if (this.identity.selfUserId !== null && m.authorId === this.identity.selfUserId) {
+      if (process.env.ZULIP_ACTIVE_TOPICS === '1' && !m.isDm && m.streamId !== null) onMessage({
+        key, messageId: `topics:${m.id}`, ready: async () => {
+          if (!this.streamGate || this.streamGate.fresh(m.streamId!, (raw as any).readEpoch)) {
+            this.activeTopics.observe(m.streamId!, m.topic, m.id, m.timestamp.toISOString());
+          }
+          return null;
+        },
+      });
+      return;
+    }
     if (m.isDm) {
       if (!this.filters.dmAllowed({ id: m.authorId, email: m.authorEmail })) {
         console.error(`[zulip-mcp] dropping DM from ${m.authorEmail} (${m.authorId}): not in the dmUsers allowlist`);

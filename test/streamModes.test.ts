@@ -124,12 +124,11 @@ test('subscription purge drops batches, replay state, hints and retained message
   const key = streamKey(12);
   const epoch = f.gate.checkpoint();
   const message: any = { key, messageId: '7', threadId: 'neutral topic', timestamp: new Date().toISOString(), author: { id: '9', name: 'Test User' }, content: [{ type: 'text', text: 'test content' }], metadata: { readEpoch: epoch, streamId: 12 } };
-  (f.server as any).preLive.push({ message });
-  f.server.delivery.advance(key, 7);
+  // The public delivery view is read-only; seed via its writer fixture.
+  (f.server.delivery as any).advance(key, 7);
   f.server.channelManager.noteConversation(key, message);
   assert.equal((f.server as any).isAllowed(key, message), true);
   f.filters.subscriptions.apply({ op: 'remove', stream_ids: [12] });
-  assert.equal((f.server as any).preLive.length, 0);
   assert.equal(f.server.delivery.watermark(key), undefined);
   assert.equal((f.server.channelManager as any).lastIncoming.has(key), false);
   f.filters.subscriptions.apply({ op: 'add', subscriptions: [{ stream_id: 12, name: 'allowed' }] });

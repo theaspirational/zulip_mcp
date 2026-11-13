@@ -77,9 +77,9 @@ test('results and idempotent/toggle voting always read fresh and keep API IDs nu
 test('each vote notification uses its own fresh placement, even for a cached poll after a move', async t => {
   const f = fixture(t);
   const events: any[] = [];
-  await (f.adapter as any).onPollSubmessage(vote(2), (m: any) => events.push(m));
+  events.push((await (f.adapter as any).onPollSubmessage(vote(2)))!.message);
   f.setMessage(raw({ stream_id: 13, display_recipient: 'other', subject: 'moved', sender_id: 9 }));
-  await (f.adapter as any).onPollSubmessage(vote(3), (m: any) => events.push(m));
+  events.push((await (f.adapter as any).onPollSubmessage(vote(3)))!.message);
   assert.equal(f.calls.filter(c => c.path === '/messages/77').length, 2);
   assert.deepEqual(events.map(m => m.key), ['s:12', 's:13']);
   assert.ok(events[0].tags.includes('chat:addressed'));
@@ -87,7 +87,7 @@ test('each vote notification uses its own fresh placement, even for a cached pol
   assert.equal(events[1].threadId, 'moved');
   assert.equal(events[0].messageId, 'poll:77:2');
   f.setMessage(raw({ submessages: [] }));
-  await (f.adapter as any).onPollSubmessage(vote(4), (m: any) => events.push(m));
+  assert.equal(await (f.adapter as any).onPollSubmessage(vote(4)), null);
   assert.equal(events.length, 2, 'no stale reducer or route on unreadable/unsupported widget');
 });
 

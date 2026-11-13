@@ -167,6 +167,8 @@ type Reading = ReadContext<DeliveryWriter>;
 type Hand = Job<DeliveryWriter>;
 
 interface HistoryRead {
+  readEpoch?: number;
+  readStreamIds?: number[];
   messages: KeyedMessage[];
   truncated: boolean;
   complete: boolean;
@@ -323,16 +325,15 @@ export class ZulipMcplServer {
       });
       this.tools.setStreamReadPolicy(this.streamGate);
       this.adapter.setStreamReadPolicy?.(this.streamGate);
+      const policyIds = new Set(plane.subscriptions.status().streams.map(s => s.id));
       const changed = () => {
         // Authorization changes synchronously; cleanup is a writer job on the
         // very same lane as a held read, a message, reaction, or poll vote.
         this.streamGate!.policyChanged();
         const keys = new Set<ChannelKey>(this.lanes?.keys() ?? []);
         for (const key of delivery.watermarkedChannels()) keys.add(key);
-        for (const d of this.channelManager.listChannels().channels) {
-          const key = this.ids.keyOfDescriptor(d);
-          if (key) keys.add(key);
-        }
+        for (const { id } of plane.subscriptions.status().streams) policyIds.add(id);
+        for (const id of policyIds) keys.add(streamKey(id));
         for (const key of keys) {
           if (isDmKey(key) || this.streamGate!.allowed(streamIdOfKey(key)!)) continue;
           const purge = () => {
@@ -345,6 +346,7 @@ export class ZulipMcplServer {
             }
             this.channelManager.purgeUnavailable(keep);
             delivery.purgeUnavailable(keep);
+            delivery.save();
             this.tools.purgeUnavailable(key);
             this.adapter.purgeUnavailable?.(key);
           };
@@ -1118,6 +1120,7 @@ export class ZulipMcplServer {
     let moved = false;
     let high = 0;
     for (const m of accepted) {
+      if (this.streamGate && !this.isAllowed(key, m)) continue;
       const id = numericId(m);
       if (id === null) continue;
       moved = w.delivery.release(key, id) || moved;
@@ -1207,7 +1210,7 @@ export class ZulipMcplServer {
       }
       if (id !== null && (message.metadata as Record<string, unknown> | undefined)?.replyToSelf === true) ctx.w.delivery.verifyReply(key, id);
       return this.route(ctx, message, newChannel);
-    }, { kind: 'message', ...(id !== null ? { id } : {}) });
+    }, id === null ? { kind: 'other' } : { kind: 'message', id });
   }
 
   private letGo(w: DeliveryWriter, key: ChannelKey, id: number): void {
@@ -1231,6 +1234,7 @@ export class ZulipMcplServer {
     const key = message.key;
     const id = Number(message.messageId);
     const meta = (typeof message.metadata === 'object' && message.metadata !== null ? message.metadata : {}) as Record<string, unknown>;
+    if (meta.pollVote === true && !this.grant.isFeatureSetActive(MESSAGING_FEATURE_SET)) return;
     const addressed = meta.mentioned === true || meta.isDM === true || meta.replyToSelf === true;
 
     // Muted stream, or outside the allowlist: nothing reaches the agent —
@@ -1314,6 +1318,7 @@ export class ZulipMcplServer {
 
     if (addressed) {
       const answered = (w: DeliveryWriter, delivered: boolean) => {
+        if (this.streamGate && !this.isAllowed(key, message)) return this.letGo(w, key, id);
         if (delivered) {
           // The agent's answer goes back through channels/publish, so it goes
           // to this message's topic, as an answer on an open channel does.
@@ -1567,39 +1572,43 @@ export class ZulipMcplServer {
     throughId?: number,
     quoteLookupBudget?: { remainingMs: number },
   ): Promise<HistoryRead> {
-    const out: KeyedMessage[] = [];
-    const unverified = new Set<number>();
-    let cursor = afterId;
-    let complete = false;
-    while (out.length < this.catchupLimit) {
-      if (!r.reading) throw new Error(`a read of ${this.label(key)}'s history after its job gave the turn back`);
-      const want = this.catchupLimit - out.length;
-      const page = await this.adapter.fetchHistory!(key, { limit: want, afterMessageId: String(cursor), quoteLookupBudget, timeoutMs: LONG_TIMEOUT_MS });
-      if (page.scannedThrough === null) {
-        complete = true;
-        break;
+    return this.scopedRead(async () => {
+      const readEpoch = this.streamGate?.checkpoint();
+      if (this.streamGate && !isDmKey(key)) this.streamGate.assert(streamIdOfKey(key)!);
+      const out: KeyedMessage[] = [];
+      const unverified = new Set<number>();
+      let cursor = afterId;
+      let complete = false;
+      while (out.length < this.catchupLimit) {
+        if (!r.reading) throw new Error(`a read of ${this.label(key)}'s history after its job gave the turn back`);
+        const want = this.catchupLimit - out.length;
+        const page = await this.adapter.fetchHistory!(key, { limit: want, afterMessageId: String(cursor), quoteLookupBudget, timeoutMs: LONG_TIMEOUT_MS });
+        if (page.scannedThrough === null) {
+          complete = true;
+          break;
+        }
+        for (const id of page.unverifiedMessageIds ?? []) {
+          const numeric = Number(id);
+          if (Number.isFinite(numeric) && !this.delivery.verifiedReply(key, numeric)) unverified.add(numeric);
+        }
+        out.push(...page.messages.map((message) => {
+          if (!this.delivery.verifiedReply(key, Number(message.messageId))) return message;
+          return {
+            ...message,
+            tags: [...new Set([...(message.tags ?? []).filter((tag) => tag !== CHAT_TAGS.ambient), CHAT_TAGS.reply])],
+            metadata: { ...(message.metadata as Record<string, unknown>), replyToSelf: true, isMention: true, isReplyToBot: true },
+          };
+        }));
+        if (page.scannedThrough <= cursor) break;
+        cursor = page.scannedThrough;
+        if (page.reachedNewest || (throughId !== undefined && cursor >= throughId)) {
+          complete = true;
+          break;
+        }
       }
-      for (const id of page.unverifiedMessageIds ?? []) {
-        const numeric = Number(id);
-        if (Number.isFinite(numeric) && !this.delivery.verifiedReply(key, numeric)) unverified.add(numeric);
-      }
-      out.push(...page.messages.map((message) => {
-        if (!this.delivery.verifiedReply(key, Number(message.messageId))) return message;
-        return {
-          ...message,
-          tags: [...new Set([...(message.tags ?? []).filter((tag) => tag !== CHAT_TAGS.ambient), CHAT_TAGS.reply])],
-          metadata: { ...(message.metadata as Record<string, unknown>), replyToSelf: true, isMention: true, isReplyToBot: true },
-        };
-      }));
-      if (page.scannedThrough <= cursor) break;
-      cursor = page.scannedThrough;
-      if (page.reachedNewest || (throughId !== undefined && cursor >= throughId)) {
-        complete = true;
-        break;
-      }
-    }
-    // Not complete: the ceiling (or a bound) stopped the walk with more beyond the newest id scanned.
-    return { messages: out, truncated: !complete, complete, scannedThrough: cursor > afterId ? cursor : null, unverifiedMessageIds: [...unverified].sort((a, b) => a - b) };
+      // Not complete: the ceiling (or a bound) stopped the walk with more beyond the newest id scanned.
+      return { ...(this.streamGate ? { readEpoch, readStreamIds: this.streamGate.dependencies() } : {}), messages: out, truncated: !complete, complete, scannedThrough: cursor > afterId ? cursor : null, unverifiedMessageIds: [...unverified].sort((a, b) => a - b) };
+    });
   }
 
   /**
@@ -1652,8 +1661,15 @@ export class ZulipMcplServer {
     }
   }
 
+  private historyAllowed(key: ChannelKey, fetched: HistoryRead): boolean {
+    if (!this.streamGate) return true;
+    if (!isDmKey(key) && !this.streamGate.fresh(streamIdOfKey(key)!, fetched.readEpoch)) return false;
+    return (fetched.readStreamIds ?? []).every(id => this.streamGate!.fresh(id, fetched.readEpoch));
+  }
+
   private handCatchUp(ctx: Ctx, key: ChannelKey, read: CatchUpRead, pass: CatchUpPass, window?: { through: number; truncated: boolean }, second?: CatchUpPass): void {
     const { after, fetched } = pass;
+    if (fetched && !this.historyAllowed(key, fetched)) return;
     if (!fetched) {
       read.onAttempt?.(ctx.w, Infinity); // A history failure counts as the held read's attempt, unlike a local policy abort.
       return;
@@ -1720,7 +1736,7 @@ export class ZulipMcplServer {
           ...(addressedCount === 0 ? [CHAT_TAGS.ambient] : []),
         ]),
       ],
-      metadata: { missed: true, topic: undefined, mentioned: mentionCount > 0, replyToSelf: replyCount > 0, isDM: isDmKey(key) },
+      metadata: { ...(this.streamGate ? { readEpoch: fetched.readEpoch, readStreamIds: fetched.readStreamIds } : {}), missed: true, topic: undefined, mentioned: mentionCount > 0, replyToSelf: replyCount > 0, isDM: isDmKey(key) },
     };
     let offered = false;
     const firstId = kept[0].id;
@@ -1737,6 +1753,7 @@ export class ZulipMcplServer {
       if (read.onAttempt) ctx.w.delivery.markReplayed(key, shownIds);
     });
     const answered = (w: DeliveryWriter, ok: boolean) => {
+      if (!this.historyAllowed(key, fetched)) return;
       if (ok) {
         // Advance past everything scanned, not just what was delivered, so a
         // mention-only channel does not re-surface its non-mention tail; the

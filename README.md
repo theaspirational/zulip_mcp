@@ -702,3 +702,10 @@ and tell you to escape a literal with a backslash (`\[[msg:literal]]`), or put
 it in code. Upstream numeric-token backslash behavior is unchanged. Remote
 failures expose only safe Zulip code/HTTP status, network, timeout or internal
 categories—not response text, stream identities, topics or content.
+
+The ports target upstream 3.0.0’s per-channel delivery lane: poll content reads
+and stream-revocation cleanup cannot pass a running job on their channel.
+Upstream `move_messages(message_id, stream?, topic?, scope)` remains always
+available; the old fork move implementation and `ZULIP_MOVE_MESSAGES` flag are
+not used. Realm IDs and subscribed-mode source/destination checks compose with
+the upstream tool without changing its fields or receipt.

@@ -25,16 +25,21 @@ invalidate permitted reads.
 | Surface | Boundary |
 | --- | --- |
 | History, topics, reply targets, links, polls | native API preflight and response checks, outer tool scope |
-| Monitoring/status/resources | ID-pinned monitoring state, synchronous purge and outer resource scope |
+| Monitoring/status/resources | ID-pinned monitoring state, lane-owned purge and outer resource scope |
 | Stream descriptors and channel lists | ID-based final projection, no cached read authority |
 | Context and open history | whole-result read scope and final recheck |
-| Live/pre-live/batched/replayed messages | epoch metadata and final delivery check |
+| Live/lane-queued/batched/replayed messages | epoch metadata and final delivery check |
 | Vote, reaction and edit notifications | source/destination authorization and retained-event epochs |
 | Attachments | required `message_id`, fresh authorized source and exact attachment match |
 | System notices | no cross-stream message anchors; generic continuity notice |
 
-Revocation synchronously purges pending/batched messages, conversation hints,
-replay cursors/tallies, adapter placement/topic caches and monitoring metadata.
+Revocation synchronously closes the ID-based read gate. Cleanup of pending/batched
+messages, conversation hints, replay cursors/tallies, adapter placement/topic caches
+and monitoring metadata runs as a writer job on the affected channel’s delivery
+lane, after its running job. Per-ID epochs fence reads and late host answers
+across unsubscribe/regrant while that cleanup waits. Poll votes enter the same
+lane; each fresh content/placement GET starts at its turn. A changed placement
+re-enters the destination lane before delivery.
 Directory identity mappings remain upstream-owned; their presence never grants
 read authority. Stream/user/channel IDs and persistence formats remain numeric.
 This is read confinement, not a blanket write ban: a standalone send without a
@@ -47,5 +52,9 @@ from `filters_get`. Subscription event registration is restricted to explicit
 `subscribed`/`public` mode. Attachment `message_id` provenance is exposed only
 in subscribed mode; it is not a move-tool schema change.
 Poll tools/vote events/submessage registration require `ZULIP_POLLS=1`;
-`move_messages` requires `ZULIP_MOVE_MESSAGES=1`; active-topic hints require
-`ZULIP_ACTIVE_TOPICS=1`. All three default off.
+active-topic hints require `ZULIP_ACTIVE_TOPICS=1`. Both default off.
+`move_messages` is upstream’s unconditional tool (`stream`/`topic`/`scope`),
+not the old fork’s `stream_id`/`propagate_mode` tool. In subscribed mode its
+source and resolved destination are gated before the native PATCH. Realm-tagged
+anchors are decoded before I/O; upstream routing-hint updates and receipt shape
+are retained. `ZULIP_MOVE_MESSAGES` has no effect.

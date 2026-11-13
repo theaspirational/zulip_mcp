@@ -13,7 +13,7 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 
 ## Unreleased (fork ports)
 
-- Preserve the upstream default tools/list byte-for-byte and original tests. Poll tools/vote events/submessage registration require `ZULIP_POLLS=1`; moves require `ZULIP_MOVE_MESSAGES=1`; active-topic hints require `ZULIP_ACTIVE_TOPICS=1` (optional `ZULIP_ACTIVE_TOPICS_LIMIT`, default 6). Unset stream mode omits `streamsMode`; subscription events require subscribed/public mode. Legacy literal tokens pass through unchanged.
+- Preserve the upstream default tools/list byte-for-byte and original tests. Poll tools/vote events/submessage registration require `ZULIP_POLLS=1`; native upstream moves remain unconditional; active-topic hints require `ZULIP_ACTIVE_TOPICS=1` (optional `ZULIP_ACTIVE_TOPICS_LIMIT`, default 6). Unset stream mode omits `streamsMode`; subscription events require subscribed/public mode. Legacy literal tokens pass through unchanged.
 - Enforce strict/compat realm tokens in channel publishing before I/O, and retain subscribed-policy refusal text through wrapped topic/link errors.
 
 - Add opt-in realm-tagged message IDs (`ZULIP_REALM_TAG`, `ZULIP_ID_MODE`).
@@ -21,3 +21,5 @@ Releases up to and including 2.2.1 predate this file; for their contents see
 - Port `send_poll`, `get_poll_results`, fresh-placement vote events, and `vote_poll` to upstream's native API; preserve feature-set and comms classifications.
 - Port `ZULIP_STREAMS_MODE=list|subscribed|public`, subscription refresh/events, ID-pinned StreamReadGate and revocation purge across tool, resource, context and delivery boundaries.
 - Fix subscribed-mode errors: typed policy refusals retain their wording; caller validation (including literal-token escaping) stays actionable; remote/transport/internal failures use non-leaking categories.
+
+- Rebase the ports onto upstream 3.0.0: preserve the per-channel writer lane for poll votes, revocation cleanup and late host answers; use upstream move parameters and receipts (no fork move implementation).
