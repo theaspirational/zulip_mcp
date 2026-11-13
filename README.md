@@ -648,3 +648,12 @@ cross-realm message-ID confusion. Default `legacy` keeps upstream behavior.
 Compat accepts bare IDs with a warning; strict requires `alpha:123`, including
 `[[msg:alpha:123]]` links. Stream/user/channel IDs and saved cursors stay unchanged.
 See [realm IDs](docs/realm-ids.md).
+
+### Active-topic event hints
+
+Incoming stream events include a bounded, best-effort `[active topics]` hint
+and `metadata.activeTopics` after the cache warms. The default is six topics;
+`ZULIP_ACTIVE_TOPICS=0` disables hints. `ZULIP_ACTIVE_TOPICS_TTL_MS` controls
+refresh/repeat suppression (default 60000). Delivery never waits for the
+background topics GET. Moves invalidate snapshots. `get_stream_topics` remains
+the upstream tool for an explicit fresh topic listing.

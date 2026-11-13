@@ -38,6 +38,7 @@ import type {
 import { ZulipEventLoop, type ZulipMessageChange } from './zulip-events.js';
 import { cleanMarkdown } from '../content.js';
 import { namePosted, NothingToSend, SendRefused, sendMessage, ZULIP_MAX_MESSAGE_LENGTH, type Destination } from '../outgoing.js';
+import { ActiveTopicsCache } from '../active-topics.js';
 import { LEGACY_IDS, type MessageIds } from '../message-ids.js';
 import { messageLineHead } from '../message-line.js';
 import { agentLineTimeFormatter } from '../timezone.js';
@@ -161,6 +162,8 @@ export interface FilterView {
 const ALLOW_ALL: FilterView = { streamAllowed: () => true, dmAllowed: () => true };
 
 export interface ZulipAdapterOptions {
+  activeTopics?: number;
+  activeTopicsTtlMs?: number;
   messageIds?: MessageIds;
   /** Backscroll cap advertised per channel and enforced on channels/open. */
   backscrollDefault?: number;
@@ -232,6 +235,7 @@ export class ZulipAdapter implements PlatformAdapter {
   private listRead: Promise<boolean> | null = null;
   /** Messages just moved to a stream the bot cannot see, by id → when: the
    *  delete event Zulip sends for lost visibility is a vanishing, not a deletion. */
+  private readonly activeTopics: ActiveTopicsCache;
   private readonly messageIds: MessageIds;
   private movedAway = new Map<number, number>();
   private readonly changeOf = new WeakMap<ChangeEntry, ZulipMessageChange>();
@@ -244,6 +248,7 @@ export class ZulipAdapter implements PlatformAdapter {
     sessionId: string,
     options: ZulipAdapterOptions = {},
   ) {
+    this.activeTopics = new ActiveTopicsCache(this.api, options.activeTopics, Date.now, options.activeTopicsTtlMs);
     this.messageIds = options.messageIds ?? LEGACY_IDS;
     this.identity = { selfUserId, sessionId };
     this.backscrollDefault = options.backscrollDefault ?? DEFAULT_BACKSCROLL;
@@ -573,6 +578,8 @@ export class ZulipAdapter implements PlatformAdapter {
    * deleted DM the cache never saw cannot be placed and is dropped.
    */
   private async onZulipChange(change: ZulipMessageChange, located?: SeenMessage, only?: readonly number[]): Promise<MessageChangeEvent | null> {
+    this.activeTopics.invalidate(change.streamId);
+    if (change.kind === "edit" && change.newStreamId !== null) this.activeTopics.invalidate(change.newStreamId);
     const self = this.identity.selfUserId;
     if (change.kind === 'edit') {
       // A cache miss GETs the message as it reads NOW. For a content edit
@@ -1204,6 +1211,7 @@ export class ZulipAdapter implements PlatformAdapter {
       return null;
     }
     if (!this.streamAllowed(streamId)) return null;
+    this.activeTopics.observe(streamId, m.topic, m.id, m.timestamp.toISOString());
     m.replyToSelf = await this.classifyQuoteReply(m) === 'reply';
     const cached = this.seen.get(m.id);
     if (cached) cached.replyToSelf = m.replyToSelf;
@@ -1215,7 +1223,7 @@ export class ZulipAdapter implements PlatformAdapter {
     // never confirmed must be offered again rather than held back by
     // adapter-side memory.
     const newChannel = this.streamDescriptor(streamId);
-    return { message: toIncoming(key, m, this.identity), ...(newChannel ? { newChannel } : {}) };
+    return { message: this.activeTopics.decorate(toIncoming(key, m, this.identity), streamId), ...(newChannel ? { newChannel } : {}) };
   }
 
   stopEvents(): void {
