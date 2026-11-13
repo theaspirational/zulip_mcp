@@ -131,7 +131,7 @@ async function main(): Promise<void> {
     formatTime,
     uploader,
     uploadPolicy,
-    activeTopics: intEnv('ZULIP_ACTIVE_TOPICS', 6),
+    activeTopics: process.env.ZULIP_ACTIVE_TOPICS === '1' ? intEnv('ZULIP_ACTIVE_TOPICS_LIMIT', 6) : 0,
     activeTopicsTtlMs: intEnv('ZULIP_ACTIVE_TOPICS_TTL_MS', 60_000, 1),
     backscrollDefault: intEnv('ZULIP_BACKSCROLL_DEFAULT', DEFAULT_BACKSCROLL),
     backscrollLimits: parseBackscrollLimits(process.env.ZULIP_BACKSCROLL_CHANNELS),

@@ -41,10 +41,6 @@ export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
   send_dm: ['comms', 'files'],
   upload_file: ['comms', 'files'],
   // Messages, and the people, streams and emoji around them.
-  send_poll: ['comms'],
-  get_poll_results: ['comms'],
-  vote_poll: ['comms'],
-  move_messages: ['comms'],
   edit_message: ['comms'],
   delete_message: ['comms'],
   add_reaction: ['comms'],
@@ -75,6 +71,10 @@ export const TOOL_CLASSES: Record<string, readonly ToolClass[]> = {
   channel_missed: ['control'],
 };
 
+const OPTIONAL_TOOL_CLASSES: Readonly<Record<string, readonly ToolClass[]>> = {
+  send_poll: ['comms'], get_poll_results: ['comms'], vote_poll: ['comms'], move_messages: ['comms'],
+};
+
 /** Tools deliberately left without a class. None today. */
 export const UNCLASSED: ReadonlySet<string> = new Set<string>();
 
@@ -84,7 +84,8 @@ export function withToolClasses<T extends { name: string; _meta?: Record<string,
   tools: readonly T[],
 ): T[] {
   return tools.map((tool) => {
-    if (!Object.hasOwn(TOOL_CLASSES, tool.name)) return tool;
-    return { ...tool, _meta: { ...tool._meta, 'mcpl/class': [...TOOL_CLASSES[tool.name]] } };
+    const classes = Object.hasOwn(TOOL_CLASSES, tool.name) ? TOOL_CLASSES[tool.name] : Object.hasOwn(OPTIONAL_TOOL_CLASSES, tool.name) ? OPTIONAL_TOOL_CLASSES[tool.name] : undefined;
+    if (!classes) return tool;
+    return { ...tool, _meta: { ...tool._meta, 'mcpl/class': [...classes] } };
   });
 }

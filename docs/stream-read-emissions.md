@@ -39,3 +39,13 @@ Directory identity mappings remain upstream-owned; their presence never grants
 read authority. Stream/user/channel IDs and persistence formats remain numeric.
 This is read confinement, not a blanket write ban: a standalone send without a
 reply or link can still use the bot's write permission.
+
+## Opt-in surface
+
+Unset `ZULIP_STREAMS_MODE` preserves upstream behavior and omits `streamsMode`
+from `filters_get`. Subscription event registration is restricted to explicit
+`subscribed`/`public` mode. Attachment `message_id` provenance is exposed only
+in subscribed mode; it is not a move-tool schema change.
+Poll tools/vote events/submessage registration require `ZULIP_POLLS=1`;
+`move_messages` requires `ZULIP_MOVE_MESSAGES=1`; active-topic hints require
+`ZULIP_ACTIVE_TOPICS=1`. All three default off.

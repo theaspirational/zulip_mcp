@@ -1,3 +1,4 @@
+import { movesEnabled, toolEnabled } from './features.js';
 import { moveDestination, type ConfirmedMove } from './moves.js';
 import type { ChannelKey } from './channel-key.js';
 import { CallerValidationError, StreamPolicyError, subscribedError } from './tool-errors.js';
@@ -471,6 +472,7 @@ export class ZulipToolRuntime {
   }
 
   private async handleScopedCall(name: string, args: any): Promise<any> {
+    if (!toolEnabled(name)) throw new Error(`Unknown tool: ${name}`);
     this.purgeUnavailable();
     args = { ...(args ?? {}) };
     let warned = false;
@@ -958,7 +960,7 @@ export class ZulipToolRuntime {
 
       case "edit_message": {
         const messageId = positiveIdArg("message_id", args.message_id);
-        if (args.topic !== undefined || args.stream_id !== undefined || args.propagate_mode !== undefined) throw new CallerValidationError("use move_messages for topic or stream moves");
+        if (movesEnabled() && (args.topic !== undefined || args.stream_id !== undefined || args.propagate_mode !== undefined)) throw new CallerValidationError("use move_messages for topic or stream moves");
         if (typeof args.content !== "string") throw new CallerValidationError("content must be a string");
         const edited = async (): Promise<Audience> => {
           const { message } = await api.request<{ message?: { type?: unknown; stream_id?: unknown } }>("GET", `/messages/${messageId}`, `reading message ${messageId}`, { apply_markdown: false, allow_empty_topic_name: true });

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -88,3 +88,8 @@ test('confirmation failure returns success with unresolved receipt and no automa
   await assert.rejects(g.tools.handleToolCall('move_messages', { message_id: 'alpha:7', topic: 'new' }));
   assert.equal((g.manager as any).moveRefusals.has(streamKey(12)), true);
 });
+
+// These tests explicitly exercise the opt-in surface, never the default one.
+const previousFlag = process.env.ZULIP_MOVE_MESSAGES;
+before(() => { process.env.ZULIP_MOVE_MESSAGES = '1'; });
+after(() => { if (previousFlag === undefined) delete process.env.ZULIP_MOVE_MESSAGES; else process.env.ZULIP_MOVE_MESSAGES = previousFlag; });

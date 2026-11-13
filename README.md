@@ -604,14 +604,17 @@ See [realm IDs](docs/realm-ids.md).
 
 ### Active-topic event hints
 
-Incoming stream events include a bounded, best-effort `[active topics]` hint
-and `metadata.activeTopics` after the cache warms. The default is six topics;
-`ZULIP_ACTIVE_TOPICS=0` disables hints. `ZULIP_ACTIVE_TOPICS_TTL_MS` controls
+Set `ZULIP_ACTIVE_TOPICS=1` to include bounded, best-effort `[active topics]` hints
+and `metadata.activeTopics` after the cache warms. Hints are off by default.
+`ZULIP_ACTIVE_TOPICS_LIMIT` sets the cap (default six topics). `ZULIP_ACTIVE_TOPICS_TTL_MS` controls
 refresh/repeat suppression (default 60000). Delivery never waits for the
 background topics GET. Moves invalidate snapshots. `get_stream_topics` remains
 the upstream tool for an explicit fresh topic listing.
 
 ### Polls
+
+Set `ZULIP_POLLS=1` to enable all three poll tools, vote notifications and
+submessage event registration. They are absent/off by default.
 
 - `send_poll`: `question`, at least two single-line `options`, and the same
   `type`/`to`/`topic` or `reply_to` destination as upstream `send_message`.
@@ -631,7 +634,10 @@ back to `user <id>` when the directory is unavailable.
 
 ### Stream scope modes
 
-`ZULIP_STREAMS_MODE=list` (default) keeps upstream allowlist behavior.
+Unset `ZULIP_STREAMS_MODE` keeps upstream behavior exactly, including the
+`filters_get` response (no `streamsMode` field). Explicit `list` keeps upstream
+allowlist behavior. Subscription events are registered only in `subscribed`
+or `public` mode.
 `subscribed` confines stream reads/delivery to current subscriptions, intersected
 with the stream allowlist and mutes; unknown membership fails closed. `public`
 ignores the stream list but keeps mutes and DM restrictions. Public mode cannot
@@ -644,13 +650,15 @@ requires the source `message_id`. `channels/open` never silently subscribes.
 See [read boundaries](docs/stream-read-emissions.md) for the surface inventory.
 
 Subscribed-mode tool errors distinguish policy from caller validation and
-transport failure. Malformed active message-link tokens fail before any POST
+transport failure. In compat/strict ID modes, malformed active message-link tokens fail before any POST
 and tell you to escape a literal with a backslash (`\[[msg:literal]]`), or put
 it in code. Upstream numeric-token backslash behavior is unchanged. Remote
 failures expose only safe Zulip code/HTTP status, network, timeout or internal
 categories—not response text, stream identities, topics or content.
 
 ### Moving messages
+
+Set `ZULIP_MOVE_MESSAGES=1` to enable this tool; it is absent/off by default.
 
 `move_messages(message_id, topic?, stream_id?, propagate_mode?)` uses upstream's
 native API. Scope is `change_one` by default, `change_later` for this and later
